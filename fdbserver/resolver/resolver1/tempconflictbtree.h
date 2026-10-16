@@ -54,8 +54,6 @@ public:
 
 	// Writes are sorted, disjoint intervals from accepted transactions.
 	// All writes share cv, which must be nondecreasing between calls.
-	// Returns the number of intervals completely applied. Any remaining
-	// suffix is left unapplied; an individual interval must not be partial.
 	void addWrites(
 		const std::span<const std::pair<StringRef, StringRef>> writes,
 		Version cv);
@@ -77,7 +75,7 @@ private:
 		const StringRef& key,
 		LeafBlock*& leaf,
 		std::size_t& rank) const;
-	void TempConflictBTree::addWrite(
+	void addWrite(
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);
 };

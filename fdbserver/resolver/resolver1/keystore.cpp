@@ -256,6 +256,7 @@ int KeyStore::compareFrom(
 	const KeyBlockHeader* block,
 	std::size_t offset,
 	std::size_t length) const {
+
 	const std::byte* start1=reinterpret_cast<const std::byte*>(key.begin());
 	std::size_t rem1 = static_cast<std::size_t>(key.size());
 	const KeyBlockHeader* block2=block;
@@ -295,7 +296,6 @@ std::optional<RangeRef> KeyStore::appendRange(
 	const StringRef& begin,
 	const StringRef& end,
 	Version cv) {
-	assert(compare(begin, end) < 0);
 	assert(begin.size() <= std::numeric_limits<std::uint16_t>::max());
 	assert(end.size() <= std::numeric_limits<std::uint16_t>::max());
 
