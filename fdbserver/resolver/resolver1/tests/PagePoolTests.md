@@ -21,7 +21,7 @@ the scope of this component. Their use of the pool is validated in
   |---|---|
   | `pagepool.cpp` | `7506a3e1f65b263a` |
   | `pagepool.h` | `b6549ed8ffe91ea8` |
-  | `common.h` | `a8a56ac7d8dda8dd` |
+  | `common.h` | `0a0b864acb86c330` |
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `246b6c0baf2b6a99` |
@@ -75,8 +75,8 @@ rm -rf build/coverage-llvm && mkdir -p build/coverage-llvm
 g++ -I. -std=c++20 -Wall -Wextra -Wpedantic -O0 -fprofile-instr-generate -fcoverage-mapping -fcoverage-compilation-dir=. pagepool.cpp keystore.cpp bnodestore.cpp testmain.cpp tests/*.cpp -o build/coverage-llvm/tests.exe
 LLVM_PROFILE_FILE=build/coverage-llvm/pagepool.profraw build/coverage-llvm/tests.exe /resolver/PagePool
 xcrun llvm-profdata merge -o build/coverage-llvm/pagepool.profdata build/coverage-llvm/pagepool.profraw
-xcrun llvm-cov report build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/pagepool.profdata '-ignore-filename-regex=(keystore|bnodestore|test)' > build/coverage-llvm/pagepool-llvm-report.txt
-xcrun llvm-cov show build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/pagepool.profdata -show-branches=count '-ignore-filename-regex=(keystore|bnodestore|test)' > build/coverage-llvm/pagepool-llvm-show.txt
+xcrun llvm-cov report build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/pagepool.profdata '-ignore-filename-regex=(keystore|bnodestore|fdbcompat|test)' > build/coverage-llvm/pagepool-llvm-report.txt
+xcrun llvm-cov show build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/pagepool.profdata -show-branches=count '-ignore-filename-regex=(keystore|bnodestore|fdbcompat|test)' > build/coverage-llvm/pagepool-llvm-show.txt
 ```
 
 Only the PagePool tests are run, so the KeyStore and BNodeStore tests,

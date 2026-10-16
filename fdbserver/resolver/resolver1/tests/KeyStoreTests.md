@@ -9,12 +9,15 @@ construction, all-or-nothing reservation of the blocks a key needs,
 including a new open block,
 recovery after pool exhaustion, oldest-first reclamation, `maxCV` tracking,
 generation-based validity of key references, and byte-wise lexicographic
-comparison of stored keys.
+comparison of stored keys with each other and of an external contiguous
+key (`StringRef`) with a stored key.
 
 Outside the scope of this component: `PagePool` itself (see
 [PagePoolTests.md](PagePoolTests.md)), the choice of the commit-version
 cutoff for reclamation, which belongs to the caller, the B+ tree that
-holds key references, and concurrent access. The rule that no
+holds key references, and concurrent access. `fdbcompat.h` provides
+stand-ins for FoundationDB types (`StringRef`) so that the component
+builds without `flow`; it is not measured as part of this component. The rule that no
 reclamation may occur while key bytes are being accessed is a caller
 contract and is not tested here.
 
@@ -25,15 +28,16 @@ contract and is not tested here.
 
   | File | SHA-256 |
   |---|---|
-  | `keystore.cpp` | `97e9cb25cb0f1817` |
-  | `keystore.h` | `3be7f82e1ffb18ec` |
-  | `common.h` | `a8a56ac7d8dda8dd` |
+  | `keystore.cpp` | `f294adf3d5a145bc` |
+  | `keystore.h` | `e5de2129d650f0a4` |
+  | `fdbcompat.h` | `788cc62b6648bf6d` |
+  | `common.h` | `0a0b864acb86c330` |
   | `pagepool.cpp` | `7506a3e1f65b263a` |
   | `pagepool.h` | `b6549ed8ffe91ea8` |
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `246b6c0baf2b6a99` |
-  | `tests/keystoretests.cpp` | `2231774e552b2cb5` |
+  | `tests/keystoretests.cpp` | `51ab3743efb7d13a` |
   | `tests/pagepooltests.cpp` | `924bc131b8ce98f3` |
 
 - Working tree: the files listed above
@@ -84,14 +88,14 @@ rm -rf build/coverage-llvm && mkdir -p build/coverage-llvm
 g++ -I. -std=c++20 -Wall -Wextra -Wpedantic -O0 -fprofile-instr-generate -fcoverage-mapping -fcoverage-compilation-dir=. pagepool.cpp keystore.cpp bnodestore.cpp testmain.cpp tests/*.cpp -o build/coverage-llvm/tests.exe
 LLVM_PROFILE_FILE=build/coverage-llvm/keystore.profraw build/coverage-llvm/tests.exe /resolver/KeyStore
 xcrun llvm-profdata merge -o build/coverage-llvm/keystore.profdata build/coverage-llvm/keystore.profraw
-xcrun llvm-cov report build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/keystore.profdata '-ignore-filename-regex=(pagepool|bnodestore|test)' > build/coverage-llvm/keystore-llvm-report.txt
-xcrun llvm-cov show build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/keystore.profdata -show-branches=count '-ignore-filename-regex=(pagepool|bnodestore|test)' > build/coverage-llvm/keystore-llvm-show.txt
+xcrun llvm-cov report build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/keystore.profdata '-ignore-filename-regex=(pagepool|bnodestore|fdbcompat|test)' > build/coverage-llvm/keystore-llvm-report.txt
+xcrun llvm-cov show build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/keystore.profdata -show-branches=count '-ignore-filename-regex=(pagepool|bnodestore|fdbcompat|test)' > build/coverage-llvm/keystore-llvm-show.txt
 ```
 
 Only the KeyStore tests are run. Each collection starts from an empty
 directory, so counters from earlier runs are not merged in. The
-`-ignore-filename-regex` option removes the `PagePool`, `BNodeStore`
-and test sources from the llvm-cov output. `keystore.h` and `common.h`
+`-ignore-filename-regex` option removes the `PagePool`, `BNodeStore`,
+`fdbcompat.h` and test sources from the llvm-cov output. `keystore.h` and `common.h`
 contain no function bodies, so `keystore.cpp` is the only KeyStore file with
 instrumented code.
 
@@ -138,7 +142,11 @@ Unless stated otherwise, tests use 64-byte blocks: a 24-byte
 | `/resolver/KeyStore/CompareKeysAgainstReference` | 80 keys derived from one 160-byte base key (prefixes of every length, 45 of them with one byte replaced by an extreme value) are compared in all 6,400 ordered pairs with the lexicographic order of `std::vector<std::byte>`. | PASS |
 
 Every comparison test checks the sign of the result, not its value, and
-checks both argument orders. The counts of keys with a replaced byte in
+checks both argument orders. Each pair of keys is compared twice: the two
+stored keys with each other, and the contiguous bytes of each key, as a
+`StringRef`, with the other stored key. `CompareKeysAgainstReference`
+also compares every external key with every stored key, 6,400 more
+comparisons. The counts of keys with a replaced byte in
 `CompareKeysAgainstReference` come from replaying its random decisions
 with the same seed, not from the test output.
 
@@ -165,18 +173,18 @@ gcov:
 
 | Metric | Result |
 |---|---|
-| Lines executed | 100.00% of 160 |
-| Branches executed | 100.00% of 80 |
-| Taken at least once | 85.00% of 80 |
+| Lines executed | 100.00% of 190 |
+| Branches executed | 100.00% of 96 |
+| Taken at least once | 87.50% of 96 |
 
 llvm-cov source-based coverage:
 
 | Metric | Result |
 |---|---|
-| Regions | 100.00% of 88 |
-| Functions | 100.00% of 10 |
-| Lines | 100.00% of 175 |
-| Branches | 100.00% of 60 |
+| Regions | 100.00% of 109 |
+| Functions | 100.00% of 11 |
+| Lines | 100.00% of 209 |
+| Branches | 100.00% of 76 |
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
@@ -186,16 +194,17 @@ coverage equivalent to GCC's `-fcondition-coverage`.
 
 gcov counts branches between the basic blocks of the generated code,
 including the exception edges the compiler adds. llvm-cov counts the
-true and false outcomes of each condition written in the source: its 60
-branches are the 30 conditions of `keystore.cpp`, each taken in both
+true and false outcomes of each condition written in the source: its 76
+branches are the 38 conditions of `keystore.cpp`, each taken in both
 directions. llvm-cov reports no branch for the `assert` in the
 constructor, whose condition comes from a macro in a system header;
 gcov does report it.
 
 ### Independent condition checks
 
-There are four compound decisions, one in `isValid` and three in
-`compareKeys`.
+There are seven compound decisions: one in `isValid`, three in the
+comparison of two stored keys and three in the comparison of an external
+key with a stored key.
 
 In `isValid`:
 `ref.keyLength == 0 || ref.blockGen > lastReclaimedKeyGeneration_`.
@@ -211,7 +220,8 @@ llvm-cov reports both conditions taken in both directions:
 `keystore.cpp:166` (true 4, false 13) and `keystore.cpp:167` (true 7,
 false 6).
 
-In `compareKeys`, the loop runs while both keys have bytes left:
+In `compareKeys(const KeyRef&, const KeyRef&)`, the loop runs while both
+keys have bytes left:
 `rem1 != 0 && rem2 != 0` (line 189).
 
 | Condition | Input | Other condition | Decision | Test |
@@ -240,6 +250,31 @@ llvm-cov reports every condition taken in both directions:
 | `keystore.cpp:201` | `rem1 != 0` | 5.93k | 1.07k |
 | `keystore.cpp:206` | `bytes2 == 0` | 7.00k | 6.57k |
 | `keystore.cpp:206` | `rem2 != 0` | 5.93k | 1.07k |
+
+In `compareKeys(const StringRef&, const KeyRef&)`, the external key is
+contiguous, so only the stored key moves to its next block. The loop
+runs while both keys have bytes left, `rem1 != 0 && rem2 != 0`
+(line 230), with the same cases as the table above. The stored key moves
+to its next block when its fragment is used up and bytes remain,
+`bytes2 == 0 && rem2 != 0` (line 241). After the loop, the keys are
+equal when both are exhausted, `rem1 == 0 && rem2 == 0` (line 247):
+
+| Condition | Input | Other condition | Decision | Test |
+|---|---|---|---|---|
+| External key not exhausted | `rem1 != 0` | Not evaluated | Not equal | A stored key that is a proper prefix of the external key |
+| Stored key not exhausted | `rem1 == 0`, `rem2 != 0` | True | Not equal | An external key that is a proper prefix of the stored key |
+| Both exhausted | `rem1 == 0`, `rem2 == 0` | True | Equal | `CompareKeysEqual`, `CompareKeysMultiBlock` |
+
+llvm-cov reports every condition taken in both directions:
+
+| Location | Condition | True | False |
+|---|---|---|---|
+| `keystore.cpp:230` | `rem1 != 0` | 13.3k | 1.07k |
+| `keystore.cpp:230` | `rem2 != 0` | 12.3k | 981 |
+| `keystore.cpp:241` | `bytes2 == 0` | 7.00k | 960 |
+| `keystore.cpp:241` | `rem2 != 0` | 5.93k | 1.07k |
+| `keystore.cpp:247` | `rem1 == 0` | 1.07k | 981 |
+| `keystore.cpp:247` | `rem2 == 0` | 94 | 981 |
 
 The other decisions in `keystore.cpp` have a single condition, and
 llvm-cov reports both outcomes covered for each of them.
@@ -310,8 +345,8 @@ other outcome is taken on every execution of the line.
 - Four gcov items could not be attributed to a single instruction; see
   [Uncovered generated branches](#uncovered-generated-branches).
 - No condition coverage was measured: the toolchain does not provide
-  it. The isolation of the conditions of `isValid` and `compareKeys`
-  rests on the test cases listed above and on the llvm-cov branch
+  it. The isolation of the conditions of `isValid` and of both
+  `compareKeys` overloads rests on the test cases listed above and on the llvm-cov branch
   counts.
 - Apart from `compareKeys`, multi-block keys are traversed by the caller
   using the exposed block headers and block size. The current interface

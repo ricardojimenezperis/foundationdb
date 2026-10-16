@@ -3624,12 +3624,12 @@ bnodestore.h:
   130|       |	inline BNodeHeader* oldestNode() const;
   131|       |
   132|       |	inline bool findKey(
-  133|       |		const KeyRef& key,
+  133|       |		const StringRef& key,
   134|       |		std::size_t& rank,
   135|       |		const InternalBlock* node) const;
   136|       |
   137|       |	inline bool findKey(
-  138|       |		const KeyRef& key,
+  138|       |		const StringRef& key,
   139|       |		std::size_t& rank,
   140|       |		const LeafBlock* node) const;
   141|       |
@@ -3810,73 +3810,73 @@ bnodestore.h:
   292|    721|	node->keys[slot] = key;
   293|    721|}
   294|       |
-  295|       |inline bool BNodeStore::findKey(const KeyRef& key,
+  295|       |inline bool BNodeStore::findKey(const StringRef& key,
   296|       |							std::size_t& rank,
-  297|     24|							const InternalBlock* node) const {
-  298|     24|	std::size_t lo=0;
-  299|     24|	std::size_t hi= node->header.count;
-  300|     24|	std::size_t mid= lo+(hi-lo)/2;
-  301|     24|	int comp;
-  302|     90|	while (lo < hi){
+  297|     25|							const InternalBlock* node) const {
+  298|     25|	std::size_t lo=0;
+  299|     25|	std::size_t hi= node->header.count;
+  300|     25|	std::size_t mid= lo+(hi-lo)/2;
+  301|     25|	int comp;
+  302|     95|	while (lo < hi){
   ------------------
-  |  Branch (302:9): [True: 76, False: 14]
+  |  Branch (302:9): [True: 80, False: 15]
   ------------------
-  303|     76|		comp= keyStore_.compareKeys(key,node->separators[node->order[mid]]);
-  304|     76|		if (comp==0) {
+  303|     80|		comp= keyStore_.compareKeys(key,node->separators[node->order[mid]]);
+  304|     80|		if (comp==0) {
   ------------------
-  |  Branch (304:7): [True: 10, False: 66]
+  |  Branch (304:7): [True: 10, False: 70]
   ------------------
   305|     10|			rank=mid;
   306|     10|			return true;
   307|     10|		}
-  308|     66|		if (comp<0) {
+  308|     70|		if (comp<0) {
   ------------------
-  |  Branch (308:7): [True: 41, False: 25]
+  |  Branch (308:7): [True: 45, False: 25]
   ------------------
-  309|     41|			hi=mid;
-  310|     41|		} else {
+  309|     45|			hi=mid;
+  310|     45|		} else {
   311|     25|			lo=mid+1;
   312|     25|		}
-  313|     66|		mid=lo+(hi-lo)/2;
-  314|     66|	}
-  315|     14|	rank=lo;
-  316|     14|	return false;
-  317|     24|}
+  313|     70|		mid=lo+(hi-lo)/2;
+  314|     70|	}
+  315|     15|	rank=lo;
+  316|     15|	return false;
+  317|     25|}
   318|       |
-  319|       |inline bool BNodeStore::findKey(const KeyRef& key,
+  319|       |inline bool BNodeStore::findKey(const StringRef& key,
   320|       |							std::size_t& rank,
-  321|     24|							const LeafBlock* node) const {
-  322|     24|	assert(node != nullptr);
+  321|     25|							const LeafBlock* node) const {
+  322|     25|	assert(node != nullptr);
   323|       |
-  324|     24|	std::size_t lo=0;
-  325|     24|	std::size_t hi= node->header.count;
-  326|     24|	std::size_t mid= lo+(hi-lo)/2;
-  327|     24|	int comp;
-  328|     90|	while (lo < hi){
+  324|     25|	std::size_t lo=0;
+  325|     25|	std::size_t hi= node->header.count;
+  326|     25|	std::size_t mid= lo+(hi-lo)/2;
+  327|     25|	int comp;
+  328|     95|	while (lo < hi){
   ------------------
-  |  Branch (328:9): [True: 76, False: 14]
+  |  Branch (328:9): [True: 80, False: 15]
   ------------------
-  329|     76|		comp= keyStore_.compareKeys(key,node->keys[node->order[mid]]);
-  330|     76|		if (comp==0) {
+  329|     80|		comp= keyStore_.compareKeys(key,node->keys[node->order[mid]]);
+  330|     80|		if (comp==0) {
   ------------------
-  |  Branch (330:7): [True: 10, False: 66]
+  |  Branch (330:7): [True: 10, False: 70]
   ------------------
   331|     10|			rank=mid;
   332|     10|			return true;
   333|     10|		}
-  334|     66|		if (comp<0) {
+  334|     70|		if (comp<0) {
   ------------------
-  |  Branch (334:7): [True: 41, False: 25]
+  |  Branch (334:7): [True: 45, False: 25]
   ------------------
-  335|     41|			hi=mid;
-  336|     41|		} else {
+  335|     45|			hi=mid;
+  336|     45|		} else {
   337|     25|			lo=mid+1;
   338|     25|		}
-  339|     66|		mid=lo+(hi-lo)/2;
-  340|     66|	}
-  341|     14|	rank=lo;
-  342|     14|	return false;
-  343|     24|}
+  339|     70|		mid=lo+(hi-lo)/2;
+  340|     70|	}
+  341|     15|	rank=lo;
+  342|     15|	return false;
+  343|     25|}
   344|       |
   345|       |inline void BNodeStore::eraseAt(
   346|       |		std::size_t rank,

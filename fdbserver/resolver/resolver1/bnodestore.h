@@ -130,12 +130,12 @@ public:
 	inline BNodeHeader* oldestNode() const;
 
 	inline bool findKey(
-		const KeyRef& key,
+		const StringRef& key,
 		std::size_t& rank,
 		const InternalBlock* node) const;
 
 	inline bool findKey(
-		const KeyRef& key,
+		const StringRef& key,
 		std::size_t& rank,
 		const LeafBlock* node) const;
 
@@ -292,7 +292,7 @@ inline void BNodeStore::insertAt(std::size_t rank,
 	node->keys[slot] = key;
 }
 
-inline bool BNodeStore::findKey(const KeyRef& key,
+inline bool BNodeStore::findKey(const StringRef& key,
 							std::size_t& rank,
 							const InternalBlock* node) const {
 	std::size_t lo=0;
@@ -316,7 +316,7 @@ inline bool BNodeStore::findKey(const KeyRef& key,
 	return false;
 }
 
-inline bool BNodeStore::findKey(const KeyRef& key,
+inline bool BNodeStore::findKey(const StringRef& key,
 							std::size_t& rank,
 							const LeafBlock* node) const {
 	assert(node != nullptr);

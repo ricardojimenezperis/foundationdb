@@ -25,7 +25,7 @@ for c in pagepool:PagePool keystore:KeyStore bnodestore:BNodeStore; do
 done
 rm -rf build/coverage-llvm && mkdir -p build/coverage-llvm
 g++ -I. -std=c++20 -Wall -Wextra -Wpedantic -O0 -fprofile-instr-generate -fcoverage-mapping -fcoverage-compilation-dir=. pagepool.cpp keystore.cpp bnodestore.cpp testmain.cpp tests/*.cpp -o build/coverage-llvm/tests.exe
-for c in "pagepool:PagePool:keystore|bnodestore|test" "keystore:KeyStore:pagepool|bnodestore|test" "bnodestore:BNodeStore:pagepool|^keystore|test"; do
+for c in "pagepool:PagePool:keystore|bnodestore|fdbcompat|test" "keystore:KeyStore:pagepool|bnodestore|fdbcompat|test" "bnodestore:BNodeStore:pagepool|^keystore|fdbcompat|test"; do
 	IFS=: read n t x <<< "$c"
 	LLVM_PROFILE_FILE=build/coverage-llvm/$n.profraw build/coverage-llvm/tests.exe /resolver/$t | tail -1
 	xcrun llvm-profdata merge -o build/coverage-llvm/$n.profdata build/coverage-llvm/$n.profraw

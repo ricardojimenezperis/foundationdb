@@ -11,15 +11,18 @@ repositioning of a node in the age list when its commit version grows,
 the oldest node and its commit version, the return of all remaining
 blocks when the store is destroyed, and, within one node, insertion and
 erasure of entries at a given rank, reuse of free slots and binary
-search of a key.
+search of an external key (`StringRef`) without storing it.
 
 Outside the scope of this component: `PagePool` itself (see
 [PagePoolTests.md](PagePoolTests.md)), key storage and key comparison
 (see [KeyStoreTests.md](KeyStoreTests.md)), tree navigation, splits,
 separators chosen for them, parent-child and leaf links, which are
 maintained by the caller, and the choice of the commit-version cutoff
-for reclamation. `tbtree.h` is in the project directory but no tested
-source includes it.
+for reclamation. `tempconflictbtree.h` and `tempconflictbtree.cpp` are in
+the project directory but no tested source includes them. `fdbcompat.h`
+provides stand-ins for FoundationDB types (`StringRef`) so that the
+component builds without `flow`; it is not measured as part of this
+component.
 
 ## Source and environment
 
@@ -29,16 +32,17 @@ source includes it.
   | File | SHA-256 |
   |---|---|
   | `bnodestore.cpp` | `a945a23136d881e9` |
-  | `bnodestore.h` | `ead87a866741a067` |
-  | `keystore.cpp` | `97e9cb25cb0f1817` |
-  | `keystore.h` | `3be7f82e1ffb18ec` |
-  | `common.h` | `a8a56ac7d8dda8dd` |
+  | `bnodestore.h` | `fcfe6f06e8fa56bb` |
+  | `keystore.cpp` | `f294adf3d5a145bc` |
+  | `keystore.h` | `e5de2129d650f0a4` |
+  | `fdbcompat.h` | `788cc62b6648bf6d` |
+  | `common.h` | `0a0b864acb86c330` |
   | `pagepool.cpp` | `7506a3e1f65b263a` |
   | `pagepool.h` | `b6549ed8ffe91ea8` |
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `246b6c0baf2b6a99` |
-  | `tests/bnodestoretests.cpp` | `7a959cf533d72141` |
+  | `tests/bnodestoretests.cpp` | `014528240b582c67` |
 
 - Working tree: the files listed above
 - Platform: macOS 27.0.1 (build 26A434), arm64 (Apple M3 Pro)
@@ -88,14 +92,15 @@ rm -rf build/coverage-llvm && mkdir -p build/coverage-llvm
 g++ -I. -std=c++20 -Wall -Wextra -Wpedantic -O0 -fprofile-instr-generate -fcoverage-mapping -fcoverage-compilation-dir=. pagepool.cpp keystore.cpp bnodestore.cpp testmain.cpp tests/*.cpp -o build/coverage-llvm/tests.exe
 LLVM_PROFILE_FILE=build/coverage-llvm/bnodestore.profraw build/coverage-llvm/tests.exe /resolver/BNodeStore
 xcrun llvm-profdata merge -o build/coverage-llvm/bnodestore.profdata build/coverage-llvm/bnodestore.profraw
-xcrun llvm-cov report build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/bnodestore.profdata '-ignore-filename-regex=(pagepool|^keystore|test)' > build/coverage-llvm/bnodestore-llvm-report.txt
-xcrun llvm-cov show build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/bnodestore.profdata -show-branches=count '-ignore-filename-regex=(pagepool|^keystore|test)' > build/coverage-llvm/bnodestore-llvm-show.txt
+xcrun llvm-cov report build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/bnodestore.profdata '-ignore-filename-regex=(pagepool|^keystore|fdbcompat|test)' > build/coverage-llvm/bnodestore-llvm-report.txt
+xcrun llvm-cov show build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/bnodestore.profdata -show-branches=count '-ignore-filename-regex=(pagepool|^keystore|fdbcompat|test)' > build/coverage-llvm/bnodestore-llvm-show.txt
 ```
 
 Only the BNodeStore tests are run. Each collection starts from an empty
 directory, so counters from earlier runs are not merged in. The
 `-ignore-filename-regex` option leaves only `bnodestore.cpp` and
-`bnodestore.h` in the llvm-cov output.
+`bnodestore.h` in the llvm-cov output; it removes `fdbcompat.h`, which
+the store includes through `keystore.h`.
 
 `tests/coverage.sh` runs these commands for the three components, after
 the full suite whose output is the test evidence. Run it from the
@@ -165,8 +170,8 @@ to it as `parent` and holds its slot as `parentSlot`, and that
 | `/resolver/BNodeStore/EraseThenInsertReusesSlotInLeaf` | The same in a full leaf. | PASS |
 | `/resolver/BNodeStore/InsertAndEraseInterleaved` | 300 pseudo-random insertions and erasures in an internal node, with a fixed seed; every insertion takes the lowest free slot. The sequence reaches the full node 53 times and the empty node once. | PASS |
 | `/resolver/BNodeStore/InsertAndEraseInterleavedInLeaf` | The same in a leaf, with another seed; the sequence reaches the full leaf 45 times and the empty leaf 5 times. | PASS |
-| `/resolver/BNodeStore/FindKeyInEmptyNodes` | In an empty leaf and an empty internal node, `findKey` returns false and rank 0. | PASS |
-| `/resolver/BNodeStore/FindKeyInLeaf` | Ten keys inserted in the order 5, 2, 8, 0, 9, 3, 7, 1, 6, 4 of their sorted position, so that `order` is not the identity. Each key, stored again as a distinct reference with the same bytes, is found with its rank. Absent keys before the first, between each pair and after the last return false and the rank where they would be inserted, as do a proper prefix of every key and a key longer than an existing one. | PASS |
+| `/resolver/BNodeStore/FindKeyInEmptyNodes` | In an empty leaf and an empty internal node, searching an external key returns false and rank 0. | PASS |
+| `/resolver/BNodeStore/FindKeyInLeaf` | Ten keys inserted in the order 5, 2, 8, 0, 9, 3, 7, 1, 6, 4 of their sorted position, so that `order` is not the identity. Each key, searched as an external `StringRef` over a local array and not stored, is found with its rank. Absent keys before the first, between each pair and after the last return false and the rank where they would be inserted, as do a proper prefix of every key, a key longer than an existing one, and the empty key. | PASS |
 | `/resolver/BNodeStore/FindKeyInInternalNode` | The same in an internal node. | PASS |
 
 The counts of full and empty nodes reached by the interleaved tests come
@@ -275,12 +280,12 @@ condition. llvm-cov reports both outcomes covered for each:
 | `bnodestore.h:231` | `updateCV` with the current value | 1 | 6 |
 | `bnodestore.h:236` | Updated node is not the newest | 5 | 1 |
 | `bnodestore.h:243` | `oldestCV` on an empty store | 2 | 3 |
-| `bnodestore.h:302` | `findKey`, internal node: range not empty | 76 | 14 |
-| `bnodestore.h:304` | `findKey`, internal node: key found | 10 | 66 |
-| `bnodestore.h:308` | `findKey`, internal node: key before the middle entry | 41 | 25 |
-| `bnodestore.h:328` | `findKey`, leaf: range not empty | 76 | 14 |
-| `bnodestore.h:330` | `findKey`, leaf: key found | 10 | 66 |
-| `bnodestore.h:334` | `findKey`, leaf: key before the middle entry | 41 | 25 |
+| `bnodestore.h:302` | `findKey`, internal node: range not empty | 80 | 15 |
+| `bnodestore.h:304` | `findKey`, internal node: key found | 10 | 70 |
+| `bnodestore.h:308` | `findKey`, internal node: key before the middle entry | 45 | 25 |
+| `bnodestore.h:328` | `findKey`, leaf: range not empty | 80 | 15 |
+| `bnodestore.h:330` | `findKey`, leaf: key found | 10 | 70 |
+| `bnodestore.h:334` | `findKey`, leaf: key before the middle entry | 45 | 25 |
 
 The `unlinkNode` conditions on lines 210 and 215 are covered by
 releasing the only, oldest, middle and newest node, and by moving the

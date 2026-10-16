@@ -476,7 +476,7 @@ void fillInternalNode(RankFor rankFor) {
 		ASSERT(key.has_value());
 
 		// Children have distinct versions, different from the separator's.
-		LeafBlock* child = store.allocateLeaf(Version{10 + n});
+		LeafBlock* child = store.allocateLeaf(static_cast<Version>(10 + n));
 		ASSERT(child != nullptr);
 		const Version cv = 1000 + n;
 
@@ -651,41 +651,38 @@ void insertSearchKeys(KeyStore& keys, Insert insert) {
 	}
 }
 
-// Checks findKey for present keys, stored again so that they are equal in
-// content but distinct references, and for absent keys before, between
-// and after them.
+// Checks findKey with external keys: present keys, and absent keys
+// before, between and after them.
 template<typename Node>
-void checkSearch(const BNodeStore& store, KeyStore& keys, const Node* node) {
+void checkSearch(const BNodeStore& store, const Node* node) {
 	std::size_t rank = 999;
 
 	for (std::size_t i = 0; i < SearchKeyCount; ++i) {
-		const KeyRef present = storeSearchKey(keys, 10 * (i + 1));
-		ASSERT(store.findKey(present, rank, node));
+		const uint8_t present[] = {'k', static_cast<uint8_t>(10 * (i + 1))};
+		ASSERT(store.findKey(StringRef(present, 2), rank, node));
 		ASSERT_EQ(rank, i);
 	}
 
 	for (std::size_t i = 0; i <= SearchKeyCount; ++i) {
 		// 5 is before the first key, 105 after the last.
-		const KeyRef absent = storeSearchKey(keys, 10 * i + 5);
+		const uint8_t absent[] = {'k', static_cast<uint8_t>(10 * i + 5)};
 		rank = 999;
-		ASSERT(!store.findKey(absent, rank, node));
+		ASSERT(!store.findKey(StringRef(absent, 2), rank, node));
 		ASSERT_EQ(rank, i);
 	}
 
 	// A proper prefix of every key, and a key longer than one of them.
-	const std::byte prefix[] = {std::byte{'k'}};
-	const std::optional<KeyRef> shorter = keys.appendKey(prefix, 1, 1);
-	ASSERT(shorter.has_value());
-	ASSERT(!store.findKey(*shorter, rank, node));
+	const uint8_t prefix[] = {'k'};
+	ASSERT(!store.findKey(StringRef(prefix, 1), rank, node));
 	ASSERT_EQ(rank, 0);
 
-	const std::byte extended[] = {
-		std::byte{'k'}, std::byte{30}, std::byte{0}
-	};
-	const std::optional<KeyRef> longer = keys.appendKey(extended, 3, 1);
-	ASSERT(longer.has_value());
-	ASSERT(!store.findKey(*longer, rank, node));
+	const uint8_t extended[] = {'k', 30, 0};
+	ASSERT(!store.findKey(StringRef(extended, 3), rank, node));
 	ASSERT_EQ(rank, 3);
+
+	// The empty key precedes every key.
+	ASSERT(!store.findKey(StringRef(), rank, node));
+	ASSERT_EQ(rank, 0);
 }
 
 template<std::size_t C>
@@ -707,7 +704,8 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInEmptyNodes") {
 
 	const LeafBlock* leaf = store.allocateLeaf(1);
 	const InternalBlock* internal = store.allocateInternal(1);
-	const KeyRef key = storeSearchKey(keys, 10);
+	const uint8_t bytes[] = {'k', 10};
+	const StringRef key(bytes, 2);
 
 	std::size_t rank = 999;
 	ASSERT(!store.findKey(key, rank, leaf));
@@ -731,7 +729,7 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInLeaf") {
 	ASSERT_EQ(leaf->header.count, SearchKeyCount);
 	ASSERT(!orderIsIdentity(leaf->order, SearchKeyCount));
 
-	checkSearch(store, keys, static_cast<const LeafBlock*>(leaf));
+	checkSearch(store, static_cast<const LeafBlock*>(leaf));
 }
 
 TEST_CASE("/resolver/BNodeStore/FindKeyInInternalNode") {
@@ -748,7 +746,7 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInInternalNode") {
 	ASSERT_EQ(internal->header.count, SearchKeyCount);
 	ASSERT(!orderIsIdentity(internal->order, SearchKeyCount));
 
-	checkSearch(store, keys, static_cast<const InternalBlock*>(internal));
+	checkSearch(store, static_cast<const InternalBlock*>(internal));
 }
 
 namespace {
@@ -782,7 +780,7 @@ void insertInternalEntry(BNodeStore& store, KeyStore& keys,
 	const std::optional<KeyRef> key = keys.appendKey(bytes, 2, 1);
 	ASSERT(key.has_value());
 
-	LeafBlock* child = store.allocateLeaf(Version{10 + n});
+	LeafBlock* child = store.allocateLeaf(static_cast<Version>(10 + n));
 	ASSERT(child != nullptr);
 	const Version cv = 1000 + n;
 

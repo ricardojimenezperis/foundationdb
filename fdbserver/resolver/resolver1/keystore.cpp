@@ -218,3 +218,38 @@ int KeyStore::compareKeys(const KeyRef& kr1, const KeyRef& kr2) const {
 		return 1;
 	}		
 }
+
+int KeyStore::compareKeys(const StringRef& key, const KeyRef& stored) const {
+	const std::byte* start1=reinterpret_cast<const std::byte*>(key.begin());
+	std::size_t rem1 = static_cast<std::size_t>(key.size());
+	const KeyBlockHeader* block2=stored.firstBlock;
+	std::size_t bytes2 = std::min<std::size_t>(stored.keyLength, blockSize_ - stored.keyOffset);
+	std::size_t rem2 = stored.keyLength;
+	std::size_t usable = blockSize_-sizeof(KeyBlockHeader);
+	const std::byte* start2=keyStart(stored);
+	while (rem1!=0 && rem2!=0) {
+		std::size_t adv= std::min(rem1, bytes2);
+		int res=memcmp(start1, start2, adv);
+		if (res != 0) {
+			return res;
+		}
+		rem1-=adv;
+		rem2-=adv;
+		bytes2-=adv;
+		start1+=adv;
+		start2+=adv;
+		if (bytes2 == 0 && rem2 != 0) {
+			block2=block2->nextBlock;
+			start2=reinterpret_cast<const std::byte*> (block2)+sizeof(KeyBlockHeader);
+			bytes2 = std::min(rem2, usable);
+		}
+	}
+	if (rem1==0 && rem2==0){
+		return 0;
+	}
+	if (rem1==0){
+		return -1;
+	} else {
+		return 1;
+	}
+}

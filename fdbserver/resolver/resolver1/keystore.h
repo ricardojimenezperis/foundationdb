@@ -19,6 +19,7 @@
 #include <string_view>
 #include <optional>
 #include "common.h"
+#include "fdbcompat.h"
 
 struct KeyBlockHeader {
     KeyBlockHeader* nextBlock = nullptr;
@@ -52,6 +53,7 @@ class KeyStore {
 		std::size_t blockSize() const;
 		void insertKey(KeyRef key, Version cv, const KeyStore& keyStore);
 		int compareKeys(const KeyRef& kr1, const KeyRef& kr2) const;
+		int compareKeys(const StringRef& key, const KeyRef& stored) const;
 	private:
 		PagePool& pool_;
 		std::size_t blockSize_;

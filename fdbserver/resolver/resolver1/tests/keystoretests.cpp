@@ -575,11 +575,22 @@ std::vector<std::byte> bytesOf(std::initializer_list<unsigned> values) {
 	return bytes;
 }
 
-// Checks the order of a and b in both directions.
+StringRef asStringRef(const std::vector<std::byte>& bytes) {
+	return StringRef(reinterpret_cast<const uint8_t*>(bytes.data()),
+					 static_cast<int>(bytes.size()));
+}
+
+// Checks the order of a and b in both directions, comparing the stored keys
+// with each other and the contiguous bytes of each with the other stored key.
 void checkOrder(const KeyStore& store, const KeyRef& a, const KeyRef& b,
 				int expected) {
 	ASSERT_EQ(sign(store.compareKeys(a, b)), expected);
 	ASSERT_EQ(sign(store.compareKeys(b, a)), -expected);
+
+	const std::vector<std::byte> bytesA = readKey(store, a);
+	const std::vector<std::byte> bytesB = readKey(store, b);
+	ASSERT_EQ(sign(store.compareKeys(asStringRef(bytesA), b)), expected);
+	ASSERT_EQ(sign(store.compareKeys(asStringRef(bytesB), a)), -expected);
 }
 
 } // namespace
@@ -765,6 +776,8 @@ TEST_CASE("/resolver/KeyStore/CompareKeysAgainstReference") {
 	for (std::size_t i = 0; i < keys.size(); ++i) {
 		for (std::size_t j = 0; j < keys.size(); ++j) {
 			ASSERT_EQ(sign(store.compareKeys(refs[i], refs[j])),
+					  expectedOrder(keys[i], keys[j]));
+			ASSERT_EQ(sign(store.compareKeys(asStringRef(keys[i]), refs[j])),
 					  expectedOrder(keys[i], keys[j]));
 		}
 	}
