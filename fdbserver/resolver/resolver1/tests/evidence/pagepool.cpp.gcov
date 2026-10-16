@@ -1,0 +1,70 @@
+        -:    0:Source:pagepool.cpp
+        -:    0:Graph:build/coverage/pagepool.gcno
+        -:    0:Data:build/coverage/pagepool.gcda
+        -:    0:Runs:1
+        -:    0:Programs:1
+        -:    1:// Page pool
+        -:    2://
+        -:    3:#include "pagepool.h"
+        -:    4:
+        -:    5:#include <cassert>
+        -:    6:#include <new>
+        -:    7:
+function _ZN8PagePoolC2Emm called 19 returned 100% blocks executed 85%
+function _ZN8PagePoolC1Emm called 19 returned 100% blocks executed 100%
+       38:    8:PagePool::PagePool(std::size_t budget, std::size_t blockSize)
+       38:    9:	: budget_(budget), blockSize_(blockSize) {
+       19:   10:	assert(blockSize >= sizeof(FreeBlock) &&
+branch  0 taken 19
+branch  1 taken 0
+branch  2 taken 0
+branch  3 taken 19
+branch  4 taken 0
+branch  5 taken 19
+        -:   11:		   blockSize <= PageSize &&
+        -:   12:		   blockSize % alignof(FreeBlock) == 0);
+       19:   13:	numPages_ = budget / PageSize;
+       19:   14:	blocksPerPage_ = PageSize / blockSize;
+        -:   15:
+       19:   16:	freeBlocks_ = nullptr;
+       19:   17:	pages_ = new Page[numPages_];
+        -:   18:
+       46:   19:	for (std::size_t p = numPages_; p > 0;) {
+branch  0 taken 19
+branch  1 taken 27
+       27:   20:		--p;
+     9159:   21:		for (std::size_t b = blocksPerPage_; b > 0;) {
+branch  0 taken 9132
+branch  1 taken 27
+     9132:   22:			--b;
+     9132:   23:			releaseBlock(pages_[p].data + b * blockSize);
+        -:   24:		}
+        -:   25:	}
+       38:   26:}
+        -:   27:
+function _ZN8PagePoolD2Ev called 19 returned 100% blocks executed 100%
+function _ZN8PagePoolD1Ev called 19 returned 100% blocks executed 100%
+       38:   28:PagePool::~PagePool() {
+       19:   29:	delete[] pages_;
+branch  0 taken 19
+branch  1 taken 0
+       38:   30:}
+        -:   31:
+function _ZN8PagePool13allocateBlockEv called 9068 returned 100% blocks executed 100%
+     9068:   32:std::byte* PagePool::allocateBlock() {
+     9068:   33:	if (freeBlocks_ == nullptr) {
+branch  0 taken 21
+branch  1 taken 9047
+       21:   34:		return nullptr;
+        -:   35:	}
+        -:   36:
+     9047:   37:	FreeBlock* block = freeBlocks_;
+     9047:   38:	freeBlocks_ = block->next;
+        -:   39:
+     9047:   40:	return reinterpret_cast<std::byte*>(block);
+     9068:   41:}
+        -:   42:
+function _ZN8PagePool12releaseBlockEPv called 9139 returned 100% blocks executed 100%
+     9139:   43:void PagePool::releaseBlock(void* block) {
+     9139:   44:	freeBlocks_ = ::new (block) FreeBlock{freeBlocks_};
+     9139:   45:}

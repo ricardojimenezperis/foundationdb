@@ -1,0 +1,108 @@
+pagepool.cpp:
+    1|       |// Page pool
+    2|       |//
+    3|       |#include "pagepool.h"
+    4|       |
+    5|       |#include <cassert>
+    6|       |#include <new>
+    7|       |
+    8|       |PagePool::PagePool(std::size_t budget, std::size_t blockSize)
+    9|     19|	: budget_(budget), blockSize_(blockSize) {
+   10|     19|	assert(blockSize >= sizeof(FreeBlock) &&
+   11|     19|		   blockSize <= PageSize &&
+   12|     19|		   blockSize % alignof(FreeBlock) == 0);
+   13|     19|	numPages_ = budget / PageSize;
+   14|     19|	blocksPerPage_ = PageSize / blockSize;
+   15|       |
+   16|     19|	freeBlocks_ = nullptr;
+   17|     19|	pages_ = new Page[numPages_];
+   18|       |
+   19|     46|	for (std::size_t p = numPages_; p > 0;) {
+  ------------------
+  |  Branch (19:34): [True: 27, False: 19]
+  ------------------
+   20|     27|		--p;
+   21|  9.15k|		for (std::size_t b = blocksPerPage_; b > 0;) {
+  ------------------
+  |  Branch (21:40): [True: 9.13k, False: 27]
+  ------------------
+   22|  9.13k|			--b;
+   23|  9.13k|			releaseBlock(pages_[p].data + b * blockSize);
+   24|  9.13k|		}
+   25|     27|	}
+   26|     19|}
+   27|       |
+   28|     19|PagePool::~PagePool() {
+   29|     19|	delete[] pages_;
+   30|     19|}
+   31|       |
+   32|  9.06k|std::byte* PagePool::allocateBlock() {
+   33|  9.06k|	if (freeBlocks_ == nullptr) {
+  ------------------
+  |  Branch (33:6): [True: 21, False: 9.04k]
+  ------------------
+   34|     21|		return nullptr;
+   35|     21|	}
+   36|       |
+   37|  9.04k|	FreeBlock* block = freeBlocks_;
+   38|  9.04k|	freeBlocks_ = block->next;
+   39|       |
+   40|  9.04k|	return reinterpret_cast<std::byte*>(block);
+   41|  9.06k|}
+   42|       |
+   43|  9.13k|void PagePool::releaseBlock(void* block) {
+   44|  9.13k|	freeBlocks_ = ::new (block) FreeBlock{freeBlocks_};
+   45|  9.13k|}
+
+pagepool.h:
+    1|       |// Page pool
+    2|       |//
+    3|       |// Manages aligned pages divided into fixed-size blocks under a fixed memory budget.
+    4|       |// Each block can hold either a B+ tree node or a block of key records.
+    5|       |// Both uses share the same free-block list, so released blocks can be reused
+    6|       |// for either purpose.
+    7|       |//
+    8|       |// Provides block allocation and release.
+    9|       |// History reclamation is handled by the caller.
+   10|       |#pragma once
+   11|       |
+   12|       |#include <cstddef>
+   13|       |#include <cstdint>
+   14|       |#include "common.h"
+   15|       |
+   16|       |struct FreeBlock {
+   17|       |	FreeBlock* next;
+   18|       |};
+   19|       |
+   20|       |struct alignas(PageSize) Page {
+   21|       |	std::byte data[PageSize];
+   22|       |};
+   23|       |
+   24|       |static_assert(sizeof(Page) == PageSize);
+   25|       |
+   26|       |class PagePool {
+   27|       |public:
+   28|       |	PagePool(std::size_t budget, std::size_t blockSize);
+   29|       |	~PagePool();
+   30|       |
+   31|       |	PagePool(const PagePool&) = delete;
+   32|       |	PagePool& operator=(const PagePool&) = delete;
+   33|       |
+   34|       |	std::byte* allocateBlock();
+   35|       |	void releaseBlock(void* block);
+   36|       |
+   37|      7|	std::size_t blockSize() const { return blockSize_; }
+   38|      5|	std::size_t budget() const { return budget_; }
+   39|     10|	std::size_t allocatedBytes() const { return numPages_ * PageSize; }
+   40|       |
+   41|       |private:
+   42|       |	std::size_t budget_;
+   43|       |	std::size_t blockSize_;
+   44|       |
+   45|       |	std::size_t blocksPerPage_;
+   46|       |	std::size_t numPages_ = 0;
+   47|       |
+   48|       |	FreeBlock* freeBlocks_ = nullptr;
+   49|       |	Page* pages_ = nullptr;
+   50|       |};
+

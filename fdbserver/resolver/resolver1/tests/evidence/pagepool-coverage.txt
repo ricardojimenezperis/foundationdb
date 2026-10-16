@@ -1,0 +1,7 @@
+File 'pagepool.cpp'
+Lines executed:100.00% of 29
+Branches executed:100.00% of 14
+Taken at least once:71.43% of 14
+No calls
+Creating 'pagepool.cpp.gcov'
+

@@ -1,0 +1,31 @@
+        -:    0:Source:bnodestore.cpp
+        -:    0:Graph:build/coverage/bnodestore.gcno
+        -:    0:Data:build/coverage/bnodestore.gcda
+        -:    0:Runs:1
+        -:    0:Programs:1
+        -:    1:#include "bnodestore.h"
+        -:    2:
+        -:    3:#include <cassert>
+        -:    4:
+function _ZN10BNodeStoreC2ER8PagePoolR8KeyStore called 40 returned 100% blocks executed 60%
+function _ZN10BNodeStoreC1ER8PagePoolR8KeyStore called 40 returned 100% blocks executed 100%
+       80:    5:BNodeStore::BNodeStore(PagePool& pool, KeyStore& keyStore)
+       80:    6:	: pool_(pool) , keyStore_(keyStore){
+       40:    7:	assert(pool_.blockSize() == BlockSize);
+branch  0 taken 0
+branch  1 taken 40
+       80:    8:}
+        -:    9:
+function _ZN10BNodeStoreD2Ev called 40 returned 100% blocks executed 83%
+function _ZN10BNodeStoreD1Ev called 40 returned 100% blocks executed 100%
+       80:   10:BNodeStore::~BNodeStore() {
+      662:   11:	while (oldestNode_!=nullptr){
+branch  0 taken 622
+branch  1 taken 40
+      622:   12:		BNodeHeader* tmp=oldestNode_;
+      622:   13:		oldestNode_=oldestNode_->ageNext;
+      622:   14:		pool_.releaseBlock(tmp);
+branch  0 taken 622
+branch  1 taken 0
+        -:   15:	}
+       80:   16:}
