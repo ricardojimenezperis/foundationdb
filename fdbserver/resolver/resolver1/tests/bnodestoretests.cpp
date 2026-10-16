@@ -425,6 +425,33 @@ bool sameKeyRef(const KeyRef& a, const KeyRef& b) {
 		   a.keyLength == b.keyLength && a.blockGen == b.blockGen;
 }
 
+bool sameRangeRef(const RangeRef& a, const RangeRef& b) {
+	return a.firstBlock == b.firstBlock && a.keyOffset == b.keyOffset &&
+		   a.beginLength == b.beginLength && a.endStart == b.endStart &&
+		   a.endLength == b.endLength && a.blockGen == b.blockGen;
+}
+
+// Stores [{'k', value}, end): a point range, or a general range ending at
+// {'k', value, 1}. By default, even values give points.
+RangeRef storeLeafRange(KeyStore& keys, unsigned value, Version cv,
+						bool point) {
+	const uint8_t begin[] = {'k', static_cast<uint8_t>(value)};
+	const uint8_t pointEnd[] = {'k', static_cast<uint8_t>(value), 0};
+	const uint8_t general[] = {'k', static_cast<uint8_t>(value), 1};
+
+	const std::optional<RangeRef> range = keys.appendRange(
+		StringRef(begin, 2),
+		StringRef(point ? pointEnd : general, 3),
+		cv);
+	ASSERT(range.has_value());
+	ASSERT_EQ(range->endStart, point ? 0 : 2);
+	return *range;
+}
+
+RangeRef storeLeafRange(KeyStore& keys, unsigned value, Version cv) {
+	return storeLeafRange(keys, value, cv, value % 2 == 0);
+}
+
 // Checks that the node holds exactly the expected entries, in order, and
 // that the slots in use are the ones marked as not free.
 void checkInternalNode(const InternalBlock* node,
@@ -527,7 +554,7 @@ TEST_CASE("/resolver/BNodeStore/InsertAtMixedPositions") {
 namespace {
 
 struct LeafEntry {
-	KeyRef key;
+	RangeRef range;
 	Version cv;
 };
 
@@ -544,7 +571,7 @@ void checkLeafNode(const LeafBlock* node,
 		ASSERT((used & (std::uint64_t{1} << slot)) == 0);
 		used |= std::uint64_t{1} << slot;
 
-		ASSERT(sameKeyRef(node->keys[slot], expected[i].key));
+		ASSERT(sameRangeRef(node->ranges[slot], expected[i].range));
 		ASSERT_EQ(node->cv[slot], expected[i].cv);
 	}
 
@@ -567,18 +594,14 @@ void fillLeafNode(RankFor rankFor) {
 	std::vector<LeafEntry> expected;
 
 	for (std::size_t n = 0; n < LeafCapacity; ++n) {
-		const std::byte bytes[] = {
-			std::byte{'k'}, static_cast<std::byte>(n)
-		};
-		const std::optional<KeyRef> key = keys.appendKey(bytes, 2, 1);
-		ASSERT(key.has_value());
 		const Version cv = 1000 + n;
+		const RangeRef range = storeLeafRange(keys, n, cv);
 
 		const std::size_t rank = rankFor(n);
 		ASSERT(rank <= n);
 
-		store.insertAt(rank, *key, cv, node);
-		expected.insert(expected.begin() + rank, {*key, cv});
+		store.insertAt(rank, range, cv, node);
+		expected.insert(expected.begin() + rank, {range, cv});
 
 		checkLeafNode(node, expected);
 	}
@@ -638,7 +661,7 @@ KeyRef storeSearchKey(KeyStore& keys, unsigned value) {
 
 // Inserts the search keys through insert(rank, key) at their sorted rank.
 template<typename Insert>
-void insertSearchKeys(KeyStore& keys, Insert insert) {
+void insertSearchKeys(Insert insert) {
 	std::vector<std::size_t> inserted;
 
 	for (std::size_t index : InsertionOrder) {
@@ -646,7 +669,7 @@ void insertSearchKeys(KeyStore& keys, Insert insert) {
 			std::lower_bound(inserted.begin(), inserted.end(), index);
 		const std::size_t rank = position - inserted.begin();
 
-		insert(rank, storeSearchKey(keys, 10 * (index + 1)));
+		insert(rank, static_cast<unsigned>(10 * (index + 1)));
 		inserted.insert(position, index);
 	}
 }
@@ -722,8 +745,9 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInLeaf") {
 	BNodeStore store(pool, keys);
 
 	LeafBlock* leaf = store.allocateLeaf(1);
-	insertSearchKeys(keys, [&](std::size_t rank, KeyRef key) {
-		store.insertAt(rank, key, 1, leaf);
+	insertSearchKeys([&](std::size_t rank, unsigned value) {
+		store.insertAt(rank, storeLeafRange(keys, value, 1, value % 20 == 0),
+					   1, leaf);
 	});
 
 	ASSERT_EQ(leaf->header.count, SearchKeyCount);
@@ -738,9 +762,10 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInInternalNode") {
 	BNodeStore store(pool, keys);
 
 	InternalBlock* internal = store.allocateInternal(1);
-	insertSearchKeys(keys, [&](std::size_t rank, KeyRef key) {
+	insertSearchKeys([&](std::size_t rank, unsigned value) {
 		LeafBlock* child = store.allocateLeaf(1);
-		store.insertAt(rank, key, &child->header, 1, internal);
+		store.insertAt(rank, storeSearchKey(keys, value), &child->header, 1,
+					   internal);
 	});
 
 	ASSERT_EQ(internal->header.count, SearchKeyCount);
@@ -791,13 +816,11 @@ void insertInternalEntry(BNodeStore& store, KeyStore& keys,
 void insertLeafEntry(KeyStore& keys, BNodeStore& store, LeafBlock* node,
 					 std::vector<LeafEntry>& expected, std::size_t rank,
 					 std::size_t n) {
-	const std::byte bytes[] = {std::byte{'k'}, static_cast<std::byte>(n)};
-	const std::optional<KeyRef> key = keys.appendKey(bytes, 2, 1);
-	ASSERT(key.has_value());
 	const Version cv = 1000 + n;
+	const RangeRef range = storeLeafRange(keys, n, cv);
 
-	store.insertAt(rank, *key, cv, node);
-	expected.insert(expected.begin() + rank, {*key, cv});
+	store.insertAt(rank, range, cv, node);
+	expected.insert(expected.begin() + rank, {range, cv});
 }
 
 // Fills an internal node, then empties it erasing at rankFor(count) and

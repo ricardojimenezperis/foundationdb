@@ -111,8 +111,8 @@ bash tests/coverage.sh
 | `/resolver/PagePool/ReleaseIsLifo` | Released blocks are reallocated in last-in, first-out order, compared by address. | PASS |
 | `/resolver/PagePool/ReleaseBlockFromAnotherPage` | Blocks from different pages, one page apart, can be released and are reused in last-in, first-out order. | PASS |
 
-13 PagePool tests passed, 0 failed. The full run, including the 26
-KeyStore tests and the 41 BNodeStore tests, reports 80 passed and 0
+13 PagePool tests passed, 0 failed. The full run, including the 35
+KeyStore tests and the 41 BNodeStore tests, reports 89 passed and 0
 failed.
 
 The constructor requires a block size of at least `sizeof(FreeBlock)`,
@@ -203,7 +203,7 @@ source.
 
 | Location | gcov item | Origin and reason |
 |---|---|---|
-| `pagepool.cpp:29` | branch 1 | Null check before the call to the array `operator delete` in `delete[] pages_`. The constructor either assigns a non-null result of `new[]` or throws before the object exists. |
+| `pagepool.cpp:29` | branch 1 | Null check before the call to the array `operator delete` in `delete[] pages_`. The throwing form of `new[]` used by the constructor never returns null, even for zero pages, and the constructor either assigns its result or throws before the object exists. |
 
 ## Limitations
 
@@ -222,7 +222,7 @@ source.
 ## Evidence
 
 - [Test output](evidence/pagepool-tests.txt): output of `make -B test`
-  for the full suite (80 tests, PagePool, KeyStore and BNodeStore). It
+  for the full suite (89 tests, PagePool, KeyStore and BNodeStore). It
   is the same run as `keystore-tests.txt` and `bnodestore-tests.txt`.
 - [Coverage summary](evidence/pagepool-coverage.txt): gcov output after
   running only `./tests.exe /resolver/PagePool`. The filter does not

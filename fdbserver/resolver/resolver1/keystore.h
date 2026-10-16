@@ -34,6 +34,17 @@ struct KeyRef {
     std::uint64_t blockGen;
 };
 
+struct RangeRef {
+	const KeyBlockHeader* firstBlock;
+	std::uint16_t keyOffset;
+	std::uint16_t beginLength;
+	std::uint16_t endStart;
+	std::uint16_t endLength;
+	std::uint64_t blockGen;
+};
+
+static_assert(sizeof(RangeRef) == 24);
+
 class KeyStore {
 	public:
 		explicit KeyStore(PagePool& pool);
@@ -54,7 +65,38 @@ class KeyStore {
 		void insertKey(KeyRef key, Version cv, const KeyStore& keyStore);
 		int compareKeys(const KeyRef& kr1, const KeyRef& kr2) const;
 		int compareKeys(const StringRef& key, const KeyRef& stored) const;
+
+		std::optional<RangeRef> appendRange(
+			const StringRef& begin,
+			const StringRef& end,
+			Version cv);
+		bool isValid(const RangeRef& ref) const;
+		KeyRef beginKey(const RangeRef& ref) const;
+		int compareBegin(const StringRef& key, const RangeRef& stored) const;
+		int compareEnd(const StringRef& key, const RangeRef& stored) const;
 	private:
+		struct RecordStart {
+			KeyBlockHeader* block;
+			std::uint16_t offset;
+			std::uint64_t generation;
+		};
+
+		std::optional<RecordStart> appendRecord(
+			const std::byte* first,
+			std::size_t firstLength,
+			const std::byte* second,
+			std::size_t secondLength,
+			Version cv);
+		int compareFrom(
+			const StringRef& key,
+			const KeyBlockHeader* block,
+			std::size_t offset,
+			std::size_t length) const;
+		int compareAt(
+			const StringRef& key,
+			const RangeRef& stored,
+			std::size_t start,
+			std::size_t length) const;
 		PagePool& pool_;
 		std::size_t blockSize_;
 		KeyBlockHeader* oldestKeyBlock_ = nullptr;

@@ -67,6 +67,15 @@ PASS /resolver/KeyStore/CompareKeysFirstDifferenceDecides
 PASS /resolver/KeyStore/CompareKeysUnsignedBytes
 PASS /resolver/KeyStore/CompareKeysMultiBlock
 PASS /resolver/KeyStore/CompareKeysAgainstReference
+PASS /resolver/KeyStore/AppendRangePointStoresKeyOnce
+PASS /resolver/KeyStore/AppendRangeGeneralStoresBeginThenEnd
+PASS /resolver/KeyStore/AppendRangeEmptyBegin
+PASS /resolver/KeyStore/BeginKeyViewsTheRecord
+PASS /resolver/KeyStore/AppendRangeEndAtBlockBoundary
+PASS /resolver/KeyStore/AppendRangeAcrossBlocks
+PASS /resolver/KeyStore/AppendRangeIsAllOrNothing
+PASS /resolver/KeyStore/CompareRangeEndsAgainstReference
+PASS /resolver/KeyStore/CopiesWithOldCVKeepOldBlocksIntact
 PASS /resolver/PagePool/AllocationOrder
 PASS /resolver/PagePool/ReuseReleasedBlock
 PASS /resolver/PagePool/PageAlignment
@@ -80,4 +89,4 @@ PASS /resolver/PagePool/BudgetAndAllocatedBytes
 PASS /resolver/PagePool/ReleaseAfterExhaustion
 PASS /resolver/PagePool/ReleaseIsLifo
 PASS /resolver/PagePool/ReleaseBlockFromAnotherPage
-80 passed, 0 failed
+89 passed, 0 failed

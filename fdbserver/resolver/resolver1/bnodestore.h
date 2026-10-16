@@ -65,7 +65,7 @@ struct LeafBlockLayout {
 	static_assert(C > 0 && C <= 64);
 	BNodeHeader header;
 	Version cv[C];
-	KeyRef keys[C];
+	RangeRef ranges[C];
 	std::uint8_t order[C]{};
 	std::uint64_t freeSlots = UINT64_MAX >> (64 - C);
 	LeafBlockLayout<C>* left = nullptr;
@@ -148,7 +148,7 @@ public:
 
 	inline void insertAt(
 		std::size_t rank,
-		const KeyRef& key,
+		const RangeRef& range,
 		Version cv,
 		LeafBlock* node);
 
@@ -275,7 +275,7 @@ inline void BNodeStore::insertAt(std::size_t rank,
 }
 
 inline void BNodeStore::insertAt(std::size_t rank, 
-							const KeyRef& key, 
+							const RangeRef& range, 
 							Version cv,
 							LeafBlock* node) {
 	assert(node != nullptr);
@@ -289,7 +289,7 @@ inline void BNodeStore::insertAt(std::size_t rank,
 	node->order[rank]=static_cast<std::uint8_t>(slot);
 	node->freeSlots&=~(std::uint64_t{1}<<slot);
 	node->cv[slot] = cv;
-	node->keys[slot] = key;
+	node->ranges[slot] = range;
 }
 
 inline bool BNodeStore::findKey(const StringRef& key,
@@ -326,7 +326,7 @@ inline bool BNodeStore::findKey(const StringRef& key,
 	std::size_t mid= lo+(hi-lo)/2;
 	int comp;
 	while (lo < hi){
-		comp= keyStore_.compareKeys(key,node->keys[node->order[mid]]);
+		comp= keyStore_.compareBegin(key,node->ranges[node->order[mid]]);
 		if (comp==0) {
 			rank=mid;
 			return true;

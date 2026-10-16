@@ -782,3 +782,444 @@ TEST_CASE("/resolver/KeyStore/CompareKeysAgainstReference") {
 		}
 	}
 }
+
+namespace {
+
+// Total length of the stored record behind a range.
+std::size_t recordLength(const RangeRef& r) {
+	return std::size_t{r.endStart} + r.endLength;
+}
+
+// Reads length bytes from logical position start of the record, walking
+// the blocks independently of KeyStore.
+std::vector<std::byte> readRecord(const KeyStore& store, const RangeRef& r,
+								  std::size_t start, std::size_t length) {
+	std::vector<std::byte> bytes;
+	const KeyBlockHeader* block = r.firstBlock;
+	std::size_t offset = r.keyOffset;
+	std::size_t skip = start + length;
+	std::size_t position = 0;
+
+	while (skip != 0) {
+		if (offset == store.blockSize()) {
+			block = block->nextBlock;
+			ASSERT(block != nullptr);
+			offset = sizeof(KeyBlockHeader);
+		}
+		const std::byte* data = reinterpret_cast<const std::byte*>(block);
+		if (position >= start) {
+			bytes.push_back(data[offset]);
+		}
+		++offset;
+		++position;
+		--skip;
+	}
+
+	return bytes;
+}
+
+// The distinct blocks holding the bytes of a record, in chain order.
+std::vector<const KeyBlockHeader*> recordBlocks(const KeyStore& store,
+												const RangeRef& r) {
+	std::vector<const KeyBlockHeader*> blocks{r.firstBlock};
+	const KeyBlockHeader* block = r.firstBlock;
+	std::size_t offset = r.keyOffset;
+
+	for (std::size_t i = 0; i < recordLength(r); ++i) {
+		if (offset == store.blockSize()) {
+			block = block->nextBlock;
+			ASSERT(block != nullptr);
+			blocks.push_back(block);
+			offset = sizeof(KeyBlockHeader);
+		}
+		++offset;
+	}
+
+	return blocks;
+}
+
+std::optional<RangeRef> appendRange(KeyStore& store,
+									const std::vector<std::byte>& begin,
+									const std::vector<std::byte>& end,
+									Version cv) {
+	return store.appendRange(asStringRef(begin), asStringRef(end), cv);
+}
+
+// Checks that both views of the range read back the given keys.
+void checkRangeBytes(const KeyStore& store, const RangeRef& r,
+					 const std::vector<std::byte>& begin,
+					 const std::vector<std::byte>& end) {
+	ASSERT_EQ(r.beginLength, begin.size());
+	ASSERT_EQ(r.endLength, end.size());
+	ASSERT(readRecord(store, r, 0, r.beginLength) == begin);
+	ASSERT(readRecord(store, r, r.endStart, r.endLength) == end);
+	ASSERT_EQ(store.compareBegin(asStringRef(begin), r), 0);
+	ASSERT_EQ(store.compareEnd(asStringRef(end), r), 0);
+}
+
+} // namespace
+
+TEST_CASE("/resolver/KeyStore/AppendRangePointStoresKeyOnce") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	const auto begin = bytesOf({'a', 'b', 'c'});
+	const auto end = bytesOf({'a', 'b', 'c', 0});
+	const std::optional<RangeRef> r = appendRange(store, begin, end, 7);
+	ASSERT(r.has_value());
+
+	ASSERT_EQ(r->keyOffset, sizeof(KeyBlockHeader));
+	ASSERT_EQ(r->beginLength, 3);
+	ASSERT_EQ(r->endStart, 0);
+	ASSERT_EQ(r->endLength, 4);
+	ASSERT_EQ(recordLength(*r), 4);
+	checkRangeBytes(store, *r, begin, end);
+
+	// The next record starts right after the four stored bytes.
+	const std::optional<KeyRef> next = append(store, bytesOf({'z'}), 7);
+	ASSERT(next.has_value());
+	ASSERT_EQ(next->keyOffset, sizeof(KeyBlockHeader) + 4);
+}
+
+TEST_CASE("/resolver/KeyStore/AppendRangeGeneralStoresBeginThenEnd") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	const auto begin = bytesOf({'a', 'b', 'c'});
+	const auto end = bytesOf({'x', 'y', 'z'});
+	const std::optional<RangeRef> r = appendRange(store, begin, end, 7);
+	ASSERT(r.has_value());
+
+	ASSERT_EQ(r->beginLength, 3);
+	ASSERT_EQ(r->endStart, 3);
+	ASSERT_EQ(r->endLength, 3);
+	ASSERT(readRecord(store, *r, 0, 6) == bytesOf({'a', 'b', 'c', 'x', 'y', 'z'}));
+	checkRangeBytes(store, *r, begin, end);
+
+	// A key followed by a non-zero byte is a general range, not a point.
+	const auto almostPoint = bytesOf({'a', 'b', 'c', 1});
+	const std::optional<RangeRef> g = appendRange(store, begin, almostPoint, 7);
+	ASSERT(g.has_value());
+	ASSERT_EQ(g->endStart, 3);
+	ASSERT_EQ(g->keyOffset, r->keyOffset + 6);
+	checkRangeBytes(store, *g, begin, almostPoint);
+
+	// So is an end one byte longer and ending in zero that does not start
+	// with begin.
+	const auto otherPrefix = bytesOf({'a', 'b', 'd', 0});
+	const std::optional<RangeRef> h = appendRange(store, begin, otherPrefix, 7);
+	ASSERT(h.has_value());
+	ASSERT_EQ(h->endStart, 3);
+	checkRangeBytes(store, *h, begin, otherPrefix);
+}
+
+TEST_CASE("/resolver/KeyStore/AppendRangeEmptyBegin") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	const std::vector<std::byte> empty;
+	const std::optional<RangeRef> point =
+		appendRange(store, empty, bytesOf({0}), 3);
+	const std::optional<RangeRef> general =
+		appendRange(store, empty, bytesOf({'x'}), 3);
+	ASSERT(point.has_value() && general.has_value());
+
+	// Both store only the end, and begin is the empty prefix of it.
+	ASSERT_EQ(point->beginLength, 0);
+	ASSERT_EQ(point->endStart, 0);
+	ASSERT_EQ(point->endLength, 1);
+	ASSERT_EQ(general->beginLength, 0);
+	ASSERT_EQ(general->endStart, 0);
+	ASSERT_EQ(general->endLength, 1);
+	ASSERT_EQ(general->keyOffset, point->keyOffset + 1);
+	checkRangeBytes(store, *point, empty, bytesOf({0}));
+	checkRangeBytes(store, *general, empty, bytesOf({'x'}));
+
+	// An empty begin does not make the range valid forever.
+	const KeyRef begin = store.beginKey(*general);
+	ASSERT_EQ(begin.keyLength, 0);
+	ASSERT(store.isValid(*general));
+
+	ASSERT(store.reclaimOldest() == Version{3});
+	ASSERT(!store.isValid(*point));
+	ASSERT(!store.isValid(*general));
+	ASSERT(store.isValid(begin));
+}
+
+TEST_CASE("/resolver/KeyStore/BeginKeyViewsTheRecord") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	ASSERT(append(store, makeKey(9, 1), 1).has_value());
+	const auto begin = makeKey(SmallPayload + 5, 2);
+	const auto end = makeKey(SmallPayload, 3);
+	const std::optional<RangeRef> r = appendRange(store, begin, end, 4);
+	ASSERT(r.has_value());
+
+	const KeyRef key = store.beginKey(*r);
+	ASSERT(key.firstBlock == r->firstBlock);
+	ASSERT_EQ(key.keyOffset, r->keyOffset);
+	ASSERT_EQ(key.keyLength, r->beginLength);
+	ASSERT_EQ(key.blockGen, r->blockGen);
+	ASSERT(readKey(store, key) == begin);
+}
+
+// Records whose end starts exactly at the first byte of the next block, one
+// byte before it and one byte after it.
+TEST_CASE("/resolver/KeyStore/AppendRangeEndAtBlockBoundary") {
+	for (std::size_t beginLength :
+		 {SmallPayload - 1, SmallPayload, SmallPayload + 1}) {
+		PagePool pool(PageSize, SmallBlock);
+		KeyStore store(pool);
+
+		const auto begin = makeKey(beginLength, 4);
+		auto end = begin;
+		end.push_back(std::byte{7});
+		end.push_back(std::byte{8});
+
+		const std::optional<RangeRef> r = appendRange(store, begin, end, 2);
+		ASSERT(r.has_value());
+		ASSERT_EQ(r->keyOffset, sizeof(KeyBlockHeader));
+		ASSERT_EQ(r->endStart, beginLength);
+		checkRangeBytes(store, *r, begin, end);
+
+		// When begin fills the first block, end starts at the first data
+		// byte of the second one.
+		if (beginLength == SmallPayload) {
+			const std::vector<const KeyBlockHeader*> blocks =
+				recordBlocks(store, *r);
+			ASSERT(blocks.size() >= 2);
+			ASSERT(reinterpret_cast<const std::byte*>(blocks[1])
+					   [sizeof(KeyBlockHeader)] == end.front());
+		}
+
+		// Keys differing in the first and the last byte of the end.
+		auto lower = end;
+		lower.front() = static_cast<std::byte>(
+			std::to_integer<int>(lower.front()) - 1);
+		auto higher = end;
+		higher.back() = static_cast<std::byte>(
+			std::to_integer<int>(higher.back()) + 1);
+		ASSERT(store.compareEnd(asStringRef(lower), *r) < 0);
+		ASSERT(store.compareEnd(asStringRef(higher), *r) > 0);
+		ASSERT(store.compareEnd(asStringRef(begin), *r) < 0);
+	}
+}
+
+TEST_CASE("/resolver/KeyStore/AppendRangeAcrossBlocks") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	ASSERT(append(store, makeKey(13, 1), 1).has_value());
+
+	const auto begin = makeKey(SmallPayload * 2 - 3, 5);
+	auto end = begin;
+	end.back() = static_cast<std::byte>(std::to_integer<int>(end.back()) + 1);
+	end.insert(end.end(), 50, std::byte{9});
+
+	const std::optional<RangeRef> r = appendRange(store, begin, end, 6);
+	ASSERT(r.has_value());
+	ASSERT(r->keyOffset != sizeof(KeyBlockHeader));
+	ASSERT(recordBlocks(store, *r).size() >= 5);
+	checkRangeBytes(store, *r, begin, end);
+
+	// Every block of the record records the range's CV.
+	for (const KeyBlockHeader* block : recordBlocks(store, *r)) {
+		ASSERT(block->maxCV >= Version{6});
+	}
+}
+
+TEST_CASE("/resolver/KeyStore/AppendRangeIsAllOrNothing") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	const std::optional<RangeRef> first =
+		appendRange(store, bytesOf({'a'}), bytesOf({'b'}), 1);
+	ASSERT(first.has_value());
+	const std::vector<std::byte*> taken = drainPool(pool, 1);
+
+	// Needs the open block and two more; only one is available.
+	const auto begin = makeKey(SmallPayload, 1);
+	const auto end = makeKey(SmallPayload + 1, 2);
+	ASSERT(!appendRange(store, begin, end, 2).has_value());
+	ASSERT_EQ(freeBlockCount(pool), 1);
+
+	// The open block is untouched: the next range follows the first one.
+	const std::optional<RangeRef> next =
+		appendRange(store, bytesOf({'c'}), bytesOf({'d'}), 3);
+	ASSERT(next.has_value());
+	ASSERT(next->firstBlock == first->firstBlock);
+	ASSERT_EQ(next->keyOffset, first->keyOffset + 2);
+	checkRangeBytes(store, *first, bytesOf({'a'}), bytesOf({'b'}));
+
+	for (std::byte* block : taken) {
+		pool.releaseBlock(block);
+	}
+}
+
+// Random points and general ranges, some spanning blocks, compared with
+// random external keys through both views and against beginKey.
+TEST_CASE("/resolver/KeyStore/CompareRangeEndsAgainstReference") {
+	PagePool pool(8 * PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	const std::byte values[] = {
+		std::byte{0x00}, std::byte{0x01}, std::byte{0x7F},
+		std::byte{0x80}, std::byte{0xFF}
+	};
+	const auto base = makeKey(SmallPayload * 3, 11);
+	std::uint32_t state = 2026;
+	auto next = [&state]() {
+		state = state * 1103515245u + 12345u;
+		return state >> 8;
+	};
+	auto derived = [&]() {
+		std::vector<std::byte> key(base.begin(),
+								   base.begin() + next() % (base.size() + 1));
+		if (!key.empty() && next() % 2 == 0) {
+			key[next() % key.size()] = values[next() % std::size(values)];
+		}
+		return key;
+	};
+
+	struct Stored {
+		RangeRef ref;
+		std::vector<std::byte> begin;
+		std::vector<std::byte> end;
+	};
+	std::vector<Stored> ranges;
+
+	while (ranges.size() < 60) {
+		std::vector<std::byte> begin = derived();
+		std::vector<std::byte> end;
+
+		if (next() % 2 == 0) {
+			end = begin;
+			end.push_back(std::byte{0});
+		} else {
+			end = derived();
+			if (!(begin < end)) {
+				continue;
+			}
+		}
+
+		const std::optional<RangeRef> r = appendRange(store, begin, end, 1);
+		ASSERT(r.has_value());
+		checkRangeBytes(store, *r, begin, end);
+		ranges.push_back({*r, begin, end});
+	}
+
+	std::vector<std::vector<std::byte>> keys;
+	for (int i = 0; i < 60; ++i) {
+		keys.push_back(derived());
+	}
+	for (const Stored& s : ranges) {
+		keys.push_back(s.begin);
+		keys.push_back(s.end);
+	}
+
+	for (const Stored& s : ranges) {
+		for (const auto& key : keys) {
+			ASSERT_EQ(sign(store.compareBegin(asStringRef(key), s.ref)),
+					  expectedOrder(key, s.begin));
+			ASSERT_EQ(sign(store.compareEnd(asStringRef(key), s.ref)),
+					  expectedOrder(key, s.end));
+			ASSERT_EQ(sign(store.compareKeys(asStringRef(key),
+											 store.beginKey(s.ref))),
+					  expectedOrder(key, s.begin));
+		}
+	}
+}
+
+// Trimming copies the outer parts of a range as new records with their old
+// CV. Closed blocks are not modified, new blocks record the maximum CV of
+// their records, and reclamation stays FIFO with validity by generation.
+TEST_CASE("/resolver/KeyStore/CopiesWithOldCVKeepOldBlocksIntact") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	// [a, z) with CV 10 fills its block exactly, which closes it.
+	auto a = makeKey(SmallPayload / 2, 1);
+	auto z = a;
+	z.front() = std::byte{0xFF};
+	const std::optional<RangeRef> old = appendRange(store, a, z, 10);
+	ASSERT(old.has_value());
+	ASSERT_EQ(recordLength(*old), SmallPayload);
+	ASSERT_EQ(recordBlocks(store, *old).size(), 1);
+
+	const KeyBlockHeader* oldBlock = old->firstBlock;
+	const std::vector<std::byte> oldContents(
+		reinterpret_cast<const std::byte*>(oldBlock),
+		reinterpret_cast<const std::byte*>(oldBlock) + SmallBlock);
+	ASSERT_EQ(oldBlock->maxCV, Version{10});
+
+	// The new write [d, m) with CV 20, and the outer parts [a, d) and
+	// [m, z) copied with CV 10. One more copy carries an even older CV.
+	auto d = a;
+	d.front() = std::byte{0x40};
+	auto m = a;
+	m.front() = std::byte{0x80};
+
+	const std::optional<RangeRef> middle = appendRange(store, d, m, 20);
+	const std::optional<RangeRef> left = appendRange(store, a, d, 10);
+	const std::optional<RangeRef> right = appendRange(store, m, z, 10);
+	const std::optional<RangeRef> older =
+		appendRange(store, bytesOf({'p'}), bytesOf({'p', 0}), 5);
+	ASSERT(middle.has_value() && left.has_value() && right.has_value() &&
+		   older.has_value());
+
+	// The old block is unchanged, including its maximum CV.
+	ASSERT(std::equal(oldContents.begin(), oldContents.end(),
+					  reinterpret_cast<const std::byte*>(oldBlock)));
+	ASSERT_EQ(oldBlock->maxCV, Version{10});
+	checkRangeBytes(store, *old, a, z);
+
+	// Every new record is after the old block and has a newer generation.
+	const RangeRef copies[] = {*middle, *left, *right, *older};
+	const Version cvs[] = {20, 10, 10, 5};
+	for (const RangeRef& r : copies) {
+		ASSERT(r.firstBlock != oldBlock);
+		ASSERT(r.blockGen > old->blockGen);
+	}
+	checkRangeBytes(store, *middle, d, m);
+	checkRangeBytes(store, *left, a, d);
+	checkRangeBytes(store, *right, m, z);
+
+	// Each new block holds the maximum CV of the records it contains.
+	std::vector<std::pair<const KeyBlockHeader*, Version>> expectedMax;
+	for (std::size_t i = 0; i < std::size(copies); ++i) {
+		for (const KeyBlockHeader* block : recordBlocks(store, copies[i])) {
+			auto found = std::find_if(
+				expectedMax.begin(), expectedMax.end(),
+				[block](const auto& e) { return e.first == block; });
+			if (found == expectedMax.end()) {
+				expectedMax.push_back({block, cvs[i]});
+			} else {
+				found->second = std::max(found->second, cvs[i]);
+			}
+		}
+	}
+	ASSERT(expectedMax.size() >= 2);
+	for (const auto& [block, cv] : expectedMax) {
+		ASSERT_EQ(block->maxCV, cv);
+	}
+
+	// Reclamation is FIFO: the old block first, with its own maximum CV.
+	ASSERT(store.oldestCV() == Version{10});
+	ASSERT(store.reclaimOldest() == Version{10});
+	ASSERT(!store.isValid(*old));
+	for (const RangeRef& r : copies) {
+		ASSERT(store.isValid(r));
+	}
+
+	// Then the new blocks, in chain order, each with its maximum CV. A
+	// record becomes invalid when its first block is reclaimed.
+	for (const auto& [block, cv] : expectedMax) {
+		ASSERT(store.reclaimOldest() == cv);
+		for (const RangeRef& r : copies) {
+			if (r.firstBlock == block) {
+				ASSERT(!store.isValid(r));
+			}
+		}
+	}
+}

@@ -26,6 +26,23 @@ std::optional<KeyRef> KeyStore::appendKey(
 	if (length == 0) {
 		return KeyRef{nullptr, 0, 0, 0};
 	}
+	const std::optional<RecordStart> start =
+		appendRecord(key, length, nullptr, 0, cv);
+	if (!start) {
+		return std::nullopt;
+	}
+	return KeyRef{start->block, start->offset, length, start->generation};
+}
+
+std::optional<KeyStore::RecordStart> KeyStore::appendRecord(
+	const std::byte* first,
+	std::size_t firstLength,
+	const std::byte* second,
+	std::size_t secondLength,
+	Version cv) {
+	const std::size_t length = firstLength + secondLength;
+	assert(length != 0);
+
 	// Without an open block, the key starts in a new block.
 	const bool needsOpenBlock = openKeyBlock_ == nullptr;
 	const std::size_t usedBytes =
@@ -74,9 +91,10 @@ std::optional<KeyRef> KeyStore::appendKey(
 
 	const std::uint64_t gen = blocks[0]->generation;
 
-	// Copy the key and link its blocks.
+	// Copy the record and link its blocks.
 	std::size_t bytesToCopy = length;
-	const std::byte* origin = key;
+	const std::byte* origin = first;
+	std::size_t originBytes = firstLength;
 
 	for (std::size_t i = 0; i < neededBlocks; ++i) {
 		const std::size_t writeOffset =
@@ -87,7 +105,19 @@ std::optional<KeyRef> KeyStore::appendKey(
 		auto* dest =
 			reinterpret_cast<std::byte*>(blocks[i]) + writeOffset;
 
-		std::memcpy(dest, origin, bytesCanCopy);
+		// The record is the first source followed by the second one.
+		for (std::size_t copied = 0; copied < bytesCanCopy;) {
+			if (originBytes == 0) {
+				origin = second;
+				originBytes = secondLength;
+			}
+			const std::size_t chunk =
+				std::min(bytesCanCopy - copied, originBytes);
+			std::memcpy(dest + copied, origin, chunk);
+			copied += chunk;
+			origin += chunk;
+			originBytes -= chunk;
+		}
 		blocks[i]->maxCV = std::max(blocks[i]->maxCV, cv);
 
 		if (i + 1 < neededBlocks) {
@@ -96,7 +126,6 @@ std::optional<KeyRef> KeyStore::appendKey(
 			openKeyBlockUsedBytes_ = writeOffset + bytesCanCopy;
 		}
 
-		origin += bytesCanCopy;
 		bytesToCopy -= bytesCanCopy;
 	}
 
@@ -123,10 +152,9 @@ std::optional<KeyRef> KeyStore::appendKey(
 		}
 	}
 
-	return KeyRef{
+	return RecordStart{
 		blocks[0],
 		static_cast<std::uint16_t>(offset),
-		length,
 		gen
 	};
 }
@@ -220,13 +248,22 @@ int KeyStore::compareKeys(const KeyRef& kr1, const KeyRef& kr2) const {
 }
 
 int KeyStore::compareKeys(const StringRef& key, const KeyRef& stored) const {
+	return compareFrom(key, stored.firstBlock, stored.keyOffset, stored.keyLength);
+}
+
+int KeyStore::compareFrom(
+	const StringRef& key,
+	const KeyBlockHeader* block,
+	std::size_t offset,
+	std::size_t length) const {
 	const std::byte* start1=reinterpret_cast<const std::byte*>(key.begin());
 	std::size_t rem1 = static_cast<std::size_t>(key.size());
-	const KeyBlockHeader* block2=stored.firstBlock;
-	std::size_t bytes2 = std::min<std::size_t>(stored.keyLength, blockSize_ - stored.keyOffset);
-	std::size_t rem2 = stored.keyLength;
+	const KeyBlockHeader* block2=block;
+	std::size_t bytes2 = std::min<std::size_t>(length, blockSize_ - offset);
+	std::size_t rem2 = length;
 	std::size_t usable = blockSize_-sizeof(KeyBlockHeader);
-	const std::byte* start2=keyStart(stored);
+	const std::byte* start2=length == 0 ? nullptr :
+		reinterpret_cast<const std::byte*>(block2)+offset;
 	while (rem1!=0 && rem2!=0) {
 		std::size_t adv= std::min(rem1, bytes2);
 		int res=memcmp(start1, start2, adv);
@@ -252,4 +289,80 @@ int KeyStore::compareKeys(const StringRef& key, const KeyRef& stored) const {
 	} else {
 		return 1;
 	}
+}
+
+std::optional<RangeRef> KeyStore::appendRange(
+	const StringRef& begin,
+	const StringRef& end,
+	Version cv) {
+	assert(compare(begin, end) < 0);
+	assert(begin.size() <= std::numeric_limits<std::uint16_t>::max());
+	assert(end.size() <= std::numeric_limits<std::uint16_t>::max());
+
+	const auto* beginBytes = reinterpret_cast<const std::byte*>(begin.begin());
+	const auto* endBytes = reinterpret_cast<const std::byte*>(end.begin());
+	const std::size_t beginLength = static_cast<std::size_t>(begin.size());
+	const std::size_t endLength = static_cast<std::size_t>(end.size());
+
+	// A point range [k, k\0) is stored once, as the bytes of its end.
+	const bool point = endLength == beginLength + 1 &&
+		end.begin()[beginLength] == 0 &&
+		(beginLength == 0 ||
+		 memcmp(begin.begin(), end.begin(), beginLength) == 0);
+
+	const std::size_t endStart = point ? 0 : beginLength;
+	assert(endStart == 0 || endStart == beginLength);
+
+	const std::optional<RecordStart> start = point
+		? appendRecord(endBytes, endLength, nullptr, 0, cv)
+		: appendRecord(beginBytes, beginLength, endBytes, endLength, cv);
+	if (!start) {
+		return std::nullopt;
+	}
+
+	return RangeRef{
+		start->block,
+		start->offset,
+		static_cast<std::uint16_t>(beginLength),
+		static_cast<std::uint16_t>(endStart),
+		static_cast<std::uint16_t>(endLength),
+		start->generation
+	};
+}
+
+bool KeyStore::isValid(const RangeRef& ref) const {
+	return ref.blockGen > lastReclaimedKeyGeneration_;
+}
+
+KeyRef KeyStore::beginKey(const RangeRef& ref) const {
+	return KeyRef{
+		ref.firstBlock,
+		ref.keyOffset,
+		ref.beginLength,
+		ref.blockGen
+	};
+}
+
+int KeyStore::compareBegin(const StringRef& key, const RangeRef& stored) const {
+	return compareAt(key, stored, 0, stored.beginLength);
+}
+
+int KeyStore::compareEnd(const StringRef& key, const RangeRef& stored) const {
+	return compareAt(key, stored, stored.endStart, stored.endLength);
+}
+
+int KeyStore::compareAt(
+	const StringRef& key,
+	const RangeRef& stored,
+	std::size_t start,
+	std::size_t length) const {
+	// Moves start bytes into the record, skipping block headers.
+	const KeyBlockHeader* block = stored.firstBlock;
+	std::size_t offset = stored.keyOffset;
+	while (start >= blockSize_ - offset) {
+		start -= blockSize_ - offset;
+		block = block->nextBlock;
+		offset = sizeof(KeyBlockHeader);
+	}
+	return compareFrom(key, block, offset + start, length);
 }

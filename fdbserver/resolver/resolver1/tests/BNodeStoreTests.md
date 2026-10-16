@@ -11,7 +11,9 @@ repositioning of a node in the age list when its commit version grows,
 the oldest node and its commit version, the return of all remaining
 blocks when the store is destroyed, and, within one node, insertion and
 erasure of entries at a given rank, reuse of free slots and binary
-search of an external key (`StringRef`) without storing it.
+search of an external key (`StringRef`) without storing it. Leaf entries
+are key ranges (`RangeRef`), searched by their begin; internal entries
+are single separator keys (`KeyRef`).
 
 Outside the scope of this component: `PagePool` itself (see
 [PagePoolTests.md](PagePoolTests.md)), key storage and key comparison
@@ -32,9 +34,9 @@ component.
   | File | SHA-256 |
   |---|---|
   | `bnodestore.cpp` | `a945a23136d881e9` |
-  | `bnodestore.h` | `fcfe6f06e8fa56bb` |
-  | `keystore.cpp` | `f294adf3d5a145bc` |
-  | `keystore.h` | `e5de2129d650f0a4` |
+  | `bnodestore.h` | `2a14f18942ce0544` |
+  | `keystore.cpp` | `0bddf3aa05b5e7f6` |
+  | `keystore.h` | `2038ddef45ade8ab` |
   | `fdbcompat.h` | `788cc62b6648bf6d` |
   | `common.h` | `0a0b864acb86c330` |
   | `pagepool.cpp` | `7506a3e1f65b263a` |
@@ -42,7 +44,7 @@ component.
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `246b6c0baf2b6a99` |
-  | `tests/bnodestoretests.cpp` | `014528240b582c67` |
+  | `tests/bnodestoretests.cpp` | `f53fbddf8852501a` |
 
 - Working tree: the files listed above
 - Platform: macOS 27.0.1 (build 26A434), arm64 (Apple M3 Pro)
@@ -141,12 +143,15 @@ Node lifecycle and age list:
 
 Entries within a node. Every insertion and erasure test checks the node
 after each operation against a reference sequence kept in a
-`std::vector`: `count`, the key, separator or commit version and child
-at each rank through `order`, that no slot appears twice in `order`,
+`std::vector`: `count`, the range and commit version (leaves) or the
+separator, separator commit version and child (internal nodes) at each
+rank through `order`, that no slot appears twice in `order`,
 that `freeSlots` holds exactly the unused slots, and `hasSpace`. In
 internal nodes it also checks that every child still in the node points
 to it as `parent` and holds its slot as `parentSlot`, and that
-`maxSubtreesCV` of the slot equals the child's `maxCV`.
+`maxSubtreesCV` of the slot equals the child's `maxCV`. Leaf entries
+alternate point ranges and general ranges, so that leaves hold both
+kinds of record.
 
 | Test case | Property checked | Result |
 |---|---|---|
@@ -171,15 +176,15 @@ to it as `parent` and holds its slot as `parentSlot`, and that
 | `/resolver/BNodeStore/InsertAndEraseInterleaved` | 300 pseudo-random insertions and erasures in an internal node, with a fixed seed; every insertion takes the lowest free slot. The sequence reaches the full node 53 times and the empty node once. | PASS |
 | `/resolver/BNodeStore/InsertAndEraseInterleavedInLeaf` | The same in a leaf, with another seed; the sequence reaches the full leaf 45 times and the empty leaf 5 times. | PASS |
 | `/resolver/BNodeStore/FindKeyInEmptyNodes` | In an empty leaf and an empty internal node, searching an external key returns false and rank 0. | PASS |
-| `/resolver/BNodeStore/FindKeyInLeaf` | Ten keys inserted in the order 5, 2, 8, 0, 9, 3, 7, 1, 6, 4 of their sorted position, so that `order` is not the identity. Each key, searched as an external `StringRef` over a local array and not stored, is found with its rank. Absent keys before the first, between each pair and after the last return false and the rank where they would be inserted, as do a proper prefix of every key, a key longer than an existing one, and the empty key. | PASS |
-| `/resolver/BNodeStore/FindKeyInInternalNode` | The same in an internal node. | PASS |
+| `/resolver/BNodeStore/FindKeyInLeaf` | Ten ranges, alternately points and general ranges, with begins at the ten search keys, inserted in the order 5, 2, 8, 0, 9, 3, 7, 1, 6, 4 of their sorted position, so that `order` is not the identity; the search compares with each range's begin. Each key, searched as an external `StringRef` over a local array and not stored, is found with its rank. Absent keys before the first, between each pair and after the last return false and the rank where they would be inserted, as do a proper prefix of every key, a key longer than an existing one, and the empty key. | PASS |
+| `/resolver/BNodeStore/FindKeyInInternalNode` | The same in an internal node, whose separators are single keys. | PASS |
 
 The counts of full and empty nodes reached by the interleaved tests come
 from replaying their random decisions with the same seeds, not from the
 test output.
 
 41 BNodeStore tests passed, 0 failed. The full run, including the 13
-PagePool tests and the 26 KeyStore tests, reports 80 passed and 0
+PagePool tests and the 35 KeyStore tests, reports 89 passed and 0
 failed.
 
 The store has these preconditions, checked with `assert`, which
@@ -307,11 +312,12 @@ block size differs from `BlockSize`.
 |---|---|
 | `bnodestore.cpp:7` | branch 0 |
 
-**Unreachable with the current `PagePool`.** The exception edge of the
-call to `releaseBlock` in the destructor (`invoke` instruction). The
-destructor is implicitly `noexcept`, so the edge leads to
-`__clang_call_terminate`. `releaseBlock` is not declared `noexcept`, but
-its current implementation only updates the free list and cannot throw.
+**Exception path not exercised.** The exception edge of the call to
+`releaseBlock` in the destructor (`invoke` instruction). The destructor
+is implicitly `noexcept`, so the edge leads to `__clang_call_terminate`.
+`releaseBlock` is not declared `noexcept`; its current implementation
+contains no operation that throws, but no fault injection was
+performed.
 
 | Location | gcov item | Call |
 |---|---|---|
@@ -327,8 +333,10 @@ header.
   observed through the `agePrevious` and `ageNext` links of each node,
   and the newest node through the predecessor of the next allocated
   node.
-- The exception edge from `releaseBlock` in the destructor is
-  unreachable only while `PagePool` keeps its current implementation.
+- No fault injection was performed for the exception edge of
+  `releaseBlock` in the destructor. Its current implementation contains
+  no throwing operation; a change in `PagePool` would make this path
+  relevant.
 - The failure paths of the `assert` checks in `bnodestore.h` are not
   measured by either tool.
 - A build with `NDEBUG` defined removes the precondition checks; such a
@@ -340,7 +348,7 @@ header.
 ## Evidence
 
 - [Test output](evidence/bnodestore-tests.txt): output of `make -B test`
-  for the full suite (80 tests, PagePool, KeyStore and BNodeStore). It
+  for the full suite (89 tests, PagePool, KeyStore and BNodeStore). It
   is the same run as `pagepool-tests.txt` and `keystore-tests.txt`.
 - [Coverage summary](evidence/bnodestore-coverage.txt): gcov output
   after running only `./tests.exe /resolver/BNodeStore`. The filter

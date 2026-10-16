@@ -87,7 +87,7 @@ bnodestore.h:
    65|       |	static_assert(C > 0 && C <= 64);
    66|       |	BNodeHeader header;
    67|       |	Version cv[C];
-   68|       |	KeyRef keys[C];
+   68|       |	RangeRef ranges[C];
    69|       |	std::uint8_t order[C]{};
    70|       |	std::uint64_t freeSlots = UINT64_MAX >> (64 - C);
    71|       |	LeafBlockLayout<C>* left = nullptr;
@@ -3642,7 +3642,7 @@ bnodestore.h:
   148|       |
   149|       |	inline void insertAt(
   150|       |		std::size_t rank,
-  151|       |		const KeyRef& key,
+  151|       |		const RangeRef& range,
   152|       |		Version cv,
   153|       |		LeafBlock* node);
   154|       |
@@ -3793,7 +3793,7 @@ bnodestore.h:
   275|    538|}
   276|       |
   277|       |inline void BNodeStore::insertAt(std::size_t rank, 
-  278|       |							const KeyRef& key, 
+  278|       |							const RangeRef& range, 
   279|       |							Version cv,
   280|    721|							LeafBlock* node) {
   281|    721|	assert(node != nullptr);
@@ -3807,7 +3807,7 @@ bnodestore.h:
   289|    721|	node->order[rank]=static_cast<std::uint8_t>(slot);
   290|    721|	node->freeSlots&=~(std::uint64_t{1}<<slot);
   291|    721|	node->cv[slot] = cv;
-  292|    721|	node->keys[slot] = key;
+  292|    721|	node->ranges[slot] = range;
   293|    721|}
   294|       |
   295|       |inline bool BNodeStore::findKey(const StringRef& key,
@@ -3856,7 +3856,7 @@ bnodestore.h:
   ------------------
   |  Branch (328:9): [True: 80, False: 15]
   ------------------
-  329|     80|		comp= keyStore_.compareKeys(key,node->keys[node->order[mid]]);
+  329|     80|		comp= keyStore_.compareBegin(key,node->ranges[node->order[mid]]);
   330|     80|		if (comp==0) {
   ------------------
   |  Branch (330:7): [True: 10, False: 70]
