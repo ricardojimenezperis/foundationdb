@@ -151,21 +151,30 @@ bool  TempConflictBTree::hasConflict(const ReadConflictRange& read) const {
 	LeafBlock* leaf;
 	size_t rank;
 	bool found=findKey(read.begin, leaf, rank);
-	if (rank > 0){
-		--rank;
-	} else {
-		if (leaf->left!=nullptr) {
-			leaf=leaf->left;
-			rank=leaf->header.count-1;
-		}
+	
+}
+
+bool TempConflictBTree::nextRank(LeafBlock*& leaf, std::size_t& rank) const {
+	if (rank + 1 < leaf->header.count) {
+		++rank;
+		return true;
 	}
+
+	LeafBlock* next = leaf->right;
+	while (next != nullptr && next->header.count == 0) {
+		next = next->right;
+	}
+
+	if (next == nullptr) {
+		return false;
+	}
+
+	leaf = next;
+	rank = 0;
+	return true;
 }
 
-bool nextRank(LeafBlock*& leaf, std::size_t& rank) const {
-
-}
-
-bool prevRank(LeafBlock*& leaf, std::size_t& rank) const {
+bool TempConflictBTree::prevRank(LeafBlock*& leaf, std::size_t& rank) const {
 	if (rank > 0) {
 		--rank;
 		return true;
