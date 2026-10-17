@@ -40,51 +40,38 @@ void TempConflictBTree::addWrite(
 		return;
 	}
 
+	std::size_t slot = 0;
 	bool hasPrevious = false;
 	if (!found) {
-		if (rank > 0) {
-			--rank;
-			hasPrevious = true;
-		} else if (leaf->left != nullptr) {
-			leaf = leaf->left;
-			rank = leaf->header.count - 1;
-			hasPrevious = true;
-		}
+		hasPrevious = prevRank(leaf, rank, slot);
 	}
-
-	auto slot = leaf->order[rank];
-	const RangeRef oldRef = leaf->ranges[slot];
-	const Version oldCV = leaf->cv[slot];
 
 	auto rangeInt =
 		keyStore_.appendRange(write.first, write.second, cv);
 
-	if (hasPrevious &&
-		keyStore_.compareEnd(write.first, oldRef) < 0) {
-
-		// Preserve the left exterior with its original CV.
-		auto rangeExtLeft =
-			keyStore_.appendRange(oldRef, write.first, oldCV);
-		leaf->ranges[slot] = *rangeExtLeft;
-
-		if (keyStore_.compareEnd(write.second, oldRef) < 0) {
-			// Both exteriors come from the same original interval.
-			auto rangeExtRight =
-				keyStore_.appendRange(write.second, oldRef, oldCV);
-			++rank;
-			insertAt(rank, *rangeInt, cv, leaf);
-			++rank;
-			insertAt(rank, *rangeExtRight, oldCV, leaf);
-			return;
-		}
-	}
-
 	if (hasPrevious) {
-		++rank;
-		if (rank == leaf->header.count && leaf->right != nullptr) {
-			leaf = leaf->right;
-			rank = 0;
+		const RangeRef oldRef = leaf->ranges[slot];
+		const Version oldCV = leaf->cv[slot];
+
+		if (keyStore_.compareEnd(write.first, oldRef) < 0) {
+			// Preserve the left exterior with its original CV.
+			auto rangeExtLeft =
+				keyStore_.appendRange(oldRef, write.first, oldCV);
+			leaf->ranges[slot] = *rangeExtLeft;
+
+			if (keyStore_.compareEnd(write.second, oldRef) < 0) {
+				// Both exteriors come from the same original interval.
+				auto rangeExtRight =
+					keyStore_.appendRange(write.second, oldRef, oldCV);
+				++rank;
+				insertAt(rank, *rangeInt, cv, leaf);
+				++rank;
+				insertAt(rank, *rangeExtRight, oldCV, leaf);
+				return;
+			}
 		}
+
+		nextRank(leaf, rank, slot);
 	}
 
 	// eraseAt leaves the cursor at the next entry or at the end.
