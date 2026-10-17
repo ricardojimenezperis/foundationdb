@@ -104,6 +104,6 @@ private:
 	// Otherwise, returns false and leaves both parameters unchanged.
 	bool prevRank(LeafBlock*& leaf, std::size_t& rank, std::size_t& slot) const;	
 	void reclaimOldest();
-	void reclaimUntilAvail(int n)
+	void reclaimUntilAvail(int n);
 };
 
