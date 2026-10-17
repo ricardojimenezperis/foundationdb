@@ -166,6 +166,7 @@ bool TempConflictBTree::nextRank(LeafBlock*& leaf, std::size_t& rank) const {
 	}
 
 	if (next == nullptr) {
+		rank = leaf->header.count;
 		return false;
 	}
 

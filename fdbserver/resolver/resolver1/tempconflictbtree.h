@@ -92,7 +92,16 @@ private:
 	// (rank == count) in the last leaf.
 	// If the tree becomes empty, leaf is nullptr and rank is zero.
 	void eraseAt(std::size_t& rank, LeafBlock*& leaf);
+	// Advances to the next entry, skipping empty leaves.
+	// Requires leaf != nullptr and rank <= leaf->header.count.
+	// Returns true if an entry is found, updating leaf and rank.
+	// Otherwise, returns false, keeps leaf unchanged, and sets rank to count.
 	bool nextRank(LeafBlock*& leaf, std::size_t& rank) const;
+	// Moves to the previous entry, skipping empty leaves.
+	// Requires leaf != nullptr and rank <= leaf->header.count.
+	// rank == count is accepted as an insertion position after the last entry.
+	// Returns true if an entry is found, updating leaf and rank.
+	// Otherwise, returns false and leaves both parameters unchanged.
 	bool prevRank(LeafBlock*& leaf, std::size_t& rank) const;	
 	void reclaimOldest();
 	void reclaimUntilAvail(int n)
