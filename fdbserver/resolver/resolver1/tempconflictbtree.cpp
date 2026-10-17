@@ -22,34 +22,103 @@ void TempConflictBTree::addWrites(
 }
 
 void TempConflictBTree::addWrite(
-		const std::pair<StringRef, StringRef>& write,
-		Version cv) {
+	const std::pair<StringRef, StringRef>& write,
+	Version cv) {
 
-	const int MaxWriteBlocks=35;
+	constexpr std::size_t MaxWriteBlocks = 35;
 	reclaimUntilAvail(MaxWriteBlocks);
-	LeafBlock* leaf=nullptr;
-	std::size_t rank=0;
-	bool found=findKey(write.first, leaf, rank);
-	if (leaf==nullptr){
-		std::optional<RangeRef> range= std::nullopt;
-		range=keyStore_.appendRange(write.first,write.second,cv);
-		leaf=nodeStore_.allocateLeaf(cv);
-		nodeStore_.insertAt(std::size_t{0},*range,cv,leaf);
+
+	LeafBlock* leaf = nullptr;
+	std::size_t rank = 0;
+	const bool found = findKey(write.first, leaf, rank);
+
+	if (leaf == nullptr) {
+		auto range = keyStore_.appendRange(write.first, write.second, cv);
+		leaf = nodeStore_.allocateLeaf(cv);
+		nodeStore_.insertAt(std::size_t{0}, *range, cv, leaf);
+		root_ = &leaf->header;
 		return;
-	} 
-	if (!found){ 
-		if (rank>0){
-			--rank;
-		} else {
-			if (leaf->left!=nullptr){
-				leaf=leaf->left;
-				rank=leaf->header.count-1;
-			}
-		}
-	} 
-	if (!found && leaf){
-		leaf->ranges[rank]=
 	}
+
+	bool hasPrevious = false;
+	if (!found) {
+		if (rank > 0) {
+			--rank;
+			hasPrevious = true;
+		} else if (leaf->left != nullptr) {
+			leaf = leaf->left;
+			rank = leaf->header.count - 1;
+			hasPrevious = true;
+		}
+	}
+
+	auto slot = leaf->order[rank];
+	const RangeRef oldRef = leaf->ranges[slot];
+	const Version oldCV = leaf->cv[slot];
+
+	auto rangeInt =
+		keyStore_.appendRange(write.first, write.second, cv);
+
+	if (hasPrevious &&
+		keyStore_.compareEnd(write.first, oldRef) < 0) {
+
+		// Preserve the left exterior with its original CV.
+		auto rangeExtLeft =
+			keyStore_.appendRange(oldRef, write.first, oldCV);
+		leaf->ranges[slot] = *rangeExtLeft;
+
+		if (keyStore_.compareEnd(write.second, oldRef) < 0) {
+			// Both exteriors come from the same original interval.
+			auto rangeExtRight =
+				keyStore_.appendRange(write.second, oldRef, oldCV);
+			++rank;
+			insertAt(rank, *rangeInt, cv, leaf);
+			++rank;
+			insertAt(rank, *rangeExtRight, oldCV, leaf);
+			return;
+		}
+	}
+
+	if (hasPrevious) {
+		++rank;
+		if (rank == leaf->header.count && leaf->right != nullptr) {
+			leaf = leaf->right;
+			rank = 0;
+		}
+	}
+
+	// eraseAt leaves the cursor at the next entry or at the end.
+	// If the tree becomes empty, it returns leaf == nullptr and rank == 0.
+	int comp = 0;
+	while (leaf != nullptr && rank < leaf->header.count) {
+		slot = leaf->order[rank];
+		comp = keyStore_.compareEnd(write.second, leaf->ranges[slot]);
+		if (comp < 0) {
+			break;
+		}
+		eraseAt(rank, leaf);
+	}
+
+	if (leaf != nullptr && rank < leaf->header.count) {
+		slot = leaf->order[rank];
+
+		if (comp < 0 &&
+			keyStore_.compareBegin(write.second, leaf->ranges[slot]) > 0) {
+
+			// Preserve the right exterior with its original CV.
+			auto rangeExtRight = keyStore_.appendRange(
+				write.second, leaf->ranges[slot], leaf->cv[slot]);
+			leaf->ranges[slot] = *rangeExtRight;
+		}
+	}
+
+	if (leaf == nullptr) {
+		leaf = nodeStore_.allocateLeaf(cv);
+		root_ = &leaf->header;
+		rank = 0;
+	}
+
+	insertAt(rank, *rangeInt, cv, leaf);
 }
 
 bool TempConflictBTree::findKey(
@@ -76,4 +145,69 @@ bool TempConflictBTree::findKey(
 
 	leaf = reinterpret_cast<LeafBlock*>(current);
 	return nodeStore_.findKey(key, rank, leaf);
+}
+
+bool  TempConflictBTree::hasConflict(const ReadConflictRange& read) const {
+	LeafBlock* leaf;
+	size_t rank;
+	bool found=findKey(read.begin, leaf, rank);
+	if (rank > 0){
+		--rank;
+	} else {
+		if (leaf->left!=nullptr) {
+			leaf=leaf->left;
+			rank=leaf->header.count-1;
+		}
+	}
+}
+
+bool nextRank(LeafBlock*& leaf, std::size_t& rank) const {
+
+}
+
+bool prevRank(LeafBlock*& leaf, std::size_t& rank) const {
+	if (rank > 0) {
+		--rank;
+		return true;
+	}
+
+	LeafBlock* previous = leaf->left;
+	while (previous != nullptr && previous->header.count == 0) {
+		previous = previous->left;
+	}
+
+	if (previous == nullptr) {
+		return false;
+	}
+
+	leaf = previous;
+	rank = leaf->header.count - 1;
+	return true;
+}
+
+// Inserts range at the given logical rank, splitting nodes as needed.
+// On return, leaf and rank identify the inserted entry, even if a split
+// moved it to another leaf. rank is a position in order, not a physical slot.
+void  TempConflictBTree::insertAt(
+	std::size_t& rank,
+	const RangeRef& range,
+	Version cv,
+	LeafBlock*& leaf) {
+
+}
+
+// Removes the entry at the given logical rank and repairs the tree.
+// On return, leaf and rank identify the next entry, or the end position
+// (rank == count) in the last leaf.
+// If the tree becomes empty, leaf is nullptr and rank is zero.
+void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
+
+}
+
+void  TempConflictBTree::reclaimOldest() {
+
+}
+
+void  TempConflictBTree::reclaimUntilAvail(int n) {
+	
 }

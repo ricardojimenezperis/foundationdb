@@ -70,6 +70,17 @@ class KeyStore {
 			const StringRef& begin,
 			const StringRef& end,
 			Version cv);
+		// [source.begin, end) and [begin, source.end). Precondition: the
+		// range is not empty; source is valid and is not reclaimed during
+		// the call.
+		std::optional<RangeRef> appendRange(
+			const RangeRef& source,
+			const StringRef& end,
+			Version cv);
+		std::optional<RangeRef> appendRange(
+			const StringRef& begin,
+			const RangeRef& source,
+			Version cv);
 		bool isValid(const RangeRef& ref) const;
 		KeyRef beginKey(const RangeRef& ref) const;
 		int compareBegin(const StringRef& key, const RangeRef& stored) const;
@@ -81,12 +92,40 @@ class KeyStore {
 			std::uint64_t generation;
 		};
 
+		// Bytes to copy into a record: contiguous bytes, or stored bytes
+		// starting at offset in block when bytes is nullptr.
+		struct RecordSource {
+			const std::byte* bytes;
+			const KeyBlockHeader* block;
+			std::size_t offset;
+			std::size_t length;
+		};
+
+		static RecordSource external(const StringRef& key);
+		static RecordSource stored(const KeyRef& key);
+
 		std::optional<RecordStart> appendRecord(
-			const std::byte* first,
-			std::size_t firstLength,
-			const std::byte* second,
-			std::size_t secondLength,
+			const RecordSource& first,
+			const RecordSource& second,
 			Version cv);
+		std::optional<RangeRef> appendRange(
+			const RecordSource& begin,
+			const RecordSource& end,
+			bool point,
+			Version cv);
+		std::optional<RangeRef> appendWithStoredBegin(
+			const KeyRef& begin,
+			const StringRef& end,
+			Version cv);
+		std::optional<RangeRef> appendWithStoredEnd(
+			const StringRef& begin,
+			const KeyRef& end,
+			Version cv);
+		KeyRef endKey(const RangeRef& ref) const;
+		void locate(
+			const KeyBlockHeader*& block,
+			std::size_t& offset,
+			std::size_t start) const;
 		int compareFrom(
 			const StringRef& key,
 			const KeyBlockHeader* block,

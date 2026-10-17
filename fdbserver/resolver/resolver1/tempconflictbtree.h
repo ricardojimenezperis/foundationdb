@@ -78,5 +78,23 @@ private:
 	void addWrite(
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);
+	bool hasConflict(const ReadConflictRange& read) const;
+	// Inserts range at the given logical rank, splitting nodes as needed.
+	// On return, leaf and rank identify the inserted entry, even if a split
+	// moved it to another leaf. rank is a position in order, not a physical slot.
+	void insertAt(
+		std::size_t& rank,
+		const RangeRef& range,
+		Version cv,
+		LeafBlock*& leaf);
+	// Removes the entry at the given logical rank and repairs the tree.
+	// On return, leaf and rank identify the next entry, or the end position
+	// (rank == count) in the last leaf.
+	// If the tree becomes empty, leaf is nullptr and rank is zero.
+	void eraseAt(std::size_t& rank, LeafBlock*& leaf);
+	bool nextRank(LeafBlock*& leaf, std::size_t& rank) const;
+	bool prevRank(LeafBlock*& leaf, std::size_t& rank) const;	
 	void reclaimOldest();
+	void reclaimUntilAvail(int n)
 };
+

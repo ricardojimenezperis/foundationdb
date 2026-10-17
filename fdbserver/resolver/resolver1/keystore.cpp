@@ -27,20 +27,31 @@ std::optional<KeyRef> KeyStore::appendKey(
 		return KeyRef{nullptr, 0, 0, 0};
 	}
 	const std::optional<RecordStart> start =
-		appendRecord(key, length, nullptr, 0, cv);
+		appendRecord(RecordSource{key, nullptr, 0, length}, RecordSource{}, cv);
 	if (!start) {
 		return std::nullopt;
 	}
 	return KeyRef{start->block, start->offset, length, start->generation};
 }
 
+KeyStore::RecordSource KeyStore::external(const StringRef& key) {
+	return RecordSource{
+		reinterpret_cast<const std::byte*>(key.begin()),
+		nullptr,
+		0,
+		static_cast<std::size_t>(key.size())
+	};
+}
+
+KeyStore::RecordSource KeyStore::stored(const KeyRef& key) {
+	return RecordSource{nullptr, key.firstBlock, key.keyOffset, key.keyLength};
+}
+
 std::optional<KeyStore::RecordStart> KeyStore::appendRecord(
-	const std::byte* first,
-	std::size_t firstLength,
-	const std::byte* second,
-	std::size_t secondLength,
+	const RecordSource& first,
+	const RecordSource& second,
 	Version cv) {
-	const std::size_t length = firstLength + secondLength;
+	const std::size_t length = first.length + second.length;
 	assert(length != 0);
 
 	// Without an open block, the key starts in a new block.
@@ -91,10 +102,13 @@ std::optional<KeyStore::RecordStart> KeyStore::appendRecord(
 
 	const std::uint64_t gen = blocks[0]->generation;
 
-	// Copy the record and link its blocks.
+	// Copy the record and link its blocks. The record is the first source
+	// followed by the second one; a stored source is read block by block.
 	std::size_t bytesToCopy = length;
-	const std::byte* origin = first;
-	std::size_t originBytes = firstLength;
+	const std::byte* contiguous = first.bytes;
+	const KeyBlockHeader* sourceBlock = first.block;
+	std::size_t sourceOffset = first.offset;
+	std::size_t sourceLeft = first.length;
 
 	for (std::size_t i = 0; i < neededBlocks; ++i) {
 		const std::size_t writeOffset =
@@ -105,18 +119,31 @@ std::optional<KeyStore::RecordStart> KeyStore::appendRecord(
 		auto* dest =
 			reinterpret_cast<std::byte*>(blocks[i]) + writeOffset;
 
-		// The record is the first source followed by the second one.
 		for (std::size_t copied = 0; copied < bytesCanCopy;) {
-			if (originBytes == 0) {
-				origin = second;
-				originBytes = secondLength;
+			if (sourceLeft == 0) {
+				contiguous = second.bytes;
+				sourceBlock = second.block;
+				sourceOffset = second.offset;
+				sourceLeft = second.length;
 			}
-			const std::size_t chunk =
-				std::min(bytesCanCopy - copied, originBytes);
+			std::size_t chunk = std::min(bytesCanCopy - copied, sourceLeft);
+			const std::byte* origin;
+			if (contiguous != nullptr) {
+				origin = contiguous;
+				contiguous += chunk;
+			} else {
+				if (sourceOffset == blockSize_) {
+					sourceBlock = sourceBlock->nextBlock;
+					sourceOffset = sizeof(KeyBlockHeader);
+				}
+				chunk = std::min(chunk, blockSize_ - sourceOffset);
+				origin = reinterpret_cast<const std::byte*>(sourceBlock) +
+					sourceOffset;
+				sourceOffset += chunk;
+			}
 			std::memcpy(dest + copied, origin, chunk);
 			copied += chunk;
-			origin += chunk;
-			originBytes -= chunk;
+			sourceLeft -= chunk;
 		}
 		blocks[i]->maxCV = std::max(blocks[i]->maxCV, cv);
 
@@ -299,8 +326,6 @@ std::optional<RangeRef> KeyStore::appendRange(
 	assert(begin.size() <= std::numeric_limits<std::uint16_t>::max());
 	assert(end.size() <= std::numeric_limits<std::uint16_t>::max());
 
-	const auto* beginBytes = reinterpret_cast<const std::byte*>(begin.begin());
-	const auto* endBytes = reinterpret_cast<const std::byte*>(end.begin());
 	const std::size_t beginLength = static_cast<std::size_t>(begin.size());
 	const std::size_t endLength = static_cast<std::size_t>(end.size());
 
@@ -310,11 +335,73 @@ std::optional<RangeRef> KeyStore::appendRange(
 		(beginLength == 0 ||
 		 memcmp(begin.begin(), end.begin(), beginLength) == 0);
 
-	const std::size_t endStart = point ? 0 : beginLength;
+	return appendRange(external(begin), external(end), point, cv);
+}
 
+std::optional<RangeRef> KeyStore::appendRange(
+	const RangeRef& source,
+	const StringRef& end,
+	Version cv) {
+	assert(isValid(source));
+	return appendWithStoredBegin(beginKey(source), end, cv);
+}
+
+std::optional<RangeRef> KeyStore::appendRange(
+	const StringRef& begin,
+	const RangeRef& source,
+	Version cv) {
+	assert(isValid(source));
+	return appendWithStoredEnd(begin, endKey(source), cv);
+}
+
+std::optional<RangeRef> KeyStore::appendWithStoredBegin(
+	const KeyRef& begin,
+	const StringRef& end,
+	Version cv) {
+	assert(end.size() <= std::numeric_limits<std::uint16_t>::max());
+
+	const std::size_t beginLength = begin.keyLength;
+	const std::size_t endLength = static_cast<std::size_t>(end.size());
+
+	const bool point = endLength == beginLength + 1 &&
+		end.begin()[beginLength] == 0 &&
+		(beginLength == 0 ||
+		 compareFrom(StringRef(end.begin(), static_cast<int>(beginLength)),
+					 begin.firstBlock, begin.keyOffset, beginLength) == 0);
+
+	return appendRange(stored(begin), external(end), point, cv);
+}
+
+std::optional<RangeRef> KeyStore::appendWithStoredEnd(
+	const StringRef& begin,
+	const KeyRef& end,
+	Version cv) {
+	assert(begin.size() <= std::numeric_limits<std::uint16_t>::max());
+
+	const std::size_t beginLength = static_cast<std::size_t>(begin.size());
+	const std::size_t endLength = end.keyLength;
+
+	bool point = false;
+	if (endLength == beginLength + 1) {
+		const KeyBlockHeader* block = end.firstBlock;
+		std::size_t offset = end.keyOffset;
+		locate(block, offset, beginLength);
+		point = reinterpret_cast<const std::byte*>(block)[offset] == std::byte{0} &&
+			(beginLength == 0 ||
+			 compareFrom(begin, end.firstBlock, end.keyOffset, beginLength) == 0);
+	}
+
+	return appendRange(external(begin), stored(end), point, cv);
+}
+
+std::optional<RangeRef> KeyStore::appendRange(
+	const RecordSource& begin,
+	const RecordSource& end,
+	bool point,
+	Version cv) {
 	const std::optional<RecordStart> start = point
-		? appendRecord(endBytes, endLength, nullptr, 0, cv)
-		: appendRecord(beginBytes, beginLength, endBytes, endLength, cv);
+		? appendRecord(end, RecordSource{}, cv)
+		: appendRecord(begin, end, cv);
 	if (!start) {
 		return std::nullopt;
 	}
@@ -322,15 +409,27 @@ std::optional<RangeRef> KeyStore::appendRange(
 	return RangeRef{
 		start->block,
 		start->offset,
-		static_cast<std::uint16_t>(beginLength),
-		static_cast<std::uint16_t>(endStart),
-		static_cast<std::uint16_t>(endLength),
+		static_cast<std::uint16_t>(begin.length),
+		static_cast<std::uint16_t>(point ? 0 : begin.length),
+		static_cast<std::uint16_t>(end.length),
 		start->generation
 	};
 }
 
 bool KeyStore::isValid(const RangeRef& ref) const {
 	return ref.blockGen > lastReclaimedKeyGeneration_;
+}
+
+KeyRef KeyStore::endKey(const RangeRef& ref) const {
+	const KeyBlockHeader* block = ref.firstBlock;
+	std::size_t offset = ref.keyOffset;
+	locate(block, offset, ref.endStart);
+	return KeyRef{
+		block,
+		static_cast<std::uint16_t>(offset),
+		ref.endLength,
+		block->generation
+	};
 }
 
 KeyRef KeyStore::beginKey(const RangeRef& ref) const {
@@ -355,13 +454,21 @@ int KeyStore::compareAt(
 	const RangeRef& stored,
 	std::size_t start,
 	std::size_t length) const {
-	// Moves start bytes into the record, skipping block headers.
 	const KeyBlockHeader* block = stored.firstBlock;
 	std::size_t offset = stored.keyOffset;
+	locate(block, offset, start);
+	return compareFrom(key, block, offset, length);
+}
+
+// Moves start bytes into stored data, skipping block headers.
+void KeyStore::locate(
+	const KeyBlockHeader*& block,
+	std::size_t& offset,
+	std::size_t start) const {
 	while (start >= blockSize_ - offset) {
 		start -= blockSize_ - offset;
 		block = block->nextBlock;
 		offset = sizeof(KeyBlockHeader);
 	}
-	return compareFrom(key, block, offset + start, length);
+	offset += start;
 }

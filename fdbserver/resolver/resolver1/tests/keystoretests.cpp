@@ -1225,3 +1225,275 @@ TEST_CASE("/resolver/KeyStore/CopiesWithOldCVKeepOldBlocksIntact") {
 		}
 	}
 }
+
+namespace {
+
+bool isPoint(const std::vector<std::byte>& begin,
+			 const std::vector<std::byte>& end) {
+	auto expected = begin;
+	expected.push_back(std::byte{0});
+	return end == expected;
+}
+
+// [source.begin, end); requires a non-empty range.
+std::optional<RangeRef> appendKeepingBegin(KeyStore& store,
+										   const RangeRef& source,
+										   const std::vector<std::byte>& end,
+										   Version cv) {
+	ASSERT(readRecord(store, source, 0, source.beginLength) < end);
+	return store.appendRange(source, asStringRef(end), cv);
+}
+
+// [begin, source.end); requires a non-empty range.
+std::optional<RangeRef> appendKeepingEnd(KeyStore& store,
+										 const std::vector<std::byte>& begin,
+										 const RangeRef& source, Version cv) {
+	ASSERT(begin < readRecord(store, source, source.endStart, source.endLength));
+	return store.appendRange(asStringRef(begin), source, cv);
+}
+
+// Checks a new range: both views read back, a point is stored once, and a
+// general range stores begin followed by end.
+void checkNewRange(const KeyStore& store, const RangeRef& r,
+				   const std::vector<std::byte>& begin,
+				   const std::vector<std::byte>& end) {
+	checkRangeBytes(store, r, begin, end);
+	ASSERT_EQ(r.endStart, isPoint(begin, end) ? 0 : begin.size());
+}
+
+RangeRef storeRange(KeyStore& store, const std::vector<std::byte>& begin,
+					const std::vector<std::byte>& end, Version cv) {
+	const std::optional<RangeRef> r = appendRange(store, begin, end, cv);
+	ASSERT(r.has_value());
+	return *r;
+}
+
+} // namespace
+
+// The left exterior [source.begin, end) of a trimmed range.
+TEST_CASE("/resolver/KeyStore/AppendRangeKeepsSourceBegin") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	// A source whose begin spans blocks.
+	const auto longBegin = makeKey(SmallPayload * 2 + 7, 1);
+	auto longEnd = longBegin;
+	longEnd.front() = std::byte{0xFF};
+	const RangeRef wide = storeRange(store, longBegin, longEnd, 5);
+	auto cut = longBegin;
+	cut.push_back(std::byte{5});
+	const std::optional<RangeRef> left = appendKeepingBegin(store, wide, cut, 5);
+	ASSERT(left.has_value());
+	ASSERT(left->blockGen > wide.blockGen);
+	checkNewRange(store, *left, longBegin, cut);
+	checkRangeBytes(store, wide, longBegin, longEnd);
+
+	// A point source keeps its begin; a new end equal to begin + 0 makes a
+	// point, stored once.
+	const auto abc = bytesOf({'a', 'b', 'c'});
+	const RangeRef point = storeRange(store, abc, bytesOf({'a', 'b', 'c', 0}), 5);
+	const std::optional<RangeRef> r1 =
+		appendKeepingBegin(store, point, bytesOf({'a', 'b', 'c', 0}), 5);
+	ASSERT(r1.has_value());
+	checkNewRange(store, *r1, abc, bytesOf({'a', 'b', 'c', 0}));
+
+	// One byte longer and ending in zero, but not a point.
+	for (const auto& end : {bytesOf({'a', 'b', 'c', 1}),
+							bytesOf({'a', 'b', 'd', 0}),
+							bytesOf({'z'})}) {
+		const std::optional<RangeRef> r =
+			appendKeepingBegin(store, point, end, 5);
+		ASSERT(r.has_value());
+		checkNewRange(store, *r, abc, end);
+	}
+
+	// A source with an empty begin.
+	const RangeRef fromEmpty = storeRange(store, {}, bytesOf({'q'}), 5);
+	for (const auto& end : {bytesOf({0}), bytesOf({'x'})}) {
+		const std::optional<RangeRef> r =
+			appendKeepingBegin(store, fromEmpty, end, 5);
+		ASSERT(r.has_value());
+		checkNewRange(store, *r, {}, end);
+	}
+}
+
+// The right exterior [begin, source.end) of a trimmed range.
+TEST_CASE("/resolver/KeyStore/AppendRangeKeepsSourceEnd") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	// A source whose end starts after a begin spanning blocks.
+	const auto longBegin = makeKey(SmallPayload + 9, 1);
+	auto longEnd = makeKey(SmallPayload * 2 + 3, 2);
+	longEnd.front() = std::byte{0xFF};
+	const RangeRef wide = storeRange(store, longBegin, longEnd, 5);
+	auto cut = longEnd;
+	cut.back() = std::byte{0};
+	cut.front() = std::byte{0x80};
+	const std::optional<RangeRef> right = appendKeepingEnd(store, cut, wide, 5);
+	ASSERT(right.has_value());
+	checkNewRange(store, *right, cut, longEnd);
+	checkRangeBytes(store, wide, longBegin, longEnd);
+
+	// A point source keeps its end: with the same begin, the result is the
+	// same point, copied from the store.
+	const auto abc = bytesOf({'a', 'b', 'c'});
+	const auto abc0 = bytesOf({'a', 'b', 'c', 0});
+	const RangeRef point = storeRange(store, abc, abc0, 5);
+	const std::optional<RangeRef> r1 = appendKeepingEnd(store, abc, point, 5);
+	ASSERT(r1.has_value());
+	checkNewRange(store, *r1, abc, abc0);
+
+	// Not points: other lengths, a last byte that is not zero, or an end
+	// that does not start with begin.
+	const std::pair<std::vector<std::byte>, std::vector<std::byte>> cases[] = {
+		{bytesOf({'a', 'b', 'c'}), bytesOf({'x', 'y', 'z'})},
+		{bytesOf({'a', 'b', 'c'}), bytesOf({'a', 'b', 'c', 1})},
+		{bytesOf({'a', 'b', 'c'}), bytesOf({'a', 'b', 'd', 0})},
+		{{}, bytesOf({'x'})},
+		{{}, bytesOf({0})},
+	};
+	for (const auto& [begin, end] : cases) {
+		const RangeRef source = storeRange(store, bytesOf({}), end, 5);
+		const std::optional<RangeRef> r = appendKeepingEnd(store, begin, source, 5);
+		ASSERT(r.has_value());
+		checkNewRange(store, *r, begin, end);
+	}
+}
+
+// The source's end starts in the next block, and the zero that makes the
+// new range a point is in that block too.
+TEST_CASE("/resolver/KeyStore/AppendRangeSourceEndInNextBlock") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	// begin fills the first block exactly, so end starts in the next one.
+	const auto begin = makeKey(SmallPayload, 2);
+	auto end = begin;
+	end.front() = std::byte{0xFF};
+	end.push_back(std::byte{0});
+	const RangeRef source = storeRange(store, begin, end, 5);
+	ASSERT_EQ(source.endStart, SmallPayload);
+
+	const std::vector<std::byte> newBegin(end.begin(), end.end() - 1);
+	const std::optional<RangeRef> point =
+		appendKeepingEnd(store, newBegin, source, 5);
+	ASSERT(point.has_value());
+	ASSERT_EQ(point->endStart, 0);
+	checkNewRange(store, *point, newBegin, end);
+}
+
+// Trimming [a, z) with CV 10 by a write [d, m) with CV 20.
+TEST_CASE("/resolver/KeyStore/AppendRangeTrimsSource") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	const auto a = makeKey(SmallPayload / 2 + 3, 1);
+	auto z = a;
+	z.front() = std::byte{0xFF};
+	const RangeRef old = storeRange(store, a, z, 10);
+
+	auto d = a;
+	d.front() = std::byte{0x40};
+	auto m = a;
+	m.front() = std::byte{0x80};
+
+	const std::optional<RangeRef> left = appendKeepingBegin(store, old, d, 10);
+	const std::optional<RangeRef> middle = appendRange(store, d, m, 20);
+	const std::optional<RangeRef> right = appendKeepingEnd(store, m, old, 10);
+	ASSERT(left.has_value() && middle.has_value() && right.has_value());
+
+	checkNewRange(store, *left, a, d);
+	checkNewRange(store, *middle, d, m);
+	checkNewRange(store, *right, m, z);
+	checkRangeBytes(store, old, a, z);
+}
+
+TEST_CASE("/resolver/KeyStore/AppendRangeFromSourceIsAllOrNothing") {
+	PagePool pool(PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	const auto begin = makeKey(SmallPayload + 5, 3);
+	auto end = begin;
+	end.front() = std::byte{0xFF};
+	const RangeRef source = storeRange(store, begin, end, 2);
+	auto cut = begin;
+	cut.push_back(std::byte{1});
+	const std::vector<std::byte*> taken = drainPool(pool, 1);
+
+	// Each needs the open block and two more; only one is available.
+	ASSERT(!appendKeepingBegin(store, source, cut, 2).has_value());
+	ASSERT(!appendKeepingEnd(store, cut, source, 2).has_value());
+	ASSERT_EQ(freeBlockCount(pool), 1);
+	checkRangeBytes(store, source, begin, end);
+
+	for (std::byte* block : taken) {
+		pool.releaseBlock(block);
+	}
+}
+
+// Random sources, points and general ranges, some spanning blocks, trimmed
+// on either side by random keys.
+TEST_CASE("/resolver/KeyStore/AppendRangeFromSourceAgainstReference") {
+	PagePool pool(16 * PageSize, SmallBlock);
+	KeyStore store(pool);
+
+	const auto base = makeKey(SmallPayload * 3, 13);
+	std::uint32_t state = 77;
+	auto next = [&state]() {
+		state = state * 1103515245u + 12345u;
+		return state >> 8;
+	};
+	auto derived = [&]() {
+		std::vector<std::byte> key(base.begin(),
+								   base.begin() + next() % (base.size() + 1));
+		if (!key.empty() && next() % 3 == 0) {
+			key[next() % key.size()] = std::byte{0};
+		}
+		return key;
+	};
+	auto randomRange = [&]() {
+		for (;;) {
+			std::vector<std::byte> begin = derived();
+			std::vector<std::byte> end;
+			if (next() % 2 == 0) {
+				end = begin;
+				end.push_back(std::byte{0});
+			} else {
+				end = derived();
+			}
+			if (begin < end) {
+				return std::make_pair(begin, end);
+			}
+		}
+	};
+
+	int points = 0;
+	for (int n = 0; n < 120;) {
+		const auto [sourceBegin, sourceEnd] = randomRange();
+		const RangeRef source = storeRange(store, sourceBegin, sourceEnd, 1);
+		const auto [begin, end] = randomRange();
+
+		std::optional<RangeRef> r;
+		if (n % 2 == 0) {
+			if (!(sourceBegin < end)) {
+				continue;
+			}
+			r = appendKeepingBegin(store, source, end, 1);
+			ASSERT(r.has_value());
+			checkNewRange(store, *r, sourceBegin, end);
+			points += isPoint(sourceBegin, end);
+		} else {
+			if (!(begin < sourceEnd)) {
+				continue;
+			}
+			r = appendKeepingEnd(store, begin, source, 1);
+			ASSERT(r.has_value());
+			checkNewRange(store, *r, begin, sourceEnd);
+			points += isPoint(begin, sourceEnd);
+		}
+		checkRangeBytes(store, source, sourceBegin, sourceEnd);
+		++n;
+	}
+	ASSERT(points > 0 && points < 120);
+}
