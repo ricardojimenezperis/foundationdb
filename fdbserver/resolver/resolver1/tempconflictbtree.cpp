@@ -147,16 +147,53 @@ bool TempConflictBTree::findKey(
 	return nodeStore_.findKey(key, rank, leaf);
 }
 
-bool  TempConflictBTree::hasConflict(const ReadConflictRange& read) const {
-	LeafBlock* leaf;
-	size_t rank;
-	bool found=findKey(read.begin, leaf, rank);
-	
+bool TempConflictBTree::hasConflict(const ReadConflictRange& read) const {
+	LeafBlock* leaf = nullptr;
+	std::size_t rank = 0;
+	const bool found = findKey(read.begin, leaf, rank);
+
+	if (leaf == nullptr) {
+		return false;
+	}
+
+	std::size_t slot = 0;
+	bool slotPresent = false;
+	if (found) {
+		slot = leaf->order[rank];
+		slotPresent = true;
+	} else {
+		slotPresent = prevRank(leaf, rank, slot);
+		if (slotPresent &&
+				keyStore_.compareEnd(read.begin, leaf->ranges[slot]) < 0 &&
+			leaf->cv[slot] > read.version) {
+			return true;
+		}
+		if (slotPresent) {
+			slotPresent = nextRank(leaf, rank, slot);
+		} else {
+			// No predecessor: keep the first candidate.
+			slot = leaf->order[rank];
+			slotPresent = true;
+		}
+	}
+
+	while (slotPresent &&
+			keyStore_.compareBegin(read.end, leaf->ranges[slot]) > 0) {
+		if (leaf->cv[slot] > read.version) {
+			return true;
+		}
+		slotPresent = nextRank(leaf, rank, slot);
+	}
+	return false;
 }
 
-bool TempConflictBTree::nextRank(LeafBlock*& leaf, std::size_t& rank) const {
+bool TempConflictBTree::nextRank(
+		LeafBlock*& leaf,
+		std::size_t& rank,
+		std::size_t& slot) const {
 	if (rank + 1 < leaf->header.count) {
 		++rank;
+		slot = leaf->order[rank];
 		return true;
 	}
 
@@ -172,12 +209,17 @@ bool TempConflictBTree::nextRank(LeafBlock*& leaf, std::size_t& rank) const {
 
 	leaf = next;
 	rank = 0;
+	slot = leaf->order[rank];
 	return true;
 }
 
-bool TempConflictBTree::prevRank(LeafBlock*& leaf, std::size_t& rank) const {
+bool TempConflictBTree::prevRank(
+		LeafBlock*& leaf,
+		std::size_t& rank,
+		std::size_t& slot) const {
 	if (rank > 0) {
 		--rank;
+		slot = leaf->order[rank];
 		return true;
 	}
 
@@ -192,6 +234,7 @@ bool TempConflictBTree::prevRank(LeafBlock*& leaf, std::size_t& rank) const {
 
 	leaf = previous;
 	rank = leaf->header.count - 1;
+	slot = leaf->order[rank];
 	return true;
 }
 
