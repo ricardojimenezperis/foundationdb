@@ -62,10 +62,10 @@ class KeyStore {
 		bool isValid(KeyRef ref) const;
 		const KeyBlockHeader* keyBlock(KeyRef ref) const;
 		std::size_t blockSize() const;
-		void insertKey(KeyRef key, Version cv, const KeyStore& keyStore);
 		int compareKeys(const KeyRef& kr1, const KeyRef& kr2) const;
 		int compareKeys(const StringRef& key, const KeyRef& stored) const;
 
+		// Precondition: begin < end. Neither key is longer than 65,535 bytes.
 		std::optional<RangeRef> appendRange(
 			const StringRef& begin,
 			const StringRef& end,

@@ -311,7 +311,6 @@ std::optional<RangeRef> KeyStore::appendRange(
 		 memcmp(begin.begin(), end.begin(), beginLength) == 0);
 
 	const std::size_t endStart = point ? 0 : beginLength;
-	assert(endStart == 0 || endStart == beginLength);
 
 	const std::optional<RecordStart> start = point
 		? appendRecord(endBytes, endLength, nullptr, 0, cv)

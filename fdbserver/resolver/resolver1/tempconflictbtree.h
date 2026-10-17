@@ -78,4 +78,5 @@ private:
 	void addWrite(
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);
+	void reclaimOldest();
 };

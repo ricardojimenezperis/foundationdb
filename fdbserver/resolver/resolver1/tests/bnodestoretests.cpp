@@ -439,10 +439,11 @@ RangeRef storeLeafRange(KeyStore& keys, unsigned value, Version cv,
 	const uint8_t pointEnd[] = {'k', static_cast<uint8_t>(value), 0};
 	const uint8_t general[] = {'k', static_cast<uint8_t>(value), 1};
 
-	const std::optional<RangeRef> range = keys.appendRange(
-		StringRef(begin, 2),
-		StringRef(point ? pointEnd : general, 3),
-		cv);
+	const StringRef beginKey(begin, 2);
+	const StringRef endKey(point ? pointEnd : general, 3);
+	ASSERT(compare(beginKey, endKey) < 0);
+
+	const std::optional<RangeRef> range = keys.appendRange(beginKey, endKey, cv);
 	ASSERT(range.has_value());
 	ASSERT_EQ(range->endStart, point ? 0 : 2);
 	return *range;

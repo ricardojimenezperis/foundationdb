@@ -49,8 +49,8 @@ the copies.
 
   | File | SHA-256 |
   |---|---|
-  | `keystore.cpp` | `0bddf3aa05b5e7f6` |
-  | `keystore.h` | `2038ddef45ade8ab` |
+  | `keystore.cpp` | `051ebb1d9c0f25c3` |
+  | `keystore.h` | `6325656bc8268aa1` |
   | `fdbcompat.h` | `788cc62b6648bf6d` |
   | `common.h` | `0a0b864acb86c330` |
   | `pagepool.cpp` | `7506a3e1f65b263a` |
@@ -58,7 +58,7 @@ the copies.
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `246b6c0baf2b6a99` |
-  | `tests/keystoretests.cpp` | `4aa6fc55601712dc` |
+  | `tests/keystoretests.cpp` | `9c98fd8aea83da34` |
   | `tests/pagepooltests.cpp` | `924bc131b8ce98f3` |
 
 - Working tree: the files listed above
@@ -191,9 +191,13 @@ outside the interface and are not tested.
 
 - The constructor requires a pool block size larger than
   `sizeof(KeyBlockHeader)`.
-- `appendRange` requires `begin < end`, so the range is not empty and
-  always has stored bytes, and both keys no longer than 65,535 bytes.
-  It also checks that `endStart` is 0 or `beginLength`.
+- `appendRange` requires both keys no longer than 65,535 bytes.
+
+`appendRange` also requires `begin < end`, so that the range is not
+empty and always has stored bytes. This precondition is documented in
+`keystore.h` but not checked, because checking it would compare the
+bytes of both keys on every call. The tests check it before calling
+`appendRange`, in their `appendRange` and `storeLeafRange` helpers.
 
 The helper that reads keys back asserts that each block in the chain is
 non-null, so a broken chain fails the test instead of reading invalid
@@ -208,17 +212,17 @@ gcov:
 
 | Metric | Result |
 |---|---|
-| Lines executed | 100.00% of 257 |
-| Branches executed | 100.00% of 130 |
-| Taken at least once | 86.92% of 130 |
+| Lines executed | 100.00% of 255 |
+| Branches executed | 100.00% of 124 |
+| Taken at least once | 87.90% of 124 |
 
 llvm-cov source-based coverage:
 
 | Metric | Result |
 |---|---|
-| Regions | 100.00% of 149 |
+| Regions | 100.00% of 147 |
 | Functions | 100.00% of 19 |
-| Lines | 100.00% of 289 |
+| Lines | 100.00% of 287 |
 | Branches | 100.00% of 100 |
 
 These are gcov and llvm-cov metrics. They are not a measurement of
@@ -266,10 +270,10 @@ fragment is used up and bytes remain, `bytes1 == 0 && rem1 != 0`
 Comparison of an external key with stored bytes, `compareFrom`, used by
 `compareKeys(const StringRef&, const KeyRef&)`, `compareBegin` and
 `compareEnd`. Only the stored side moves between blocks. The loop
-condition `rem1 != 0 && rem2 != 0` (line 267) and the move condition
-`bytes2 == 0 && rem2 != 0` (line 278) have the cases of the tables
+condition `rem1 != 0 && rem2 != 0` (line 268) and the move condition
+`bytes2 == 0 && rem2 != 0` (line 279) have the cases of the tables
 above. After the loop, the keys are equal when both are exhausted,
-`rem1 == 0 && rem2 == 0` (line 284):
+`rem1 == 0 && rem2 == 0` (line 285):
 
 | Condition | Input | Other condition | Decision | Test |
 |---|---|---|---|---|
@@ -301,12 +305,12 @@ llvm-cov counts for the compound decisions:
 | `keystore.cpp:229` | `rem1 != 0` | 5.93k | 1.07k |
 | `keystore.cpp:234` | `bytes2 == 0` | 7.00k | 6.57k |
 | `keystore.cpp:234` | `rem2 != 0` | 5.93k | 1.07k |
-| `keystore.cpp:267` | `rem1 != 0` | 73.4k | 6.35k |
-| `keystore.cpp:267` | `rem2 != 0` | 67.1k | 6.28k |
-| `keystore.cpp:278` | `bytes2 == 0` | 35.2k | 5.52k |
-| `keystore.cpp:278` | `rem2 != 0` | 28.8k | 6.37k |
-| `keystore.cpp:284` | `rem1 == 0` | 6.35k | 6.28k |
-| `keystore.cpp:284` | `rem2 == 0` | 458 | 5.89k |
+| `keystore.cpp:268` | `rem1 != 0` | 73.4k | 6.35k |
+| `keystore.cpp:268` | `rem2 != 0` | 67.1k | 6.28k |
+| `keystore.cpp:279` | `bytes2 == 0` | 35.2k | 5.52k |
+| `keystore.cpp:279` | `rem2 != 0` | 28.8k | 6.37k |
+| `keystore.cpp:285` | `rem1 == 0` | 6.35k | 6.28k |
+| `keystore.cpp:285` | `rem2 == 0` | 458 | 5.89k |
 | `keystore.cpp:308` | `endLength == beginLength + 1` | 48 | 31 |
 | `keystore.cpp:309` | `end[beginLength] == 0` | 44 | 4 |
 | `keystore.cpp:310` | `beginLength == 0` | 2 | 42 |
@@ -316,7 +320,7 @@ The other decisions in `keystore.cpp` have a single condition, and
 llvm-cov reports both outcomes covered for each of them. They include
 the copy of a record from two sources in `appendRecord` (lines 109-110:
 the second source starts when the first is used up) and the skip of the
-start of a record in `compareAt` (line 362: the start of end is in a
+start of a record in `compareAt` (line 361: the start of end is in a
 later block, including exactly at its first data byte).
 
 The tests' block arithmetic assumes `sizeof(KeyBlockHeader) == 24`,
@@ -325,7 +329,7 @@ start at offset 24. `sizeof(RangeRef) == 24` is checked at compile time.
 
 ### Uncovered generated branches
 
-gcov reports 17 untaken branches. Each was compared with the LLVM IR
+gcov reports 15 untaken branches. Each was compared with the LLVM IR
 that Apple clang 15 generates for `keystore.cpp` at `-O0`, with and
 without `--coverage`. Line numbers refer to `keystore.cpp`.
 
@@ -338,10 +342,8 @@ without `--coverage`. Line numbers refer to `keystore.cpp`.
 |---|---|---|
 | `keystore.cpp:11` | branch 0 | Block size larger than the header |
 | `keystore.cpp:44` | branch 0 | A record has at least one byte |
-| `keystore.cpp:298` | branch 1 | `begin < end` |
 | `keystore.cpp:299` | branch 1 | Begin no longer than 65,535 bytes |
-| `keystore.cpp:300` | branch 1 | End no longer than 65,535 bytes |
-| `keystore.cpp:314` | branch 2 | `endStart` is 0 or `beginLength` |
+| `keystore.cpp:300` | branch 0 | End no longer than 65,535 bytes |
 
 The check on line 44 cannot fail through the interface: `appendKey`
 returns before it for the empty key, and a range always has stored

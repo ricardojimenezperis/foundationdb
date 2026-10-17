@@ -24,7 +24,32 @@ void TempConflictBTree::addWrites(
 void TempConflictBTree::addWrite(
 		const std::pair<StringRef, StringRef>& write,
 		Version cv) {
-	
+
+	const int MaxWriteBlocks=35;
+	reclaimUntilAvail(MaxWriteBlocks);
+	LeafBlock* leaf=nullptr;
+	std::size_t rank=0;
+	bool found=findKey(write.first, leaf, rank);
+	if (leaf==nullptr){
+		std::optional<RangeRef> range= std::nullopt;
+		range=keyStore_.appendRange(write.first,write.second,cv);
+		leaf=nodeStore_.allocateLeaf(cv);
+		nodeStore_.insertAt(std::size_t{0},*range,cv,leaf);
+		return;
+	} 
+	if (!found){ 
+		if (rank>0){
+			--rank;
+		} else {
+			if (leaf->left!=nullptr){
+				leaf=leaf->left;
+				rank=leaf->header.count-1;
+			}
+		}
+	} 
+	if (!found && leaf){
+		leaf->ranges[rank]=
+	}
 }
 
 bool TempConflictBTree::findKey(

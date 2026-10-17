@@ -838,10 +838,12 @@ std::vector<const KeyBlockHeader*> recordBlocks(const KeyStore& store,
 	return blocks;
 }
 
+// appendRange requires begin < end; the tests check it before calling.
 std::optional<RangeRef> appendRange(KeyStore& store,
 									const std::vector<std::byte>& begin,
 									const std::vector<std::byte>& end,
 									Version cv) {
+	ASSERT(begin < end);
 	return store.appendRange(asStringRef(begin), asStringRef(end), cv);
 }
 

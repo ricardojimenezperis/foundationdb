@@ -35,8 +35,8 @@ component.
   |---|---|
   | `bnodestore.cpp` | `a945a23136d881e9` |
   | `bnodestore.h` | `2a14f18942ce0544` |
-  | `keystore.cpp` | `0bddf3aa05b5e7f6` |
-  | `keystore.h` | `2038ddef45ade8ab` |
+  | `keystore.cpp` | `051ebb1d9c0f25c3` |
+  | `keystore.h` | `6325656bc8268aa1` |
   | `fdbcompat.h` | `788cc62b6648bf6d` |
   | `common.h` | `0a0b864acb86c330` |
   | `pagepool.cpp` | `7506a3e1f65b263a` |
@@ -44,7 +44,7 @@ component.
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `246b6c0baf2b6a99` |
-  | `tests/bnodestoretests.cpp` | `f53fbddf8852501a` |
+  | `tests/bnodestoretests.cpp` | `8e18f7f4ce07e136` |
 
 - Working tree: the files listed above
 - Platform: macOS 27.0.1 (build 26A434), arm64 (Apple M3 Pro)
