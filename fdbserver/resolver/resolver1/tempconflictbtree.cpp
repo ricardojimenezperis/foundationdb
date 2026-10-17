@@ -157,10 +157,12 @@ bool TempConflictBTree::hasConflict(const ReadConflictRange& read) const {
 		}
 		if (slotPresent) {
 			slotPresent = nextRank(leaf, rank, slot);
-		} else {
-			// No predecessor: keep the first candidate.
+		} else if (rank < leaf->header.count) {
 			slot = leaf->order[rank];
 			slotPresent = true;
+		} else {
+			// The current leaf has no candidate; look to the right.
+			slotPresent = nextRank(leaf, rank, slot);
 		}
 	}
 
