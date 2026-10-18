@@ -13,9 +13,10 @@ struct TempConflictBTreeTestAccess {
 	static BNodeStore& nodes(TempConflictBTree& t) { return t.nodeStore_; }
 	static BNodeHeader*& root(TempConflictBTree& t) { return t.root_; }
 
-	static bool findKey(const TempConflictBTree& t, const StringRef& key,
-						LeafBlock*& leaf, std::size_t& rank) {
-		return t.findKey(key, leaf, rank);
+	static bool findKey(TempConflictBTree& t, const StringRef& key,
+						LeafBlock*& leaf, std::size_t& rank,
+						BNodeHeader*& nodeNeedsSplit) {
+		return t.findKey(key, leaf, rank, nodeNeedsSplit);
 	}
 	static bool nextRank(const TempConflictBTree& t, LeafBlock*& leaf,
 						 std::size_t& rank, std::size_t& slot) {
@@ -199,7 +200,8 @@ std::vector<Entry> entriesFrom(unsigned first, unsigned count, Version cv) {
 void checkFindKey(TestTree& t, const Bytes& k) {
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 999;
-	const bool found = Access::findKey(t.tree, asRef(k), leaf, rank);
+	BNodeHeader* nodeNeedsSplit = nullptr;
+	const bool found = Access::findKey(t.tree, asRef(k), leaf, rank, nodeNeedsSplit);
 
 	const std::size_t expected = t.expectedLeaf(k);
 	bool expectedFound = false;
@@ -229,7 +231,8 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyInEmptyTree") {
 
 	LeafBlock* leaf = reinterpret_cast<LeafBlock*>(&t);
 	std::size_t rank = 999;
-	ASSERT(!Access::findKey(t.tree, asRef(key(1)), leaf, rank));
+	BNodeHeader* nodeNeedsSplit = nullptr;
+	ASSERT(!Access::findKey(t.tree, asRef(key(1)), leaf, rank, nodeNeedsSplit));
 	ASSERT(leaf == nullptr);
 	ASSERT_EQ(rank, 0);
 }
@@ -289,7 +292,8 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyReachesEmptyLeaf") {
 
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 999;
-	ASSERT(!Access::findKey(t.tree, asRef(key(25)), leaf, rank));
+	BNodeHeader* nodeNeedsSplit = nullptr;
+	ASSERT(!Access::findKey(t.tree, asRef(key(25)), leaf, rank, nodeNeedsSplit));
 	ASSERT(leaf == t.leaves[1].leaf);
 	ASSERT_EQ(rank, 0);
 }
@@ -510,7 +514,8 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyBeforeFirstSeparator") {
 
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 999;
-	ASSERT(!Access::findKey(t.tree, asRef(key(5)), leaf, rank));
+	BNodeHeader* nodeNeedsSplit = nullptr;
+	ASSERT(!Access::findKey(t.tree, asRef(key(5)), leaf, rank, nodeNeedsSplit));
 	ASSERT(leaf == t.leaves[0].leaf);
 	ASSERT_EQ(rank, 0);
 }

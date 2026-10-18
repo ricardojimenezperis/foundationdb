@@ -34,7 +34,8 @@ void TempConflictBTree::addWrite(
 	reclaimUntilAvail(MaxWriteBlocks);
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 0;
-	const bool found = findKey(write.first, leaf, rank);
+	BNodeHeader* nodeNeedsSplit = nullptr;
+	const bool found = findKey(write.first, leaf, rank, nodeNeedsSplit);
 
 	// empty tree
 	if (leaf == nullptr) {
@@ -161,7 +162,8 @@ bool TempConflictBTree::findKey(
 bool TempConflictBTree::hasConflict(const ReadConflictRange& read) const {
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 0;
-	const bool found = findKey(read.begin, leaf, rank);
+	BNodeHeader* nodeNeedsSplit = nullptr;
+	const bool found = findKey(read.begin, leaf, rank, nodeNeedsSplit);
 
 	if (leaf == nullptr) {
 		return false;
