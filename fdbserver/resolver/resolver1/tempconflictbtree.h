@@ -132,5 +132,6 @@ private:
 	static bool needsSplit(const InternalBlock* node) {
 		return node->header.childrenNeedingSplit == std::popcount(node->freeSlots);
 	}
+	void propagateSplitCleared(BNodeHeader* node);
 };
 
