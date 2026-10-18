@@ -131,7 +131,7 @@ bool TempConflictBTree::findKey(
 			nodeStore_.releaseNode(current);
 			return false;
 		}
-		if (internal->header.childrenNeedingSplit==std::popcount(internal->freeSlots)) {
+		if (needsSplit(internal)) {
 			needSplit.push_back(internal);
 		}
 		const bool found = nodeStore_.findKey(key, rank, internal);
@@ -149,7 +149,7 @@ bool TempConflictBTree::findKey(
 		while (!needSplit.empty()){
 			InternalBlock* internal =needSplit.back();
 			needSplit.pop_back();
-			if (internal->header.childrenNeedingSplit==std::popcount(internal->freeSlots)){
+			if (needsSplit(internal)){
 				nodeNeedsSplit=&internal->header;
 				break;
 			}
@@ -278,45 +278,69 @@ void  TempConflictBTree::reclaimUntilAvail(int n) {
 	
 }
 
-bool TempConflictBTree::refreshSeparator(InternalBlock* node, std::size_t rank) {
-	bool changed = false;
-	const auto slot = node->order[rank];
-	if (node->separatorsCV[slot] <= reclaimCV_) {
-		if (node->children[slot]->kind==BNodeKind::Internal){
-			InternalBlock* child= reinterpret_cast<InternalBlock*>(node->children[slot]);
-			// Removing the first grandchild exposes the next one, whose
-			// separator may also have expired.
-			while (child->header.count > 0 &&
-				   child->separatorsCV[child->order[0]] <= reclaimCV_) {
-				refreshSeparator(child, 0);
-			}
-			if (child->header.count==0){
-				removeEmptyChild(node, rank);
-			} else {
-				const auto slot0=child->order[0];
-				node->separatorsCV[slot]=child->separatorsCV[slot0];
-				node->separators[slot]=child->separators[slot0];
-			}
-		} else {
-			LeafBlock* child= reinterpret_cast<LeafBlock*>(node->children[slot]);
-			cleanExpired(child);
-			if (child->header.count==0){
-				removeEmptyChild(node, rank);
-			} else {
-				const auto slot0=child->order[0];
-				node->separatorsCV[slot]=child->cv[slot0];
-				node->separators[slot] = keyStore_.beginKey(child->ranges[slot0]);			
-			}
+void TempConflictBTree::propagateSplitCleared(BNodeHeader* node) {
+	while (node->parent != nullptr) {
+		BNodeHeader* parent = node->parent;
+		auto* internal = reinterpret_cast<InternalBlock*>(parent);
+		const bool splitBefore = needsSplit(internal);
+
+		assert(parent->childrenNeedingSplit > 0);
+		--parent->childrenNeedingSplit;
+
+		if (!splitBefore || needsSplit(internal)) {
+			break;
 		}
-		changed=true;
+		node = parent;
 	}
-	return changed;
 }
 
-bool TempConflictBTree::refreshSeparators(InternalBlock* node){
+bool TempConflictBTree::refreshSeparator(
+		InternalBlock* node, std::size_t rank) {
+	const auto slot = node->order[rank];
+	if (node->separatorsCV[slot] > reclaimCV_) {
+		return false;
+	}
+
+	if (node->children[slot]->kind == BNodeKind::Internal) {
+		auto* child =
+			reinterpret_cast<InternalBlock*>(node->children[slot]);
+
+		// Removing the first grandchild exposes the next one, whose
+		// separator may also have expired.
+		while (child->header.count > 0 &&
+			   child->separatorsCV[child->order[0]] <= reclaimCV_) {
+			refreshSeparator(child, 0);
+		}
+
+		if (child->header.count == 0) {
+			removeEmptyChild(node, rank);
+		} else {
+			const auto slot0 = child->order[0];
+			node->separatorsCV[slot] = child->separatorsCV[slot0];
+			node->separators[slot] = child->separators[slot0];
+		}
+	} else {
+		auto* child =
+			reinterpret_cast<LeafBlock*>(node->children[slot]);
+
+		cleanExpired(child);
+
+		if (child->header.count == 0) {
+			removeEmptyChild(node, rank);
+		} else {
+			const auto slot0 = child->order[0];
+			node->separatorsCV[slot] = child->cv[slot0];
+			node->separators[slot] =
+				keyStore_.beginKey(child->ranges[slot0]);
+		}
+	}
+	return true;
+}
+
+bool TempConflictBTree::refreshSeparators(InternalBlock* node) {
 	bool changed = false;
 	std::size_t rank = 0;
-	bool needSplit=node->
+
 	while (rank < node->header.count) {
 		const auto count = node->header.count;
 		changed |= refreshSeparator(node, rank);
@@ -328,8 +352,10 @@ bool TempConflictBTree::refreshSeparators(InternalBlock* node){
 }
 
 bool TempConflictBTree::cleanExpired(LeafBlock* leaf) {
+	const bool splitBefore = !leaf->hasSpace();
 	bool deleted = false;
 	std::size_t rank = 0;
+
 	while (rank < leaf->header.count) {
 		const auto slot = leaf->order[rank];
 		if (leaf->cv[slot] <= reclaimCV_) {
@@ -339,16 +365,21 @@ bool TempConflictBTree::cleanExpired(LeafBlock* leaf) {
 			++rank;
 		}
 	}
+
+	if (splitBefore && leaf->hasSpace()) {
+		propagateSplitCleared(&leaf->header);
+	}
 	return deleted;
 }
 
-void TempConflictBTree::removeEmptyChild(InternalBlock* parent, std::size_t rank){
+void TempConflictBTree::removeEmptyChild(
+		InternalBlock* parent, std::size_t rank) {
 	const auto slot = parent->order[rank];
 	BNodeHeader* child = parent->children[slot];
 	assert(child->count == 0);
-	if (child->needsSplit) {
-		--parent->header.childrenNeedingSplit;
-	}
+
+	const bool splitBefore = needsSplit(parent);
+
 	if (child->kind == BNodeKind::Leaf) {
 		auto* leaf = reinterpret_cast<LeafBlock*>(child);
 		if (leaf->left != nullptr) {
@@ -358,6 +389,14 @@ void TempConflictBTree::removeEmptyChild(InternalBlock* parent, std::size_t rank
 			leaf->right->left = leaf->left;
 		}
 	}
+
+	// The empty child no longer needs splitting. Its transition
+	// was already propagated when it was cleaned.
 	nodeStore_.eraseAt(rank, parent);
 	nodeStore_.releaseNode(child);
+
+	if (splitBefore && !needsSplit(parent)) {
+		propagateSplitCleared(&parent->header);
+	}
 }
+

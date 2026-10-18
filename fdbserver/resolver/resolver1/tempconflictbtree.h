@@ -127,5 +127,10 @@ private:
 	// Repairs leaf links when the child is a leaf.
 	// Does not release parent, even if it becomes empty.
 	void removeEmptyChild(InternalBlock* parent, std::size_t rank);
+	// An internal node needs a split when every free slot may be taken by
+	// the split of a child that needs one.
+	static bool needsSplit(const InternalBlock* node) {
+		return node->header.childrenNeedingSplit == std::popcount(node->freeSlots);
+	}
 };
 
