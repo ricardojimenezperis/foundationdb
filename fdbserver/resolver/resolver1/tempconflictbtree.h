@@ -75,7 +75,9 @@ private:
 	bool findKey(
 		const StringRef& key,
 		LeafBlock*& leaf,
-		std::size_t& rank) const;
+		std::size_t& rank,
+	    BNodeHeader*& nodeNeedsSplit
+	);
 	void addWrite(
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);

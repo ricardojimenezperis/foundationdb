@@ -714,7 +714,7 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorFromLeaf") {
 }
 
 // A leaf left empty is removed, its neighbours are linked to each other and
-// the parent's count of critical children is updated.
+// the parent's count of children needing a split is updated.
 TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyLeaf") {
 	TestTree t;
 	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {20, 20, 20}));

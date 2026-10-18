@@ -111,18 +111,29 @@ void TempConflictBTree::addWrite(
 bool TempConflictBTree::findKey(
 		const StringRef& key,
 		LeafBlock*& leaf,
-		std::size_t& rank) const {
+		std::size_t& rank,
+	    BNodeHeader*& nodeNeedsSplit) {
 
 	leaf = nullptr;
 	rank = 0;
-
+	nodeNeedsSplit = nullptr;
 	if (root_ == nullptr) {
 		return false;
 	}
-
+	std::vector<InternalBlock*> needSplit;
 	BNodeHeader* current = root_;
 	while (current->kind == BNodeKind::Internal) {
-		const auto* internal = reinterpret_cast<const InternalBlock*>(current);
+		InternalBlock* internal = reinterpret_cast<InternalBlock*>(current);
+		refreshSeparators(internal);
+		if (internal->header.count == 0) {
+			assert(current == root_);
+			root_ = nullptr;
+			nodeStore_.releaseNode(current);
+			return false;
+		}
+		if (internal->header.childrenNeedingSplit==std::popcount(internal->freeSlots)) {
+			needSplit.push_back(internal);
+		}
 		const bool found = nodeStore_.findKey(key, rank, internal);
 		if (!found && rank > 0) {
 			--rank;
@@ -131,6 +142,19 @@ bool TempConflictBTree::findKey(
 	}
 
 	leaf = reinterpret_cast<LeafBlock*>(current);
+	cleanExpired(leaf);
+	if (!leaf->hasSpace()) {
+		nodeNeedsSplit=current;
+	} else {
+		while (!needSplit.empty()){
+			InternalBlock* internal =needSplit.back();
+			needSplit.pop_back();
+			if (internal->header.childrenNeedingSplit==std::popcount(internal->freeSlots)){
+				nodeNeedsSplit=&internal->header;
+				break;
+			}
+		}
+	}
 	return nodeStore_.findKey(key, rank, leaf);
 }
 

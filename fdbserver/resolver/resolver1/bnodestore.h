@@ -45,7 +45,6 @@ struct BNodeHeader {
 	std::uint8_t count = 0;
 	std::uint8_t parentSlot = 0;
 	std::uint8_t childrenNeedingSplit = 0;
-	bool needsSplit = false;
 };
 
 template<std::size_t C>
