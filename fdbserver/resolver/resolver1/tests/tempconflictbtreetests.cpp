@@ -29,6 +29,19 @@ struct TempConflictBTreeTestAccess {
 							const ReadConflictRange& read) {
 		return t.hasConflict(read);
 	}
+	static void setReclaimCV(TempConflictBTree& t, Version cv) {
+		t.reclaimCV_ = cv;
+	}
+	static bool refreshSeparator(TempConflictBTree& t, InternalBlock* node,
+								 std::size_t rank) {
+		return t.refreshSeparator(node, rank);
+	}
+	static bool refreshSeparators(TempConflictBTree& t, InternalBlock* node) {
+		return t.refreshSeparators(node);
+	}
+	static bool cleanExpired(TempConflictBTree& t, LeafBlock* leaf) {
+		return t.cleanExpired(leaf);
+	}
 };
 
 namespace {
@@ -89,10 +102,12 @@ public:
 		struct Child {
 			BNodeHeader* node;
 			Bytes lowerBound;
+			Version cv;     // CV of the first entry below, as refreshing sets it
 		};
 		std::vector<Child> level;
 		for (const LeafModel& l : leaves) {
-			level.push_back({&l.leaf->header, l.lowerBound});
+			level.push_back({&l.leaf->header, l.lowerBound,
+							 l.entries.empty() ? 0 : l.entries.front().cv});
 		}
 
 		while (level.size() > 1) {
@@ -107,9 +122,11 @@ public:
 						reinterpret_cast<const std::byte*>(separator.data()),
 						static_cast<std::uint16_t>(separator.size()), 0);
 					ASSERT(key.has_value());
-					nodes().insertAt(0, *key, level[j - 1].node, 0, internal);
+					nodes().insertAt(0, *key, level[j - 1].node, level[j - 1].cv,
+									 internal);
 				}
-				parents.push_back({&internal->header, level[i].lowerBound});
+				parents.push_back({&internal->header, level[i].lowerBound,
+								   level[i].cv});
 			}
 			level = std::move(parents);
 		}
@@ -514,4 +531,299 @@ TEST_CASE("/resolver/TempConflictBTree/HasConflictFromEmptyFirstLeaf") {
 TEST_CASE("/resolver/TempConflictBTree/NewTreeHasNoReclaimedHistory") {
 	TestTree t;
 	ASSERT_EQ(t.tree.reclaimCV(), 0);
+}
+
+namespace {
+
+// Reads length bytes from logical position start of a stored record.
+Bytes readRecord(const KeyStore& store, const RangeRef& r, std::size_t start,
+				 std::size_t length) {
+	Bytes bytes;
+	const KeyBlockHeader* block = r.firstBlock;
+	std::size_t offset = r.keyOffset;
+	for (std::size_t position = 0; position < start + length; ++position) {
+		if (offset == store.blockSize()) {
+			block = block->nextBlock;
+			offset = sizeof(KeyBlockHeader);
+		}
+		if (position >= start) {
+			bytes.push_back(std::to_integer<uint8_t>(
+				reinterpret_cast<const std::byte*>(block)[offset]));
+		}
+		++offset;
+	}
+	return bytes;
+}
+
+// The entries of a leaf, read back from the store, in key order.
+std::vector<Entry> leafEntries(TestTree& t, const LeafBlock* leaf) {
+	std::vector<Entry> entries;
+	for (std::size_t r = 0; r < leaf->header.count; ++r) {
+		const auto slot = leaf->order[r];
+		const RangeRef& range = leaf->ranges[slot];
+		entries.push_back({readRecord(t.keys(), range, 0, range.beginLength),
+						   readRecord(t.keys(), range, range.endStart,
+									  range.endLength),
+						   leaf->cv[slot]});
+	}
+	return entries;
+}
+
+// Checks the subtree under node and appends its leaves in key order.
+void checkSubtree(TestTree& t, const BNodeHeader* node,
+				  std::vector<const LeafBlock*>& leaves,
+				  std::vector<Entry>& entries) {
+	if (node->kind == BNodeKind::Leaf) {
+		const auto* leaf = reinterpret_cast<const LeafBlock*>(node);
+		leaves.push_back(leaf);
+		for (const Entry& e : leafEntries(t, leaf)) {
+			ASSERT(entries.empty() || !(e.begin < entries.back().end));
+			entries.push_back(e);
+		}
+		return;
+	}
+
+	const auto* internal = reinterpret_cast<const InternalBlock*>(node);
+	for (std::size_t r = 0; r < internal->header.count; ++r) {
+		const auto slot = internal->order[r];
+		ASSERT(internal->children[slot]->parent == node);
+		const std::size_t before = entries.size();
+		checkSubtree(t, internal->children[slot], leaves, entries);
+
+		// Every begin in this child is at least its separator, and every
+		// begin in the children before it is below it.
+		const KeyRef& separator = internal->separators[slot];
+		for (std::size_t i = 0; i < entries.size(); ++i) {
+			const int c = t.keys().compareKeys(asRef(entries[i].begin), separator);
+			if (r > 0 && i < before) {
+				ASSERT(c < 0);
+			} else if (i >= before) {
+				ASSERT(r == 0 || c >= 0);
+			}
+		}
+	}
+}
+
+// Checks the whole tree: structure, leaf links and reads against a
+// brute-force scan of the entries left in it.
+std::vector<Entry> checkTree(TestTree& t) {
+	std::vector<const LeafBlock*> leaves;
+	std::vector<Entry> entries;
+	BNodeHeader* root = Access::root(t.tree);
+	if (root != nullptr) {
+		checkSubtree(t, root, leaves, entries);
+	}
+
+	for (std::size_t i = 0; i < leaves.size(); ++i) {
+		ASSERT(leaves[i]->left == (i == 0 ? nullptr : leaves[i - 1]));
+		ASSERT(leaves[i]->right ==
+			   (i + 1 == leaves.size() ? nullptr : leaves[i + 1]));
+	}
+
+	for (unsigned b = 0; b <= 230; b += 3) {
+		for (unsigned e = b + 1; e <= 231; e += 7) {
+			for (Version version : {Version{0}, Version{15}, Version{40}}) {
+				bool expected = false;
+				for (const Entry& entry : entries) {
+					expected |= entry.begin < key(e) && key(b) < entry.end &&
+						entry.cv > version;
+				}
+				ASSERT_EQ(t.hasConflict(key(b), key(e), version), expected);
+			}
+		}
+	}
+	return entries;
+}
+
+std::vector<Entry> withCVs(std::vector<Entry> entries,
+						   std::initializer_list<Version> cvs) {
+	ASSERT_EQ(entries.size(), cvs.size());
+	auto cv = cvs.begin();
+	for (Entry& e : entries) {
+		e.cv = *cv++;
+	}
+	return entries;
+}
+
+InternalBlock* rootNode(TestTree& t) {
+	BNodeHeader* root = Access::root(t.tree);
+	ASSERT(root != nullptr && root->kind == BNodeKind::Internal);
+	return reinterpret_cast<InternalBlock*>(root);
+}
+
+BNodeHeader* childAt(const InternalBlock* node, std::size_t rank) {
+	return node->children[node->order[rank]];
+}
+
+} // namespace
+
+TEST_CASE("/resolver/TempConflictBTree/CleanExpiredRemovesOnlyExpiredEntries") {
+	TestTree t;
+	LeafBlock* leaf = t.addLeaf({}, withCVs(entriesFrom(10, 5, 0), {5, 15, 3, 20, 10}));
+	t.build(3);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::cleanExpired(t.tree, leaf));
+
+	const std::vector<Entry> left = leafEntries(t, leaf);
+	ASSERT_EQ(left.size(), 2);
+	ASSERT(left[0].begin == key(12) && left[0].cv == 15);
+	ASSERT(left[1].begin == key(16) && left[1].cv == 20);
+	ASSERT_EQ(leaf->freeSlots, LeafSlotMask & ~((std::uint64_t{1} << leaf->order[0]) |
+											   (std::uint64_t{1} << leaf->order[1])));
+
+	ASSERT(!Access::cleanExpired(t.tree, leaf));
+	checkTree(t);
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorKeepsFreshSeparator") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {5, 6, 7}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {8, 2, 9}));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+	const KeyRef before = root->separators[root->order[1]];
+
+	Access::setReclaimCV(t.tree, 7);
+	ASSERT(!Access::refreshSeparator(t.tree, root, 1));
+	ASSERT(root->separators[root->order[1]].firstBlock == before.firstBlock);
+	ASSERT_EQ(leafEntries(t, t.leaves[1].leaf).size(), 3);
+	checkTree(t);
+}
+
+// The expired separator of a leaf becomes the begin of its first entry left
+// after removing its expired entries.
+TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorFromLeaf") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {20, 20, 20}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 4, 0), {5, 10, 30, 8}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {20, 20, 20}));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparator(t.tree, root, 1));
+
+	const auto slot = root->order[1];
+	ASSERT_EQ(root->header.count, 3);
+	ASSERT_EQ(root->separatorsCV[slot], 30);
+	ASSERT_EQ(t.keys().compareKeys(asRef(key(34)), root->separators[slot]), 0);
+	ASSERT(t.keys().isValid(root->separators[slot]));
+	ASSERT_EQ(leafEntries(t, t.leaves[1].leaf).size(), 1);
+	checkTree(t);
+}
+
+// A leaf left empty is removed, its neighbours are linked to each other and
+// the parent's count of critical children is updated.
+TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyLeaf") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {20, 20, 20}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {5, 10, 8}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {20, 20, 20}));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+	t.leaves[1].leaf->header.needsSplit = true;
+	root->header.childrenNeedingSplit = 1;
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparator(t.tree, root, 1));
+
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
+	ASSERT(childAt(root, 1) == &t.leaves[2].leaf->header);
+	ASSERT(t.leaves[0].leaf->right == t.leaves[2].leaf);
+	ASSERT(t.leaves[2].leaf->left == t.leaves[0].leaf);
+	checkTree(t);
+}
+
+namespace {
+
+// root -> [I0, I1]; I0 -> [L0, L1, L2]; I1 -> [L3, L4, L5]. The separator of
+// I1 takes the CV of the first entry of L3.
+void threeLevels(TestTree& t, Version l3, Version l4, Version l5) {
+	for (unsigned i = 0; i < 6; ++i) {
+		const unsigned first = 10 + 20 * i;
+		const Version cv = i == 3 ? l3 : i == 4 ? l4 : i == 5 ? l5 : 50;
+		t.addLeaf(i == 0 ? Bytes{} : key(first),
+				  withCVs(entriesFrom(first, 2, 0), {cv, cv}));
+	}
+	t.build(3);
+}
+
+} // namespace
+
+// The first two grandchildren under the refreshed separator are expired:
+// both are removed and the separator comes from the third one.
+TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorSkipsExpiredGrandchildren") {
+	TestTree t;
+	threeLevels(t, 5, 8, 40);
+	InternalBlock* root = rootNode(t);
+	auto* i1 = reinterpret_cast<InternalBlock*>(childAt(root, 1));
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparator(t.tree, root, 1));
+
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT_EQ(i1->header.count, 1);
+	ASSERT(childAt(i1, 0) == &t.leaves[5].leaf->header);
+	const auto slot = root->order[1];
+	ASSERT_EQ(root->separatorsCV[slot], 40);
+	ASSERT_EQ(t.keys().compareKeys(asRef(key(110)), root->separators[slot]), 0);
+	ASSERT(t.leaves[2].leaf->right == t.leaves[5].leaf);
+	checkTree(t);
+}
+
+// Every grandchild is expired: the internal child is removed too.
+TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyInternalChild") {
+	TestTree t;
+	threeLevels(t, 5, 8, 9);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparator(t.tree, root, 1));
+
+	ASSERT_EQ(root->header.count, 1);
+	ASSERT(t.leaves[2].leaf->right == nullptr);
+	checkTree(t);
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorsRefreshesWholeNode") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {5, 30, 30}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {2, 3, 4}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {30, 6, 30}));
+	t.addLeaf(key(70), withCVs(entriesFrom(70, 3, 0), {7, 8, 35}));
+	t.addLeaf(key(90), withCVs(entriesFrom(90, 3, 0), {1, 2, 3}));
+	t.build(5);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparators(t.tree, root));
+
+	// Leaves 1 and 4 were emptied and removed, and leaves 0 and 3 lost their
+	// expired entries. Leaf 2 is not cleaned: its separator, with the CV 30
+	// of its first entry, has not expired, so its entry with CV 6 stays.
+	ASSERT_EQ(root->header.count, 3);
+	for (std::size_t r = 0; r < root->header.count; ++r) {
+		ASSERT(root->separatorsCV[root->order[r]] > 10);
+	}
+	const std::vector<Entry> entries = checkTree(t);
+	ASSERT_EQ(entries.size(), 6);
+	ASSERT_EQ(leafEntries(t, t.leaves[2].leaf).size(), 3);
+
+	ASSERT(!Access::refreshSeparators(t.tree, root));
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorsCanEmptyNode") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 2, 0), {1, 2}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 2, 0), {3, 4}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 2, 0), {5, 6}));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparators(t.tree, root));
+	ASSERT_EQ(root->header.count, 0);
+	ASSERT_EQ(root->freeSlots, InternalSlotMask);
 }

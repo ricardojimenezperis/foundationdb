@@ -260,7 +260,12 @@ bool TempConflictBTree::refreshSeparator(InternalBlock* node, std::size_t rank) 
 	if (node->separatorsCV[slot] <= reclaimCV_) {
 		if (node->children[slot]->kind==BNodeKind::Internal){
 			InternalBlock* child= reinterpret_cast<InternalBlock*>(node->children[slot]);
-			refreshSeparator(child,0);
+			// Removing the first grandchild exposes the next one, whose
+			// separator may also have expired.
+			while (child->header.count > 0 &&
+				   child->separatorsCV[child->order[0]] <= reclaimCV_) {
+				refreshSeparator(child, 0);
+			}
 			if (child->header.count==0){
 				removeEmptyChild(node, rank);
 			} else {
@@ -288,36 +293,11 @@ bool TempConflictBTree::refreshSeparators(InternalBlock* node){
 	bool changed = false;
 	std::size_t rank = 0;
 	while (rank < node->header.count) {
-		const auto slot = node->order[rank];
-		if (node->separatorsCV[slot] <= reclaimCV_) {
-			if (node->children[slot]->kind==BNodeKind::Internal){
-				InternalBlock* child= reinterpret_cast<InternalBlock*>(node->children[slot]);
-				refreshSeparator(child, 0);
-				if (child->header.count==0){
-					removeEmptyChild(node, rank);
-					changed=true;
-					continue;
-				} else {
-					const auto slot0=child->order[0];
-					node->separatorsCV[slot]=child->separatorsCV[slot0];
-					node->separators[slot]=child->separators[slot0];
-				}
-			} else {
-				LeafBlock* child= reinterpret_cast<LeafBlock*>(node->children[slot]);
-				cleanExpired(child);
-				if (child->header.count==0){
-					removeEmptyChild(node, rank);
-					changed=true;
-					continue;
-				} else {
-					const auto slot0=child->order[0];
-					node->separatorsCV[slot]=child->cv[slot0];
-					node->separators[slot] = keyStore_.beginKey(child->ranges[slot0]);
-				}
-			}
-			changed=true;
+		const auto count = node->header.count;
+		changed |= refreshSeparator(node, rank);
+		if (node->header.count == count) {
+			++rank;
 		}
-		++rank;		
 	}
 	return changed;
 }
@@ -341,8 +321,8 @@ void TempConflictBTree::removeEmptyChild(InternalBlock* parent, std::size_t rank
 	const auto slot = parent->order[rank];
 	BNodeHeader* child = parent->children[slot];
 	assert(child->count == 0);
-	if (child->critical) {
-		--parent->header.criticalChildren;
+	if (child->needsSplit) {
+		--parent->header.childrenNeedingSplit;
 	}
 	if (child->kind == BNodeKind::Leaf) {
 		auto* leaf = reinterpret_cast<LeafBlock*>(child);

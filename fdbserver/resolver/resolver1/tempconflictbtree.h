@@ -109,7 +109,17 @@ private:
 	// Removes expired entries without releasing the leaf itself.
 	// Returns true if any entry was removed.
 	bool cleanExpired(LeafBlock* leaf);
+	// Refreshes every expired separator of node with refreshSeparator.
+	// Returns true if any separator was refreshed or any child removed.
 	bool refreshSeparators(InternalBlock* node);
+	// Refreshes the separator at rank if it has expired (its CV is not newer
+	// than reclaimCV_). Expired entries of the child are removed, and the
+	// separator becomes the child's first key with its CV. If the child
+	// becomes empty, it is removed: rank then refers to the next child, and
+	// node may become empty. Leaf cursors held by the caller may become
+	// invalid. Requires reclaimCV_ to have advanced at least to the maximum
+	// CV of every reclaimed key block, so that a separator whose bytes were
+	// reclaimed is always expired. Returns true if anything changed.
 	bool refreshSeparator(InternalBlock* node, std::size_t rank);
 	// Removes and releases an empty child.
 	// Repairs leaf links when the child is a leaf.
