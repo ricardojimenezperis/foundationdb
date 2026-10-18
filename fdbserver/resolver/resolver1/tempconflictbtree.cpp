@@ -316,6 +316,7 @@ bool TempConflictBTree::refreshSeparator(InternalBlock* node, std::size_t rank) 
 bool TempConflictBTree::refreshSeparators(InternalBlock* node){
 	bool changed = false;
 	std::size_t rank = 0;
+	bool needSplit=node->
 	while (rank < node->header.count) {
 		const auto count = node->header.count;
 		changed |= refreshSeparator(node, rank);
