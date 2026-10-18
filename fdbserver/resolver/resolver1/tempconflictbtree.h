@@ -38,6 +38,7 @@
 #include <utility>
 
 class TempConflictBTree {
+	friend struct TempConflictBTreeTestAccess;
 public:
 	explicit TempConflictBTree(std::size_t budget);
 	~TempConflictBTree() = default;
@@ -105,5 +106,14 @@ private:
 	bool prevRank(LeafBlock*& leaf, std::size_t& rank, std::size_t& slot) const;	
 	void reclaimOldest();
 	void reclaimUntilAvail(int n);
+	// Removes expired entries without releasing the leaf itself.
+	// Returns true if any entry was removed.
+	bool cleanExpired(LeafBlock* leaf);
+	bool refreshSeparators(InternalBlock* node);
+	bool refreshSeparator(InternalBlock* node, std::size_t rank);
+	// Removes and releases an empty child.
+	// Repairs leaf links when the child is a leaf.
+	// Does not release parent, even if it becomes empty.
+	void removeEmptyChild(InternalBlock* parent, std::size_t rank);
 };
 

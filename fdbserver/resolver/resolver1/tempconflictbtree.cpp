@@ -10,6 +10,11 @@ void TempConflictBTree::checkReads(
 		std::span<const ReadConflictRange> reads,
 		bool* transactionConflictStatus) const {
 
+	for (const auto& read : reads) {
+		if (!transactionConflictStatus[read.transaction]) {
+			transactionConflictStatus[read.transaction] = hasConflict(read);
+		}
+	}
 }
 
 void TempConflictBTree::addWrites(
@@ -27,11 +32,11 @@ void TempConflictBTree::addWrite(
 
 	constexpr std::size_t MaxWriteBlocks = 35;
 	reclaimUntilAvail(MaxWriteBlocks);
-
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 0;
 	const bool found = findKey(write.first, leaf, rank);
 
+	// empty tree
 	if (leaf == nullptr) {
 		auto range = keyStore_.appendRange(write.first, write.second, cv);
 		leaf = nodeStore_.allocateLeaf(cv);
@@ -45,7 +50,6 @@ void TempConflictBTree::addWrite(
 	if (!found) {
 		hasPrevious = prevRank(leaf, rank, slot);
 	}
-
 	auto rangeInt =
 		keyStore_.appendRange(write.first, write.second, cv);
 
@@ -74,8 +78,6 @@ void TempConflictBTree::addWrite(
 		nextRank(leaf, rank, slot);
 	}
 
-	// eraseAt leaves the cursor at the next entry or at the end.
-	// If the tree becomes empty, it returns leaf == nullptr and rank == 0.
 	int comp = 0;
 	while (leaf != nullptr && rank < leaf->header.count) {
 		slot = leaf->order[rank];
@@ -83,22 +85,20 @@ void TempConflictBTree::addWrite(
 		if (comp < 0) {
 			break;
 		}
+		// remove overlapping ranges
 		eraseAt(rank, leaf);
 	}
 
 	if (leaf != nullptr && rank < leaf->header.count) {
 		slot = leaf->order[rank];
-
 		if (comp < 0 &&
 			keyStore_.compareBegin(write.second, leaf->ranges[slot]) > 0) {
-
 			// Preserve the right exterior with its original CV.
 			auto rangeExtRight = keyStore_.appendRange(
 				write.second, leaf->ranges[slot], leaf->cv[slot]);
 			leaf->ranges[slot] = *rangeExtRight;
 		}
 	}
-
 	if (leaf == nullptr) {
 		leaf = nodeStore_.allocateLeaf(cv);
 		root_ = &leaf->header;
@@ -252,4 +252,107 @@ void  TempConflictBTree::reclaimOldest() {
 
 void  TempConflictBTree::reclaimUntilAvail(int n) {
 	
+}
+
+bool TempConflictBTree::refreshSeparator(InternalBlock* node, std::size_t rank) {
+	bool changed = false;
+	const auto slot = node->order[rank];
+	if (node->separatorsCV[slot] <= reclaimCV_) {
+		if (node->children[slot]->kind==BNodeKind::Internal){
+			InternalBlock* child= reinterpret_cast<InternalBlock*>(node->children[slot]);
+			refreshSeparator(child,0);
+			if (child->header.count==0){
+				removeEmptyChild(node, rank);
+			} else {
+				const auto slot0=child->order[0];
+				node->separatorsCV[slot]=child->separatorsCV[slot0];
+				node->separators[slot]=child->separators[slot0];
+			}
+		} else {
+			LeafBlock* child= reinterpret_cast<LeafBlock*>(node->children[slot]);
+			cleanExpired(child);
+			if (child->header.count==0){
+				removeEmptyChild(node, rank);
+			} else {
+				const auto slot0=child->order[0];
+				node->separatorsCV[slot]=child->cv[slot0];
+				node->separators[slot] = keyStore_.beginKey(child->ranges[slot0]);			
+			}
+		}
+		changed=true;
+	}
+	return changed;
+}
+
+bool TempConflictBTree::refreshSeparators(InternalBlock* node){
+	bool changed = false;
+	std::size_t rank = 0;
+	while (rank < node->header.count) {
+		const auto slot = node->order[rank];
+		if (node->separatorsCV[slot] <= reclaimCV_) {
+			if (node->children[slot]->kind==BNodeKind::Internal){
+				InternalBlock* child= reinterpret_cast<InternalBlock*>(node->children[slot]);
+				refreshSeparator(child, 0);
+				if (child->header.count==0){
+					removeEmptyChild(node, rank);
+					changed=true;
+					continue;
+				} else {
+					const auto slot0=child->order[0];
+					node->separatorsCV[slot]=child->separatorsCV[slot0];
+					node->separators[slot]=child->separators[slot0];
+				}
+			} else {
+				LeafBlock* child= reinterpret_cast<LeafBlock*>(node->children[slot]);
+				cleanExpired(child);
+				if (child->header.count==0){
+					removeEmptyChild(node, rank);
+					changed=true;
+					continue;
+				} else {
+					const auto slot0=child->order[0];
+					node->separatorsCV[slot]=child->cv[slot0];
+					node->separators[slot] = keyStore_.beginKey(child->ranges[slot0]);
+				}
+			}
+			changed=true;
+		}
+		++rank;		
+	}
+	return changed;
+}
+
+bool TempConflictBTree::cleanExpired(LeafBlock* leaf) {
+	bool deleted = false;
+	std::size_t rank = 0;
+	while (rank < leaf->header.count) {
+		const auto slot = leaf->order[rank];
+		if (leaf->cv[slot] <= reclaimCV_) {
+			nodeStore_.eraseAt(rank, leaf);
+			deleted = true;
+		} else {
+			++rank;
+		}
+	}
+	return deleted;
+}
+
+void TempConflictBTree::removeEmptyChild(InternalBlock* parent, std::size_t rank){
+	const auto slot = parent->order[rank];
+	BNodeHeader* child = parent->children[slot];
+	assert(child->count == 0);
+	if (child->critical) {
+		--parent->header.criticalChildren;
+	}
+	if (child->kind == BNodeKind::Leaf) {
+		auto* leaf = reinterpret_cast<LeafBlock*>(child);
+		if (leaf->left != nullptr) {
+			leaf->left->right = leaf->right;
+		}
+		if (leaf->right != nullptr) {
+			leaf->right->left = leaf->left;
+		}
+	}
+	nodeStore_.eraseAt(rank, parent);
+	nodeStore_.releaseNode(child);
 }

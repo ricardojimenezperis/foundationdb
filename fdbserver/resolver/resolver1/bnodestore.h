@@ -34,19 +34,24 @@ enum class BNodeKind : std::uint8_t {
 };
 
 struct BNodeHeader {
-    std::uint64_t generation;
-	BNodeKind kind;
-    Version maxCV=0;
-	BNodeHeader* agePrevious = nullptr;  // list of node per maxCV
+	std::uint64_t generation;
+	Version maxCV = 0;
+
+	BNodeHeader* agePrevious = nullptr;
 	BNodeHeader* ageNext = nullptr;
-	std::uint8_t count=0;
 	BNodeHeader* parent = nullptr;
-	std::uint8_t parentSlot=0;
+
+	BNodeKind kind;
+	std::uint8_t count = 0;
+	std::uint8_t parentSlot = 0;
+	std::uint8_t criticalChildren = 0;
+	bool critical = false;
 };
 
 template<std::size_t C>
 struct InternalBlockLayout {
 	static_assert(C > 0 && C <= 64);
+
 	BNodeHeader header;
 	Version maxSubtreesCV[C];
 	Version separatorsCV[C];
@@ -63,13 +68,14 @@ struct InternalBlockLayout {
 template<std::size_t C>
 struct LeafBlockLayout {
 	static_assert(C > 0 && C <= 64);
+
 	BNodeHeader header;
 	Version cv[C];
 	RangeRef ranges[C];
-	std::uint8_t order[C]{};
-	std::uint64_t freeSlots = UINT64_MAX >> (64 - C);
 	LeafBlockLayout<C>* left = nullptr;
 	LeafBlockLayout<C>* right = nullptr;
+	std::uint64_t freeSlots = UINT64_MAX >> (64 - C);
+	std::uint8_t order[C]{};
 
 	bool hasSpace() const {
 		return freeSlots != 0;

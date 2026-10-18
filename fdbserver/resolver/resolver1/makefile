@@ -3,7 +3,7 @@ CPPFLAGS := -I.
 CXXFLAGS := -std=c++20 -Wall -Wextra -Wpedantic -g
 
 TARGET := tests.exe
-SOURCES := pagepool.cpp keystore.cpp bnodestore.cpp testmain.cpp $(wildcard tests/*.cpp)
+SOURCES := pagepool.cpp keystore.cpp bnodestore.cpp tempconflictbtree.cpp testmain.cpp $(wildcard tests/*.cpp)
 HEADERS := $(wildcard *.h) $(wildcard tests/*.h)
 
 .PHONY: all test clean
