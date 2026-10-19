@@ -430,6 +430,12 @@ void TempConflictBTree::split(BNodeHeader* node, LeafBlock*& leaf,
 			newNode->header.unsetFree(newNode->header.count);
 			newNode->children[newNode->header.count]->parent=
 				reinterpret_cast<BNodeHeader*> (newNode);
+			newNode->children[newNode->header.count]->parentSlot =
+				newNode->header.count;
+			if (needsSplit(oldNode->children[currentSlot])) {
+				++newNode->header.childrenNeedingSplit;
+				--oldNode->header.childrenNeedingSplit;
+			}
 			++newNode->header.count;
 			++currentRank;
 			currentSlot=oldNode->header.order[currentRank];
