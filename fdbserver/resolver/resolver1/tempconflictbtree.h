@@ -132,6 +132,9 @@ private:
 	static bool needsSplit(const InternalBlock* node) {
 		return node->header.childrenNeedingSplit == node->header.freeSlotCount();
 	}
+	static bool needsSplit(const LeafBlock* node) {
+		return !node->header.hasSpace();
+	}
 	// Called when node has just stopped needing a split. Decrements the
 	// parent's count of children needing a split and continues upwards
 	// while the parent also stops needing one.
@@ -139,5 +142,5 @@ private:
 	// Splits node, updating the tree and split counters.
 	// If node is leaf, adjusts leaf and rank to preserve the position
 	// returned by findKey.
-	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank);
+	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank, Version cv);
 };

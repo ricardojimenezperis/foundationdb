@@ -45,7 +45,7 @@ void TempConflictBTree::addWrite(
 		return;
 	}
 	if (nodeNeedsSplit!=nullptr){
-		split(nodeNeedsSplit, leaf, rank);
+		split(nodeNeedsSplit, leaf, rank, cv);
 	}
 	std::size_t slot = 0;
 	bool hasPrevious = false;
@@ -398,11 +398,12 @@ void TempConflictBTree::removeEmptyChild(
 	}
 }
 
-void TempConflictBTree::split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank){
+void TempConflictBTree::split(BNodeHeader* node, LeafBlock*& leaf, 
+		std::size_t& rank, Version cv){
 	int cutRank=0;
 	if (node->kind==BNodeKind::Internal) {
-		// reclaimCV_ is a tradeoff to avoid reordering that would be n log(n)
-		InternalBlock* newNode= nodeStore_.allocateInternal(reclaimCV_);
+		// using write CV is a tradeoff to avoid reordering that would be n log(n)
+		InternalBlock* newNode= nodeStore_.allocateInternal(cv);
 		InternalBlock* oldNode= reinterpret_cast<InternalBlock*> (node);
 		newNode->header.parent=oldNode->header.parent;
 		int toMoveWeight=(oldNode->header.count+node->freeSlotCount())/2;
@@ -410,6 +411,7 @@ void TempConflictBTree::split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& 
 		std::size_t  currentSlot=oldNode->header.order[currentRank];
 		// compute cut point
 		while (toMoveWeight>0) {
+			currentSlot=oldNode->header.order[currentRank];
 			if (oldNode->children[currentSlot]->childrenNeedingSplit
 					== oldNode->children[currentSlot]->freeSlotCount()) {
 				toMoveWeight-=2;
@@ -417,17 +419,9 @@ void TempConflictBTree::split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& 
 				--toMoveWeight;
 			}
 			++currentRank;
-			currentSlot=oldNode->header.order[currentRank];
 		}
 		cutRank=currentRank;
-		while (currentRank<=newNode->header.count) {
-			if (oldNode->children[currentSlot]->childrenNeedingSplit
-					== oldNode->children[currentSlot]->freeSlotCount()) {
-				toMoveWeight-=2;
-				++newNode->header.childrenNeedingSplit;
-			} else {
-				--toMoveWeight;
-			}
+		while (currentRank < oldNode->header.count) {
 			newNode->header.order[newNode->header.count]=newNode->header.count;
 			newNode->separators[newNode->header.count]=oldNode->separators[currentSlot];
 			newNode->separatorsCV[newNode->header.count]=oldNode->separatorsCV[currentSlot];
@@ -436,22 +430,28 @@ void TempConflictBTree::split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& 
 			newNode->header.unsetFree(newNode->header.count);
 			newNode->children[newNode->header.count]->parent=
 				reinterpret_cast<BNodeHeader*> (newNode);
-			newNode->children[newNode->header.count]->parentSlot=newNode->header.count;
-			nodeStore_.eraseAt(currentRank,oldNode);
 			++newNode->header.count;
 			++currentRank;
 			currentSlot=oldNode->header.order[currentRank];
-			size_t lastToDel=oldNode->header.count;
-			// Remove from cutRank to cound in oldNode
-			for (size_t rank=cutRank; rank < oldNode->header.count; ++rank) {
-				reinterpret_cast<BNodeHeader*>(oldNode)->setFree(oldNode->header.order[rank]);
-			}
-			oldNode->header.count=cutRank;
-			// find the first empty parent slot
-			
-			// store pointer to new node and update related counts
-			newNode->header.parentSlot=;
 		}
+		// Remove from cutRank to count in oldNode
+		for (size_t rank=cutRank; rank < oldNode->header.count; ++rank) {
+			reinterpret_cast<BNodeHeader*>(oldNode)->setFree(oldNode->header.order[rank]);
+		}
+		oldNode->header.count=cutRank;
+		// find the first empty parent slot
+		newNode->header.parentSlot=newNode->header.parent->firstFree();
+		// The new node goes right after oldNode in the parent.
+		InternalBlock* parentNode = reinterpret_cast<InternalBlock*>(oldNode->header.parent);
+		std::size_t parentRank = 0;
+		while (parentNode->header.order[parentRank] != oldNode->header.parentSlot) {
+			++parentRank;
+		}
+		nodeStore_.insertAt(parentRank + 1,
+							newNode->separators[newNode->header.order[0]],
+							&newNode->header,
+							newNode->separatorsCV[newNode->header.order[0]],
+							parentNode);
 	} else {
 
 	}

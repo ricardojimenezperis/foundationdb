@@ -59,6 +59,11 @@ struct BNodeHeader {
 	inline unsigned freeSlotCount() const {
 		return static_cast<unsigned>(std::popcount(freeSlots));
 	}
+	// Returns the lowest free slot. Requires a free slot.
+	inline unsigned firstFree() const {
+		assert(freeSlots != 0);
+		return static_cast<unsigned>(std::countr_zero(freeSlots));
+	}
 };
 
 template<std::size_t C>
@@ -269,7 +274,7 @@ inline void BNodeStore::insertAt(std::size_t rank,
 	assert(node->header.freeSlots != 0);
 	assert(rank <= node->header.count);
 
-	const unsigned slot = std::countr_zero(node->header.freeSlots);
+	const unsigned slot = node->header.firstFree();
 	std::memmove(&node->header.order[rank+1], &node->header.order[rank], 
 		(node->header.count - rank) * sizeof(node->header.order[0]));
 	++node->header.count;
@@ -291,7 +296,7 @@ inline void BNodeStore::insertAt(std::size_t rank,
 	assert(node->header.freeSlots != 0);
 	assert(rank <= node->header.count);
 
-	const unsigned slot = std::countr_zero(node->header.freeSlots);
+	const unsigned slot = node->header.firstFree();
 	std::memmove(&node->header.order[rank+1], &node->header.order[rank], 
 		(node->header.count - rank) * sizeof(node->header.order[0]));
 	++node->header.count;
