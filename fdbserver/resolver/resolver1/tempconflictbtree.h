@@ -51,7 +51,7 @@ public:
 	// Does not modify history or reclaim storage.
 	void checkReads(
 		std::span<const ReadConflictRange> reads,
-		bool* transactionConflictStatus) const;
+		bool* transactionConflictStatus);
 
 	// Writes are sorted, disjoint intervals from accepted transactions.
 	// All writes share cv, which must be nondecreasing between calls.
@@ -81,7 +81,7 @@ private:
 	void addWrite(
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);
-	bool hasConflict(const ReadConflictRange& read) const;
+	bool hasConflict(const ReadConflictRange& read);
 	// Inserts range at the given logical rank, splitting nodes as needed.
 	// On return, leaf and rank identify the inserted entry, even if a split
 	// moved it to another leaf. rank is a position in order, not a physical slot.
@@ -132,6 +132,12 @@ private:
 	static bool needsSplit(const InternalBlock* node) {
 		return node->header.childrenNeedingSplit == std::popcount(node->freeSlots);
 	}
+	// Called when node has just stopped needing a split. Decrements the
+	// parent's count of children needing a split and continues upwards
+	// while the parent also stops needing one.
 	void propagateSplitCleared(BNodeHeader* node);
+	// Splits node, updating the tree and split counters.
+	// If node is leaf, adjusts leaf and rank to preserve the position
+	// returned by findKey.
+	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank);
 };
-

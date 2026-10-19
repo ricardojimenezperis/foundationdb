@@ -8,7 +8,7 @@ TempConflictBTree::TempConflictBTree(std::size_t budget)
 
 void TempConflictBTree::checkReads(
 		std::span<const ReadConflictRange> reads,
-		bool* transactionConflictStatus) const {
+		bool* transactionConflictStatus) {
 
 	for (const auto& read : reads) {
 		if (!transactionConflictStatus[read.transaction]) {
@@ -36,16 +36,17 @@ void TempConflictBTree::addWrite(
 	std::size_t rank = 0;
 	BNodeHeader* nodeNeedsSplit = nullptr;
 	const bool found = findKey(write.first, leaf, rank, nodeNeedsSplit);
-
-	// empty tree
 	if (leaf == nullptr) {
+		// empty tree
 		auto range = keyStore_.appendRange(write.first, write.second, cv);
 		leaf = nodeStore_.allocateLeaf(cv);
 		nodeStore_.insertAt(std::size_t{0}, *range, cv, leaf);
 		root_ = &leaf->header;
 		return;
 	}
-
+	if (nodeNeedsSplit!=nullptr){
+		split(nodeNeedsSplit, leaf, rank);
+	}
 	std::size_t slot = 0;
 	bool hasPrevious = false;
 	if (!found) {
@@ -53,11 +54,9 @@ void TempConflictBTree::addWrite(
 	}
 	auto rangeInt =
 		keyStore_.appendRange(write.first, write.second, cv);
-
 	if (hasPrevious) {
 		const RangeRef oldRef = leaf->ranges[slot];
 		const Version oldCV = leaf->cv[slot];
-
 		if (keyStore_.compareEnd(write.first, oldRef) < 0) {
 			// Preserve the left exterior with its original CV.
 			auto rangeExtLeft =
@@ -75,7 +74,6 @@ void TempConflictBTree::addWrite(
 				return;
 			}
 		}
-
 		nextRank(leaf, rank, slot);
 	}
 
@@ -89,7 +87,6 @@ void TempConflictBTree::addWrite(
 		// remove overlapping ranges
 		eraseAt(rank, leaf);
 	}
-
 	if (leaf != nullptr && rank < leaf->header.count) {
 		slot = leaf->order[rank];
 		if (comp < 0 &&
@@ -105,7 +102,6 @@ void TempConflictBTree::addWrite(
 		root_ = &leaf->header;
 		rank = 0;
 	}
-
 	insertAt(rank, *rangeInt, cv, leaf);
 }
 
@@ -159,7 +155,7 @@ bool TempConflictBTree::findKey(
 	return nodeStore_.findKey(key, rank, leaf);
 }
 
-bool TempConflictBTree::hasConflict(const ReadConflictRange& read) const {
+bool TempConflictBTree::hasConflict(const ReadConflictRange& read) {
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 0;
 	BNodeHeader* nodeNeedsSplit = nullptr;
@@ -402,3 +398,14 @@ void TempConflictBTree::removeEmptyChild(
 	}
 }
 
+void TempConflictBTree::split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank){
+	if (node->kind==BNodeKind::Internal) {
+		nodeStore_.allocateInternal(node->maxCV);
+		int toMoveWeight=node->count+node->
+		for (size_t s = 0; s < node->count;++s) {
+
+		}
+	} else {
+
+	}
+}

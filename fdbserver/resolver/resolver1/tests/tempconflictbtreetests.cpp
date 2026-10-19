@@ -26,7 +26,7 @@ struct TempConflictBTreeTestAccess {
 						 std::size_t& rank, std::size_t& slot) {
 		return t.prevRank(leaf, rank, slot);
 	}
-	static bool hasConflict(const TempConflictBTree& t,
+	static bool hasConflict(TempConflictBTree& t,
 							const ReadConflictRange& read) {
 		return t.hasConflict(read);
 	}
@@ -66,6 +66,28 @@ struct LeafModel {
 	std::vector<Entry> entries;     // in key order
 };
 
+// A leaf needs a split when it is full; an internal node when every free
+// slot may be taken by the split of a child that needs one.
+bool needsSplit(const BNodeHeader* node) {
+	if (node->kind == BNodeKind::Leaf) {
+		return !reinterpret_cast<const LeafBlock*>(node)->hasSpace();
+	}
+	const auto* internal = reinterpret_cast<const InternalBlock*>(node);
+	return internal->header.childrenNeedingSplit ==
+		std::popcount(internal->freeSlots);
+}
+
+std::uint8_t childrenNeedingSplit(const InternalBlock* node) {
+	std::uint8_t count = 0;
+	for (std::size_t r = 0; r < node->header.count; ++r) {
+		count += needsSplit(node->children[node->order[r]]);
+	}
+	return count;
+}
+
+// Separator CV given to empty leaves by TestTree::build.
+constexpr Version EmptyLeafCV = 1000;
+
 // A tree built directly from nodes. Entries are inserted in reverse order,
 // always at rank 0, so that order is never the identity.
 class TestTree {
@@ -103,12 +125,15 @@ public:
 		struct Child {
 			BNodeHeader* node;
 			Bytes lowerBound;
-			Version cv;     // CV of the first entry below, as refreshing sets it
+			// CV of the first entry below, as refreshing sets it. An empty
+			// leaf gets EmptyLeafCV, newer than any entry, as if its entries
+			// had been overwritten after its separator was set.
+			Version cv;
 		};
 		std::vector<Child> level;
 		for (const LeafModel& l : leaves) {
 			level.push_back({&l.leaf->header, l.lowerBound,
-							 l.entries.empty() ? 0 : l.entries.front().cv});
+							 l.entries.empty() ? EmptyLeafCV : l.entries.front().cv});
 		}
 
 		while (level.size() > 1) {
@@ -126,6 +151,8 @@ public:
 					nodes().insertAt(0, *key, level[j - 1].node, level[j - 1].cv,
 									 internal);
 				}
+				internal->header.childrenNeedingSplit =
+					childrenNeedingSplit(internal);
 				parents.push_back({&internal->header, level[i].lowerBound,
 								   level[i].cv});
 			}
@@ -589,6 +616,8 @@ void checkSubtree(TestTree& t, const BNodeHeader* node,
 	}
 
 	const auto* internal = reinterpret_cast<const InternalBlock*>(node);
+	ASSERT_EQ(internal->header.childrenNeedingSplit,
+			  childrenNeedingSplit(internal));
 	for (std::size_t r = 0; r < internal->header.count; ++r) {
 		const auto slot = internal->order[r];
 		ASSERT(internal->children[slot]->parent == node);
@@ -627,7 +656,13 @@ std::vector<Entry> checkTree(TestTree& t) {
 
 	for (unsigned b = 0; b <= 230; b += 3) {
 		for (unsigned e = b + 1; e <= 231; e += 7) {
-			for (Version version : {Version{0}, Version{15}, Version{40}}) {
+			// Reads are admitted only at or above reclaimCV, and may clean
+			// the tree, which never changes their outcome.
+			for (Version version : {t.tree.reclaimCV(), Version{0},
+									Version{15}, Version{40}}) {
+				if (version < t.tree.reclaimCV()) {
+					continue;
+				}
 				bool expected = false;
 				for (const Entry& entry : entries) {
 					expected |= entry.begin < key(e) && key(b) < entry.end &&
@@ -718,19 +753,19 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorFromLeaf") {
 	checkTree(t);
 }
 
-// A leaf left empty is removed, its neighbours are linked to each other and
-// the parent's count of children needing a split is updated.
+// A full leaf left empty is removed, its neighbours are linked to each other
+// and the parent no longer counts it as a child needing a split.
 TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyLeaf") {
 	TestTree t;
-	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {20, 20, 20}));
-	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {5, 10, 8}));
-	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {20, 20, 20}));
+	t.addLeaf({}, entriesFrom(10, 3, 100));
+	t.addLeaf(key(20), entriesFrom(20, LeafCapacity, 1));
+	t.addLeaf(key(160), entriesFrom(160, 3, 100));
 	t.build(3);
 	InternalBlock* root = rootNode(t);
-	t.leaves[1].leaf->header.needsSplit = true;
-	root->header.childrenNeedingSplit = 1;
+	ASSERT(!t.leaves[1].leaf->hasSpace());
+	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
 
-	Access::setReclaimCV(t.tree, 10);
+	Access::setReclaimCV(t.tree, LeafCapacity);
 	ASSERT(Access::refreshSeparator(t.tree, root, 1));
 
 	ASSERT_EQ(root->header.count, 2);
@@ -738,6 +773,82 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyLeaf") {
 	ASSERT(childAt(root, 1) == &t.leaves[2].leaf->header);
 	ASSERT(t.leaves[0].leaf->right == t.leaves[2].leaf);
 	ASSERT(t.leaves[2].leaf->left == t.leaves[0].leaf);
+	checkTree(t);
+}
+
+namespace {
+
+// root -> [I0, I1]. I0 has a single free slot and its second child, a leaf,
+// is full with CVs 1..LeafCapacity, so I0 needs a split and the root counts
+// it. The other leaves hold one entry each, with CV 100.
+InternalBlock* fullLeafUnderCriticalNode(TestTree& t) {
+	constexpr std::size_t children = InternalCapacity - 1;
+	t.addLeaf({}, entriesFrom(10, 1, 100));
+	t.addLeaf(key(12), entriesFrom(12, LeafCapacity, 1));
+	unsigned first = 12 + 2 * LeafCapacity;
+	for (std::size_t i = 2; i <= children; ++i, first += 2) {
+		t.addLeaf(key(first), entriesFrom(first, 1, 100));
+	}
+	ASSERT(first <= 231);
+	t.build(children);
+
+	InternalBlock* root = rootNode(t);
+	ASSERT_EQ(root->header.count, 2);
+	auto* i0 = reinterpret_cast<InternalBlock*>(childAt(root, 0));
+	ASSERT_EQ(i0->header.count, children);
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 1);
+	ASSERT(needsSplit(&i0->header));
+	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
+	ASSERT(!needsSplit(&root->header));
+	return i0;
+}
+
+} // namespace
+
+// When the full leaf is cleaned it stops needing a split, and so does its
+// parent, which has the leaf's slot free again: both counts go down.
+TEST_CASE("/resolver/TempConflictBTree/CleanExpiredPropagatesSplitCleared") {
+	TestTree t;
+	InternalBlock* i0 = fullLeafUnderCriticalNode(t);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 1);
+	ASSERT(Access::cleanExpired(t.tree, t.leaves[1].leaf));
+
+	ASSERT(t.leaves[1].leaf->hasSpace());
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 0);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
+	checkTree(t);
+}
+
+// Cleaning a leaf that was not full leaves the counts unchanged.
+TEST_CASE("/resolver/TempConflictBTree/CleanExpiredKeepsSplitCountsOfNonFullLeaf") {
+	TestTree t;
+	InternalBlock* i0 = fullLeafUnderCriticalNode(t);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 100);
+	ASSERT(Access::cleanExpired(t.tree, t.leaves[2].leaf));
+
+	ASSERT_EQ(t.leaves[2].leaf->header.count, 0);
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 1);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
+}
+
+// Removing an empty leaf frees a slot of its parent: the parent stops
+// needing a split and the root stops counting it.
+TEST_CASE("/resolver/TempConflictBTree/RemoveEmptyChildPropagatesSplitCleared") {
+	TestTree t;
+	InternalBlock* i0 = fullLeafUnderCriticalNode(t);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 100);
+	ASSERT(Access::refreshSeparator(t.tree, i0, 2));
+
+	ASSERT_EQ(i0->header.count, InternalCapacity - 2);
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 1);
+	ASSERT(!needsSplit(&i0->header));
+	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
 	checkTree(t);
 }
 
@@ -812,9 +923,9 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorsRefreshesWholeNode") {
 	for (std::size_t r = 0; r < root->header.count; ++r) {
 		ASSERT(root->separatorsCV[root->order[r]] > 10);
 	}
+	ASSERT_EQ(leafEntries(t, t.leaves[2].leaf).size(), 3);
 	const std::vector<Entry> entries = checkTree(t);
 	ASSERT_EQ(entries.size(), 6);
-	ASSERT_EQ(leafEntries(t, t.leaves[2].leaf).size(), 3);
 
 	ASSERT(!Access::refreshSeparators(t.tree, root));
 }
