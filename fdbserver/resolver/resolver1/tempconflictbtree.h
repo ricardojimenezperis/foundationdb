@@ -135,6 +135,11 @@ private:
 	static bool needsSplit(const LeafBlock* node) {
 		return !node->header.hasSpace();
 	}
+	// A leaf never counts children needing a split, so for a leaf this is
+	// "no free slots", and for an internal node the usual condition.
+	static bool needsSplit(const BNodeHeader* node) {
+		return node->childrenNeedingSplit == node->freeSlotCount();
+	}
 	// Called when node has just stopped needing a split. Decrements the
 	// parent's count of children needing a split and continues upwards
 	// while the parent also stops needing one.

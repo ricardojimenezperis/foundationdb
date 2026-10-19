@@ -397,68 +397,207 @@ void TempConflictBTree::removeEmptyChild(
 		propagateSplitCleared(&parent->header);
 	}
 }
+void TempConflictBTree::split(
+		BNodeHeader* node,
+		LeafBlock*& leaf,
+		std::size_t& rank,
+		Version cv) {
+	assert(node != nullptr);
+	assert(needsSplit(node));
+	assert(cv >= node->maxCV);
 
-void TempConflictBTree::split(BNodeHeader* node, LeafBlock*& leaf, 
-		std::size_t& rank, Version cv){
-	int cutRank=0;
-	if (node->kind==BNodeKind::Internal) {
-		// using write CV is a tradeoff to avoid reordering that would be n log(n)
-		InternalBlock* newNode= nodeStore_.allocateInternal(cv);
-		InternalBlock* oldNode= reinterpret_cast<InternalBlock*> (node);
-		newNode->header.parent=oldNode->header.parent;
-		int toMoveWeight=(oldNode->header.count+node->freeSlotCount())/2;
-		int currentRank=0;
-		std::size_t  currentSlot=oldNode->header.order[currentRank];
-		// compute cut point
-		while (toMoveWeight>0) {
-			currentSlot=oldNode->header.order[currentRank];
-			if (oldNode->children[currentSlot]->childrenNeedingSplit
-					== oldNode->children[currentSlot]->freeSlotCount()) {
-				toMoveWeight-=2;
-			} else {
-				--toMoveWeight;
-			}
-			++currentRank;
+	auto* parentNode =
+		reinterpret_cast<InternalBlock*>(node->parent);
+	const bool parentSplitBefore =
+		parentNode != nullptr && needsSplit(parentNode);
+
+	BNodeHeader* sibling = nullptr;
+	KeyRef oldSeparator{};
+	KeyRef newSeparator{};
+	Version oldSeparatorCV = 0;
+	Version newSeparatorCV = 0;
+
+	if (node->kind == BNodeKind::Internal) {
+		auto* oldNode = reinterpret_cast<InternalBlock*>(node);
+
+		// Use the write CV as a conservative bound so allocation
+		// can append the node to the age list.
+		auto* newNode = nodeStore_.allocateInternal(cv);
+		assert(newNode != nullptr);
+
+		int remainingWeight =
+			(oldNode->header.count +
+			 oldNode->header.childrenNeedingSplit) / 2;
+
+		int cutRank = 0;
+		while (remainingWeight > 0) {
+			const auto slot = oldNode->header.order[cutRank];
+			remainingWeight -=
+				needsSplit(oldNode->children[slot]) ? 2 : 1;
+			++cutRank;
 		}
-		cutRank=currentRank;
-		while (currentRank < oldNode->header.count) {
-			newNode->header.order[newNode->header.count]=newNode->header.count;
-			newNode->separators[newNode->header.count]=oldNode->separators[currentSlot];
-			newNode->separatorsCV[newNode->header.count]=oldNode->separatorsCV[currentSlot];
-			newNode->children[newNode->header.count]=oldNode->children[currentSlot];
-			newNode->maxSubtreesCV[newNode->header.count]=oldNode->maxSubtreesCV[currentSlot];
-			newNode->header.unsetFree(newNode->header.count);
-			newNode->children[newNode->header.count]->parent=
-				reinterpret_cast<BNodeHeader*> (newNode);
-			newNode->children[newNode->header.count]->parentSlot =
-				newNode->header.count;
-			if (needsSplit(oldNode->children[currentSlot])) {
+
+		assert(cutRank > 0);
+		assert(cutRank < oldNode->header.count);
+
+		const int oldCount = oldNode->header.count;
+		for (int currentRank = cutRank;
+			 currentRank < oldCount;
+			 ++currentRank) {
+			const auto oldSlot = oldNode->header.order[currentRank];
+			const auto newSlot = newNode->header.count;
+			BNodeHeader* child = oldNode->children[oldSlot];
+
+			newNode->header.order[newSlot] = newSlot;
+			newNode->separators[newSlot] =
+				oldNode->separators[oldSlot];
+			newNode->separatorsCV[newSlot] =
+				oldNode->separatorsCV[oldSlot];
+			newNode->children[newSlot] = child;
+			newNode->maxSubtreesCV[newSlot] =
+				oldNode->maxSubtreesCV[oldSlot];
+			newNode->header.unsetFree(newSlot);
+
+			child->parent = &newNode->header;
+			child->parentSlot = newSlot;
+
+			if (needsSplit(child)) {
 				++newNode->header.childrenNeedingSplit;
 				--oldNode->header.childrenNeedingSplit;
 			}
+
+			oldNode->header.setFree(oldSlot);
 			++newNode->header.count;
-			++currentRank;
-			currentSlot=oldNode->header.order[currentRank];
 		}
-		// Remove from cutRank to count in oldNode
-		for (size_t rank=cutRank; rank < oldNode->header.count; ++rank) {
-			reinterpret_cast<BNodeHeader*>(oldNode)->setFree(oldNode->header.order[rank]);
+		oldNode->header.count =
+			static_cast<std::uint8_t>(cutRank);
+
+		const auto oldFirst = oldNode->header.order[0];
+		const auto newFirst = newNode->header.order[0];
+
+		oldSeparator = oldNode->separators[oldFirst];
+		oldSeparatorCV = oldNode->separatorsCV[oldFirst];
+		newSeparator = newNode->separators[newFirst];
+		newSeparatorCV = newNode->separatorsCV[newFirst];
+		sibling = &newNode->header;
+
+		// An internal split leaves leaf and rank unchanged.
+	} else {
+		auto* oldNode = reinterpret_cast<LeafBlock*>(node);
+		assert(leaf == oldNode);
+
+		auto* newNode = nodeStore_.allocateLeaf(cv);
+		assert(newNode != nullptr);
+
+		const std::size_t cutRank = oldNode->header.count / 2;
+		const std::size_t oldCount = oldNode->header.count;
+
+		assert(cutRank > 0);
+		assert(cutRank < oldCount);
+
+		for (std::size_t currentRank = cutRank;
+			 currentRank < oldCount;
+			 ++currentRank) {
+			const auto oldSlot = oldNode->header.order[currentRank];
+			const auto newSlot = newNode->header.count;
+
+			newNode->header.order[newSlot] = newSlot;
+			newNode->ranges[newSlot] = oldNode->ranges[oldSlot];
+			newNode->cv[newSlot] = oldNode->cv[oldSlot];
+			newNode->header.unsetFree(newSlot);
+
+			oldNode->header.setFree(oldSlot);
+			++newNode->header.count;
 		}
-		oldNode->header.count=cutRank;
-		// find the first empty parent slot
-		newNode->header.parentSlot=newNode->header.parent->firstFree();
-		// The new node goes right after oldNode in the parent.
-		InternalBlock* parentNode = reinterpret_cast<InternalBlock*>(oldNode->header.parent);
+		oldNode->header.count =
+			static_cast<std::uint8_t>(cutRank);
+
+		newNode->left = oldNode;
+		newNode->right = oldNode->right;
+		if (newNode->right != nullptr) {
+			newNode->right->left = newNode;
+		}
+		oldNode->right = newNode;
+
+		if (rank >= cutRank) {
+			leaf = newNode;
+			rank -= cutRank;
+		}
+
+		const auto oldFirst = oldNode->header.order[0];
+		const auto newFirst = newNode->header.order[0];
+
+		oldSeparator = keyStore_.beginKey(oldNode->ranges[oldFirst]);
+		oldSeparatorCV = oldNode->cv[oldFirst];
+		newSeparator = keyStore_.beginKey(newNode->ranges[newFirst]);
+		newSeparatorCV = newNode->cv[newFirst];
+		sibling = &newNode->header;
+	}
+
+	const bool oldSplitAfter = needsSplit(node);
+	const bool newSplitAfter = needsSplit(sibling);
+
+	if (parentNode == nullptr) {
+		parentNode = nodeStore_.allocateInternal(cv);
+		assert(parentNode != nullptr);
+
+		nodeStore_.insertAt(
+			0, oldSeparator, node, oldSeparatorCV, parentNode);
+		nodeStore_.insertAt(
+			1, newSeparator, sibling, newSeparatorCV, parentNode);
+
+		parentNode->header.childrenNeedingSplit =
+			static_cast<std::uint8_t>(oldSplitAfter) +
+			static_cast<std::uint8_t>(newSplitAfter);
+
+		root_ = &parentNode->header;
+	} else {
 		std::size_t parentRank = 0;
-		while (parentNode->header.order[parentRank] != oldNode->header.parentSlot) {
+		while (parentRank < parentNode->header.count &&
+			   parentNode->header.order[parentRank] !=
+				   node->parentSlot) {
 			++parentRank;
 		}
-		nodeStore_.insertAt(parentRank + 1,
-							newNode->separators[newNode->header.order[0]],
-							&newNode->header,
-							newNode->separatorsCV[newNode->header.order[0]],
-							parentNode);
-	} else {
+		assert(parentRank < parentNode->header.count);
+		assert(parentNode->header.freeSlotCount() > 0);
 
+		nodeStore_.insertAt(
+			parentRank + 1,
+			newSeparator,
+			sibling,
+			newSeparatorCV,
+			parentNode);
+
+		// The old node needed splitting before redistribution.
+		assert(parentNode->header.childrenNeedingSplit > 0);
+		--parentNode->header.childrenNeedingSplit;
+		parentNode->header.childrenNeedingSplit +=
+			static_cast<std::uint8_t>(oldSplitAfter) +
+			static_cast<std::uint8_t>(newSplitAfter);
+
+		const bool parentSplitAfter = needsSplit(parentNode);
+		assert(parentSplitBefore || !parentSplitAfter);
+
+		if (parentSplitBefore && !parentSplitAfter) {
+			propagateSplitCleared(&parentNode->header);
+		}
+	}
+
+	// Propagate the sibling's conservative maximum CV.
+	BNodeHeader* current = sibling;
+	while (current->parent != nullptr) {
+		auto* parent =
+			reinterpret_cast<InternalBlock*>(current->parent);
+		const auto slot = current->parentSlot;
+
+		if (parent->maxSubtreesCV[slot] < current->maxCV) {
+			parent->maxSubtreesCV[slot] = current->maxCV;
+		}
+
+		if (parent->header.maxCV >= current->maxCV) {
+			break;
+		}
+		nodeStore_.updateCV(&parent->header, current->maxCV);
+		current = &parent->header;
 	}
 }
