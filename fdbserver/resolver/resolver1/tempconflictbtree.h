@@ -130,7 +130,7 @@ private:
 	// An internal node needs a split when every free slot may be taken by
 	// the split of a child that needs one.
 	static bool needsSplit(const InternalBlock* node) {
-		return node->header.childrenNeedingSplit == std::popcount(node->freeSlots);
+		return node->header.childrenNeedingSplit == node->header.freeSlotCount();
 	}
 	// Called when node has just stopped needing a split. Decrements the
 	// parent's count of children needing a split and continues upwards

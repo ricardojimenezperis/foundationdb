@@ -70,17 +70,15 @@ struct LeafModel {
 // slot may be taken by the split of a child that needs one.
 bool needsSplit(const BNodeHeader* node) {
 	if (node->kind == BNodeKind::Leaf) {
-		return !reinterpret_cast<const LeafBlock*>(node)->hasSpace();
+		return !node->hasSpace();
 	}
-	const auto* internal = reinterpret_cast<const InternalBlock*>(node);
-	return internal->header.childrenNeedingSplit ==
-		std::popcount(internal->freeSlots);
+	return node->childrenNeedingSplit == node->freeSlotCount();
 }
 
 std::uint8_t childrenNeedingSplit(const InternalBlock* node) {
 	std::uint8_t count = 0;
 	for (std::size_t r = 0; r < node->header.count; ++r) {
-		count += needsSplit(node->children[node->order[r]]);
+		count += needsSplit(node->children[node->header.order[r]]);
 	}
 	return count;
 }
@@ -298,7 +296,7 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyThroughTwoInternalLevels") {
 
 	const auto* root = reinterpret_cast<const InternalBlock*>(Access::root(t.tree));
 	ASSERT(root->header.kind == BNodeKind::Internal);
-	ASSERT(root->children[root->order[0]]->kind == BNodeKind::Internal);
+	ASSERT(root->children[root->header.order[0]]->kind == BNodeKind::Internal);
 
 	for (const Bytes& k : searchKeys(160)) {
 		checkFindKey(t, k);
@@ -366,7 +364,7 @@ TEST_CASE("/resolver/TempConflictBTree/NextRankVisitsEveryEntry") {
 		ASSERT(Access::nextRank(t.tree, leaf, rank, slot));
 		ASSERT(leaf == positions[i].first);
 		ASSERT_EQ(rank, positions[i].second);
-		ASSERT_EQ(slot, leaf->order[rank]);
+		ASSERT_EQ(slot, leaf->header.order[rank]);
 	}
 
 	// At the last entry: no next one, rank becomes the end position, and
@@ -392,7 +390,7 @@ TEST_CASE("/resolver/TempConflictBTree/PrevRankVisitsEveryEntry") {
 		ASSERT(Access::prevRank(t.tree, leaf, rank, slot));
 		ASSERT(leaf == positions[i - 1].first);
 		ASSERT_EQ(rank, positions[i - 1].second);
-		ASSERT_EQ(slot, leaf->order[rank]);
+		ASSERT_EQ(slot, leaf->header.order[rank]);
 	}
 
 	// At the first entry: no previous one, and nothing changes.
@@ -415,14 +413,14 @@ TEST_CASE("/resolver/TempConflictBTree/RankMovesFromEmptyLeaves") {
 	ASSERT(Access::prevRank(t.tree, leaf, rank, slot));
 	ASSERT(leaf == t.leaves[2].leaf);
 	ASSERT_EQ(rank, 1);
-	ASSERT_EQ(slot, leaf->order[1]);
+	ASSERT_EQ(slot, leaf->header.order[1]);
 
 	leaf = t.leaves[3].leaf;
 	rank = 0;
 	ASSERT(Access::nextRank(t.tree, leaf, rank, slot));
 	ASSERT(leaf == t.leaves[5].leaf);
 	ASSERT_EQ(rank, 0);
-	ASSERT_EQ(slot, leaf->order[0]);
+	ASSERT_EQ(slot, leaf->header.order[0]);
 
 	leaf = t.leaves[0].leaf;
 	rank = leaf->header.count;
@@ -591,7 +589,7 @@ Bytes readRecord(const KeyStore& store, const RangeRef& r, std::size_t start,
 std::vector<Entry> leafEntries(TestTree& t, const LeafBlock* leaf) {
 	std::vector<Entry> entries;
 	for (std::size_t r = 0; r < leaf->header.count; ++r) {
-		const auto slot = leaf->order[r];
+		const auto slot = leaf->header.order[r];
 		const RangeRef& range = leaf->ranges[slot];
 		entries.push_back({readRecord(t.keys(), range, 0, range.beginLength),
 						   readRecord(t.keys(), range, range.endStart,
@@ -619,7 +617,7 @@ void checkSubtree(TestTree& t, const BNodeHeader* node,
 	ASSERT_EQ(internal->header.childrenNeedingSplit,
 			  childrenNeedingSplit(internal));
 	for (std::size_t r = 0; r < internal->header.count; ++r) {
-		const auto slot = internal->order[r];
+		const auto slot = internal->header.order[r];
 		ASSERT(internal->children[slot]->parent == node);
 		const std::size_t before = entries.size();
 		checkSubtree(t, internal->children[slot], leaves, entries);
@@ -692,7 +690,7 @@ InternalBlock* rootNode(TestTree& t) {
 }
 
 BNodeHeader* childAt(const InternalBlock* node, std::size_t rank) {
-	return node->children[node->order[rank]];
+	return node->children[node->header.order[rank]];
 }
 
 } // namespace
@@ -709,8 +707,8 @@ TEST_CASE("/resolver/TempConflictBTree/CleanExpiredRemovesOnlyExpiredEntries") {
 	ASSERT_EQ(left.size(), 2);
 	ASSERT(left[0].begin == key(12) && left[0].cv == 15);
 	ASSERT(left[1].begin == key(16) && left[1].cv == 20);
-	ASSERT_EQ(leaf->freeSlots, LeafSlotMask & ~((std::uint64_t{1} << leaf->order[0]) |
-											   (std::uint64_t{1} << leaf->order[1])));
+	ASSERT_EQ(leaf->header.freeSlots, LeafSlotMask & ~((std::uint64_t{1} << leaf->header.order[0]) |
+											   (std::uint64_t{1} << leaf->header.order[1])));
 
 	ASSERT(!Access::cleanExpired(t.tree, leaf));
 	checkTree(t);
@@ -722,11 +720,11 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorKeepsFreshSeparator") {
 	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {8, 2, 9}));
 	t.build(3);
 	InternalBlock* root = rootNode(t);
-	const KeyRef before = root->separators[root->order[1]];
+	const KeyRef before = root->separators[root->header.order[1]];
 
 	Access::setReclaimCV(t.tree, 7);
 	ASSERT(!Access::refreshSeparator(t.tree, root, 1));
-	ASSERT(root->separators[root->order[1]].firstBlock == before.firstBlock);
+	ASSERT(root->separators[root->header.order[1]].firstBlock == before.firstBlock);
 	ASSERT_EQ(leafEntries(t, t.leaves[1].leaf).size(), 3);
 	checkTree(t);
 }
@@ -744,7 +742,7 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorFromLeaf") {
 	Access::setReclaimCV(t.tree, 10);
 	ASSERT(Access::refreshSeparator(t.tree, root, 1));
 
-	const auto slot = root->order[1];
+	const auto slot = root->header.order[1];
 	ASSERT_EQ(root->header.count, 3);
 	ASSERT_EQ(root->separatorsCV[slot], 30);
 	ASSERT_EQ(t.keys().compareKeys(asRef(key(34)), root->separators[slot]), 0);
@@ -762,7 +760,7 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyLeaf") {
 	t.addLeaf(key(160), entriesFrom(160, 3, 100));
 	t.build(3);
 	InternalBlock* root = rootNode(t);
-	ASSERT(!t.leaves[1].leaf->hasSpace());
+	ASSERT(!t.leaves[1].leaf->header.hasSpace());
 	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
 
 	Access::setReclaimCV(t.tree, LeafCapacity);
@@ -815,7 +813,7 @@ TEST_CASE("/resolver/TempConflictBTree/CleanExpiredPropagatesSplitCleared") {
 	Access::setReclaimCV(t.tree, 1);
 	ASSERT(Access::cleanExpired(t.tree, t.leaves[1].leaf));
 
-	ASSERT(t.leaves[1].leaf->hasSpace());
+	ASSERT(t.leaves[1].leaf->header.hasSpace());
 	ASSERT_EQ(i0->header.childrenNeedingSplit, 0);
 	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
 	checkTree(t);
@@ -882,7 +880,7 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorSkipsExpiredGrandchildren
 	ASSERT_EQ(root->header.count, 2);
 	ASSERT_EQ(i1->header.count, 1);
 	ASSERT(childAt(i1, 0) == &t.leaves[5].leaf->header);
-	const auto slot = root->order[1];
+	const auto slot = root->header.order[1];
 	ASSERT_EQ(root->separatorsCV[slot], 40);
 	ASSERT_EQ(t.keys().compareKeys(asRef(key(110)), root->separators[slot]), 0);
 	ASSERT(t.leaves[2].leaf->right == t.leaves[5].leaf);
@@ -921,7 +919,7 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorsRefreshesWholeNode") {
 	// of its first entry, has not expired, so its entry with CV 6 stays.
 	ASSERT_EQ(root->header.count, 3);
 	for (std::size_t r = 0; r < root->header.count; ++r) {
-		ASSERT(root->separatorsCV[root->order[r]] > 10);
+		ASSERT(root->separatorsCV[root->header.order[r]] > 10);
 	}
 	ASSERT_EQ(leafEntries(t, t.leaves[2].leaf).size(), 3);
 	const std::vector<Entry> entries = checkTree(t);
@@ -941,5 +939,5 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorsCanEmptyNode") {
 	Access::setReclaimCV(t.tree, 10);
 	ASSERT(Access::refreshSeparators(t.tree, root));
 	ASSERT_EQ(root->header.count, 0);
-	ASSERT_EQ(root->freeSlots, InternalSlotMask);
+	ASSERT_EQ(root->header.freeSlots, InternalSlotMask);
 }

@@ -36,15 +36,29 @@ enum class BNodeKind : std::uint8_t {
 struct BNodeHeader {
 	std::uint64_t generation;
 	Version maxCV = 0;
-
 	BNodeHeader* agePrevious = nullptr;
 	BNodeHeader* ageNext = nullptr;
 	BNodeHeader* parent = nullptr;
-
 	BNodeKind kind;
 	std::uint8_t count = 0;
 	std::uint8_t parentSlot = 0;
 	std::uint8_t childrenNeedingSplit = 0;
+	// Bit i is set when slot i is free. Set by BNodeStore on allocation.
+	std::uint64_t freeSlots = 0;
+	// Physical slot of each logical rank, sized for the largest capacity.
+	std::uint8_t order[64]{};
+	inline void setFree (std::size_t slot) {
+		freeSlots |= std::uint64_t{1} << slot;
+	}
+	inline void unsetFree (std::size_t slot) {
+		freeSlots &= ~(std::uint64_t{1} << slot);
+	}
+	inline bool hasSpace() const {
+		return freeSlots != 0;
+	}
+	inline unsigned freeSlotCount() const {
+		return static_cast<unsigned>(std::popcount(freeSlots));
+	}
 };
 
 template<std::size_t C>
@@ -56,12 +70,6 @@ struct InternalBlockLayout {
 	Version separatorsCV[C];
 	KeyRef separators[C];
 	BNodeHeader* children[C];
-	std::uint64_t freeSlots = UINT64_MAX >> (64 - C);
-	std::uint8_t order[C]{};
-
-	bool hasSpace() const {
-		return freeSlots != 0;
-	}
 };
 
 template<std::size_t C>
@@ -73,12 +81,6 @@ struct LeafBlockLayout {
 	RangeRef ranges[C];
 	LeafBlockLayout<C>* left = nullptr;
 	LeafBlockLayout<C>* right = nullptr;
-	std::uint64_t freeSlots = UINT64_MAX >> (64 - C);
-	std::uint8_t order[C]{};
-
-	bool hasSpace() const {
-		return freeSlots != 0;
-	}
 };
 
 template<template<std::size_t> class Layout, std::size_t C = 1>
@@ -183,6 +185,7 @@ inline LeafBlock* BNodeStore::allocateLeaf(Version cv) {
 	LeafBlock* leaf = ::new(block) LeafBlock{};
 	leaf->header.generation= nextGeneration_++;
 	leaf->header.kind= BNodeKind::Leaf;
+	leaf->header.freeSlots = LeafSlotMask;
 	leaf->header.maxCV=cv;
 	insertLast(&leaf->header);
 	return leaf;
@@ -195,6 +198,7 @@ inline InternalBlock* BNodeStore::allocateInternal(Version cv) {
 	InternalBlock* internal = ::new(block) InternalBlock{};
 	internal->header.generation= nextGeneration_++;
 	internal->header.kind= BNodeKind::Internal;
+	internal->header.freeSlots = InternalSlotMask;
 	internal->header.maxCV=cv;
 	insertLast(&internal->header);
 	return internal;
@@ -262,19 +266,19 @@ inline void BNodeStore::insertAt(std::size_t rank,
 							InternalBlock* node) {
 	assert(node != nullptr);
 	assert(child != nullptr);	
-	assert(node->freeSlots != 0);
+	assert(node->header.freeSlots != 0);
 	assert(rank <= node->header.count);
 
-	const unsigned slot = std::countr_zero(node->freeSlots);
-	std::memmove(&node->order[rank+1], &node->order[rank], 
-		(node->header.count - rank) * sizeof(node->order[0]));
+	const unsigned slot = std::countr_zero(node->header.freeSlots);
+	std::memmove(&node->header.order[rank+1], &node->header.order[rank], 
+		(node->header.count - rank) * sizeof(node->header.order[0]));
 	++node->header.count;
-	node->order[rank]=static_cast<std::uint8_t>(slot);
+	node->header.order[rank]=static_cast<std::uint8_t>(slot);
 	node->maxSubtreesCV[slot] = child->maxCV;
 	node->separatorsCV[slot] = cv;
 	node->separators[slot]=key;
 	node->children[slot]=child;
-	node->freeSlots&=~(std::uint64_t{1}<<slot);
+	node->header.freeSlots&=~(std::uint64_t{1}<<slot);
 	child->parent = &node->header;
 	child->parentSlot = static_cast<std::uint8_t>(slot);
 }
@@ -284,15 +288,15 @@ inline void BNodeStore::insertAt(std::size_t rank,
 							Version cv,
 							LeafBlock* node) {
 	assert(node != nullptr);
-	assert(node->freeSlots != 0);
+	assert(node->header.freeSlots != 0);
 	assert(rank <= node->header.count);
 
-	const unsigned slot = std::countr_zero(node->freeSlots);
-	std::memmove(&node->order[rank+1], &node->order[rank], 
-		(node->header.count - rank) * sizeof(node->order[0]));
+	const unsigned slot = std::countr_zero(node->header.freeSlots);
+	std::memmove(&node->header.order[rank+1], &node->header.order[rank], 
+		(node->header.count - rank) * sizeof(node->header.order[0]));
 	++node->header.count;
-	node->order[rank]=static_cast<std::uint8_t>(slot);
-	node->freeSlots&=~(std::uint64_t{1}<<slot);
+	node->header.order[rank]=static_cast<std::uint8_t>(slot);
+	node->header.freeSlots&=~(std::uint64_t{1}<<slot);
 	node->cv[slot] = cv;
 	node->ranges[slot] = range;
 }
@@ -305,7 +309,7 @@ inline bool BNodeStore::findKey(const StringRef& key,
 	std::size_t mid= lo+(hi-lo)/2;
 	int comp;
 	while (lo < hi){
-		comp= keyStore_.compareKeys(key,node->separators[node->order[mid]]);
+		comp= keyStore_.compareKeys(key,node->separators[node->header.order[mid]]);
 		if (comp==0) {
 			rank=mid;
 			return true;
@@ -331,7 +335,7 @@ inline bool BNodeStore::findKey(const StringRef& key,
 	std::size_t mid= lo+(hi-lo)/2;
 	int comp;
 	while (lo < hi){
-		comp= keyStore_.compareBegin(key,node->ranges[node->order[mid]]);
+		comp= keyStore_.compareBegin(key,node->ranges[node->header.order[mid]]);
 		if (comp==0) {
 			rank=mid;
 			return true;
@@ -353,11 +357,11 @@ inline void BNodeStore::eraseAt(
 	assert(node != nullptr);
 	assert(rank < node->header.count);
 
-	const unsigned slot = node->order[rank];
-	std::memmove(&node->order[rank], &node->order[rank+1], 
-		(node->header.count - rank - 1) * sizeof(node->order[0]));
+	const unsigned slot = node->header.order[rank];
+	std::memmove(&node->header.order[rank], &node->header.order[rank+1], 
+		(node->header.count - rank - 1) * sizeof(node->header.order[0]));
 	--node->header.count;
-	node->freeSlots|= std::uint64_t{1}<<slot;
+	node->header.freeSlots|= std::uint64_t{1}<<slot;
 }
 
 inline void BNodeStore::eraseAt(
@@ -366,9 +370,9 @@ inline void BNodeStore::eraseAt(
 	assert(node != nullptr);
 	assert(rank < node->header.count);
 
-	const unsigned slot = node->order[rank];
-	std::memmove(&node->order[rank], &node->order[rank+1], 
-		(node->header.count - rank - 1) * sizeof(node->order[0]));
+	const unsigned slot = node->header.order[rank];
+	std::memmove(&node->header.order[rank], &node->header.order[rank+1], 
+		(node->header.count - rank - 1) * sizeof(node->header.order[0]));
 	--node->header.count;
-	node->freeSlots|= std::uint64_t{1}<<slot;
+	node->header.freeSlots|= std::uint64_t{1}<<slot;
 }

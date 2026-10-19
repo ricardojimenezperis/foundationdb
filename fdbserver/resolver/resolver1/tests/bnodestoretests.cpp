@@ -87,12 +87,12 @@ TEST_CASE("/resolver/BNodeStore/AllocateLeafInitializesNode") {
 	ASSERT(leaf->header.agePrevious == nullptr);
 	ASSERT(leaf->header.ageNext == nullptr);
 
-	ASSERT_EQ(leaf->freeSlots, LeafSlotMask);
+	ASSERT_EQ(leaf->header.freeSlots, LeafSlotMask);
 	ASSERT(leaf->left == nullptr);
 	ASSERT(leaf->right == nullptr);
 
 	for (std::size_t i = 0; i < LeafCapacity; ++i) {
-		ASSERT_EQ(leaf->order[i], 0);
+		ASSERT_EQ(leaf->header.order[i], 0);
 	}
 }
 
@@ -113,10 +113,10 @@ TEST_CASE("/resolver/BNodeStore/AllocateInternalInitializesNode") {
 	ASSERT(internal->header.agePrevious == nullptr);
 	ASSERT(internal->header.ageNext == nullptr);
 
-	ASSERT_EQ(internal->freeSlots, InternalSlotMask);
+	ASSERT_EQ(internal->header.freeSlots, InternalSlotMask);
 
 	for (std::size_t i = 0; i < InternalCapacity; ++i) {
-		ASSERT_EQ(internal->order[i], 0);
+		ASSERT_EQ(internal->header.order[i], 0);
 	}
 }
 
@@ -199,7 +199,7 @@ TEST_CASE("/resolver/BNodeStore/ReleaseReturnsBlockToPool") {
 		   reinterpret_cast<std::byte*>(leaf));
 	ASSERT(internal->header.kind == BNodeKind::Internal);
 	ASSERT(internal->header.generation > oldGeneration);
-	ASSERT_EQ(internal->freeSlots, InternalSlotMask);
+	ASSERT_EQ(internal->header.freeSlots, InternalSlotMask);
 
 	store.releaseNode(&internal->header);
 	ASSERT_EQ(freeBlockCount(pool), freeBefore);
@@ -397,19 +397,19 @@ TEST_CASE("/resolver/BNodeStore/HasSpace") {
 	LeafBlock* leaf = store.allocateLeaf(1);
 	InternalBlock* internal = store.allocateInternal(1);
 
-	ASSERT(leaf->hasSpace());
-	ASSERT(internal->hasSpace());
+	ASSERT(leaf->header.hasSpace());
+	ASSERT(internal->header.hasSpace());
 
 	// One free slot is still space.
-	leaf->freeSlots = 1;
-	internal->freeSlots = std::uint64_t{1} << (InternalCapacity - 1);
-	ASSERT(leaf->hasSpace());
-	ASSERT(internal->hasSpace());
+	leaf->header.freeSlots = 1;
+	internal->header.freeSlots = std::uint64_t{1} << (InternalCapacity - 1);
+	ASSERT(leaf->header.hasSpace());
+	ASSERT(internal->header.hasSpace());
 
-	leaf->freeSlots = 0;
-	internal->freeSlots = 0;
-	ASSERT(!leaf->hasSpace());
-	ASSERT(!internal->hasSpace());
+	leaf->header.freeSlots = 0;
+	internal->header.freeSlots = 0;
+	ASSERT(!leaf->header.hasSpace());
+	ASSERT(!internal->header.hasSpace());
 }
 
 namespace {
@@ -462,7 +462,7 @@ void checkInternalNode(const InternalBlock* node,
 	std::uint64_t used = 0;
 
 	for (std::size_t i = 0; i < expected.size(); ++i) {
-		const std::size_t slot = node->order[i];
+		const std::size_t slot = node->header.order[i];
 		ASSERT(slot < InternalCapacity);
 
 		// Each slot appears once in the order.
@@ -478,8 +478,8 @@ void checkInternalNode(const InternalBlock* node,
 		ASSERT_EQ(e.child->parentSlot, slot);
 	}
 
-	ASSERT_EQ(node->freeSlots, InternalSlotMask & ~used);
-	ASSERT_EQ(node->hasSpace(), expected.size() < InternalCapacity);
+	ASSERT_EQ(node->header.freeSlots, InternalSlotMask & ~used);
+	ASSERT_EQ(node->header.hasSpace(), expected.size() < InternalCapacity);
 }
 
 // Fills an empty internal node, inserting entry n at rankFor(n), and checks
@@ -517,7 +517,7 @@ void fillInternalNode(RankFor rankFor) {
 		checkInternalNode(node, expected);
 	}
 
-	ASSERT(!node->hasSpace());
+	ASSERT(!node->header.hasSpace());
 }
 
 } // namespace
@@ -566,7 +566,7 @@ void checkLeafNode(const LeafBlock* node,
 	std::uint64_t used = 0;
 
 	for (std::size_t i = 0; i < expected.size(); ++i) {
-		const std::size_t slot = node->order[i];
+		const std::size_t slot = node->header.order[i];
 		ASSERT(slot < LeafCapacity);
 
 		ASSERT((used & (std::uint64_t{1} << slot)) == 0);
@@ -576,8 +576,8 @@ void checkLeafNode(const LeafBlock* node,
 		ASSERT_EQ(node->cv[slot], expected[i].cv);
 	}
 
-	ASSERT_EQ(node->freeSlots, LeafSlotMask & ~used);
-	ASSERT_EQ(node->hasSpace(), expected.size() < LeafCapacity);
+	ASSERT_EQ(node->header.freeSlots, LeafSlotMask & ~used);
+	ASSERT_EQ(node->header.hasSpace(), expected.size() < LeafCapacity);
 }
 
 // Fills an empty leaf, inserting entry n at rankFor(n), and checks the
@@ -607,7 +607,7 @@ void fillLeafNode(RankFor rankFor) {
 		checkLeafNode(node, expected);
 	}
 
-	ASSERT(!node->hasSpace());
+	ASSERT(!node->header.hasSpace());
 }
 
 std::size_t mixedRank(std::size_t count) {
@@ -752,7 +752,7 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInLeaf") {
 	});
 
 	ASSERT_EQ(leaf->header.count, SearchKeyCount);
-	ASSERT(!orderIsIdentity(leaf->order, SearchKeyCount));
+	ASSERT(!orderIsIdentity(leaf->header.order, SearchKeyCount));
 
 	checkSearch(store, static_cast<const LeafBlock*>(leaf));
 }
@@ -770,7 +770,7 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInInternalNode") {
 	});
 
 	ASSERT_EQ(internal->header.count, SearchKeyCount);
-	ASSERT(!orderIsIdentity(internal->order, SearchKeyCount));
+	ASSERT(!orderIsIdentity(internal->header.order, SearchKeyCount));
 
 	checkSearch(store, static_cast<const InternalBlock*>(internal));
 }
@@ -850,7 +850,7 @@ void emptyInternalNode(RankFor rankFor) {
 		checkInternalNode(node, expected);
 	}
 
-	ASSERT_EQ(node->freeSlots, InternalSlotMask);
+	ASSERT_EQ(node->header.freeSlots, InternalSlotMask);
 }
 
 template<typename RankFor>
@@ -877,7 +877,7 @@ void emptyLeafNode(RankFor rankFor) {
 		checkLeafNode(node, expected);
 	}
 
-	ASSERT_EQ(node->freeSlots, LeafSlotMask);
+	ASSERT_EQ(node->header.freeSlots, LeafSlotMask);
 }
 
 } // namespace
@@ -931,11 +931,11 @@ TEST_CASE("/resolver/BNodeStore/InsertAndEraseInterleaved") {
 			(count < InternalCapacity && nextRandom(state) % 3 != 0);
 
 		if (insert) {
-			const unsigned lowestFree = std::countr_zero(node->freeSlots);
+			const unsigned lowestFree = std::countr_zero(node->header.freeSlots);
 			const std::size_t rank = nextRandom(state) % (count + 1);
 
 			insertInternalEntry(store, keys, node, expected, rank, n);
-			ASSERT_EQ(node->order[rank], lowestFree);
+			ASSERT_EQ(node->header.order[rank], lowestFree);
 		} else {
 			const std::size_t rank = nextRandom(state) % count;
 
@@ -962,11 +962,11 @@ TEST_CASE("/resolver/BNodeStore/InsertAndEraseInterleavedInLeaf") {
 			(count < LeafCapacity && nextRandom(state) % 3 != 0);
 
 		if (insert) {
-			const unsigned lowestFree = std::countr_zero(node->freeSlots);
+			const unsigned lowestFree = std::countr_zero(node->header.freeSlots);
 			const std::size_t rank = nextRandom(state) % (count + 1);
 
 			insertLeafEntry(keys, store, node, expected, rank, n);
-			ASSERT_EQ(node->order[rank], lowestFree);
+			ASSERT_EQ(node->header.order[rank], lowestFree);
 		} else {
 			const std::size_t rank = nextRandom(state) % count;
 
@@ -991,20 +991,20 @@ TEST_CASE("/resolver/BNodeStore/EraseThenInsertReusesSlot") {
 	for (std::size_t n = 0; n < InternalCapacity; ++n) {
 		insertInternalEntry(store, keys, node, expected, 0, n);
 	}
-	ASSERT(!node->hasSpace());
+	ASSERT(!node->header.hasSpace());
 
 	const std::size_t erased = InternalCapacity / 2;
-	const unsigned slot = node->order[erased];
+	const unsigned slot = node->header.order[erased];
 
 	store.eraseAt(erased, node);
 	expected.erase(expected.begin() + erased);
 	checkInternalNode(node, expected);
-	ASSERT_EQ(node->freeSlots, std::uint64_t{1} << slot);
+	ASSERT_EQ(node->header.freeSlots, std::uint64_t{1} << slot);
 
 	insertInternalEntry(store, keys, node, expected, 3, InternalCapacity);
-	ASSERT_EQ(node->order[3], slot);
+	ASSERT_EQ(node->header.order[3], slot);
 	checkInternalNode(node, expected);
-	ASSERT(!node->hasSpace());
+	ASSERT(!node->header.hasSpace());
 }
 
 TEST_CASE("/resolver/BNodeStore/EraseThenInsertReusesSlotInLeaf") {
@@ -1018,18 +1018,18 @@ TEST_CASE("/resolver/BNodeStore/EraseThenInsertReusesSlotInLeaf") {
 	for (std::size_t n = 0; n < LeafCapacity; ++n) {
 		insertLeafEntry(keys, store, node, expected, 0, n);
 	}
-	ASSERT(!node->hasSpace());
+	ASSERT(!node->header.hasSpace());
 
 	const std::size_t erased = LeafCapacity / 2;
-	const unsigned slot = node->order[erased];
+	const unsigned slot = node->header.order[erased];
 
 	store.eraseAt(erased, node);
 	expected.erase(expected.begin() + erased);
 	checkLeafNode(node, expected);
-	ASSERT_EQ(node->freeSlots, std::uint64_t{1} << slot);
+	ASSERT_EQ(node->header.freeSlots, std::uint64_t{1} << slot);
 
 	insertLeafEntry(keys, store, node, expected, 3, LeafCapacity);
-	ASSERT_EQ(node->order[3], slot);
+	ASSERT_EQ(node->header.order[3], slot);
 	checkLeafNode(node, expected);
-	ASSERT(!node->hasSpace());
+	ASSERT(!node->header.hasSpace());
 }
