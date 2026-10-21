@@ -357,17 +357,82 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 	}
 }
 
-void  TempConflictBTree::removeSubtree(BNodeHeader* node) {
-	eraseAt(node->parentRank(), node.parent);
-	if (node->kind==BNodeKind::Leaf) {
-
+BNodeHeader* TempConflictBTree::eraseAt(std::size_t rank, InternalBlock* node) {
+	BNodeHeader* child = node->children[node->header.order[rank]];
+	// Take the subtree's leaves, a contiguous run, out of the leaf chain.
+	LeafBlock* first = firstLeaf(child);
+	LeafBlock* last = lastLeaf(child);
+	if (first->left != nullptr) {
+		first->left->right = last->right;
 	}
+	if (last->right != nullptr) {
+		last->right->left = first->left;
+	}
+	first->left = nullptr;
+	last->right = nullptr;
+	const bool splitBefore = needsSplit(node);
+	if (needsSplit(child)) {
+		--node->header.childrenNeedingSplit;
+	}
+	nodeStore_.eraseAt(rank, node);
+	child->parent = nullptr;
+	child->parentSlot = 0;
+	// node gained a free slot and no counted child: if it needed a split,
+	// it no longer does.
+	assert(!needsSplit(node));
+	propagateUpdates(node, splitBefore ? -1 : 0, false, false);
+	// Remove the ancestors left empty, as eraseAt does for a leaf.
+	while (node->header.count == 0 && node->parent() != nullptr) {
+		InternalBlock* tmp = node;
+		node = tmp->parent();
+		removeEmptyChild(node, tmp->parentRank());
+	}
+	if (node->header.count > 0) {
+		propagateUpdates(node, 0, true, false);
+	}
+	normalizeRoot();
+	return child;
+}
+
+LeafBlock* TempConflictBTree::firstLeaf(BNodeHeader* node) {
+	while (node->kind == BNodeKind::Internal) {
+		auto* internal = reinterpret_cast<InternalBlock*>(node);
+		node = internal->children[internal->header.order[0]];
+	}
+	return reinterpret_cast<LeafBlock*>(node);
+}
+
+LeafBlock* TempConflictBTree::lastLeaf(BNodeHeader* node) {
+	while (node->kind == BNodeKind::Internal) {
+		auto* internal = reinterpret_cast<InternalBlock*>(node);
+		node = internal->children[internal->header.order[internal->header.count - 1]];
+	}
+	return reinterpret_cast<LeafBlock*>(node);
+}
+
+void  TempConflictBTree::removeSubtreeRec(BNodeHeader* node) {
+
+	while (node->kind==BNodeKind::Internal) {
+		for (size_t rank=0;rank<node->count;rank++){
+			size_t order=node->order[rank];
+			removeSubtreeRec(reinterpret_cast<InternalBlock*>(node)->children[rank]);
+		}
+	}
+	LeafBlock* leaf=reinterpret_cast<LeafBlock*>(node);
+	nodeStore_.unlinkNode(leaf);
+	nodeStore_.releaseNode(leaf);
+
+}
+
+void  TempConflictBTree::removeSubtree(BNodeHeader* node) {
+	eraseAt(node->parentRank(), node->parent);
+	removeSubtreeRec(node);	
 }
 
 void  TempConflictBTree::reclaimOldest() {
 	Version minKeyCV=keyStore_.oldestCV().value_or(0);
 	Version minNodeCV=nodeStore_.oldestCV().value_or(0);
-	Version minCV=std::min(minKeyCV,minKeyNode);
+	Version minCV=std::min(minKeyCV,minKeyCV);
 	if (minCV==0) return;
 	while (minKeyCV != 0 && keyStore_.oldestCV().value_or(0)==minKeyCV){
 		minKeyCV=keyStore_.reclaimOldest().value_or(0);
