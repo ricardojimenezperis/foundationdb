@@ -41,6 +41,7 @@
 #include <span>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 class TempConflictBTree {
 	friend struct TempConflictBTreeTestAccess;
@@ -84,6 +85,13 @@ private:
 		std::size_t& rank,
 	    BNodeHeader*& nodeNeedsSplit
 	);
+	// The deepest node on the path of findKey that needs a split: leaf if it
+	// does, otherwise the deepest of candidates, the internal nodes that
+	// needed one on the way down, that still does after cleaning. Consumes
+	// candidates. Returns nullptr if there is none.
+	BNodeHeader* findSplitCandidate(
+		LeafBlock* leaf,
+		std::vector<InternalBlock*>& candidates);
 	void addWrite(
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);

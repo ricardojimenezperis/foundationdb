@@ -165,19 +165,25 @@ bool TempConflictBTree::findKey(
 
 	leaf = reinterpret_cast<LeafBlock*>(current);
 	cleanExpired(leaf);
+	nodeNeedsSplit = findSplitCandidate(leaf, needSplit);
+	return nodeStore_.findKey(key, rank, leaf);
+}
+
+BNodeHeader* TempConflictBTree::findSplitCandidate(
+		LeafBlock* leaf,
+		std::vector<InternalBlock*>& candidates) {
 	if (needsSplit(leaf)) {
-		nodeNeedsSplit=current;
-	} else {
-		while (!needSplit.empty()){
-			InternalBlock* internal =needSplit.back();
-			needSplit.pop_back();
-			if (needsSplit(internal)){
-				nodeNeedsSplit=&internal->header;
-				break;
-			}
+		return &leaf->header;
+	}
+	// Deepest first: candidates were pushed on the way down.
+	while (!candidates.empty()) {
+		InternalBlock* node = candidates.back();
+		candidates.pop_back();
+		if (needsSplit(node)) {
+			return &node->header;
 		}
 	}
-	return nodeStore_.findKey(key, rank, leaf);
+	return nullptr;
 }
 
 bool TempConflictBTree::hasConflict(const ReadConflictRange& read) {

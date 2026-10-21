@@ -2252,3 +2252,30 @@ TEST_CASE("/resolver/TempConflictBTree/EraseAtRemovesChainToRoot") {
 	ASSERT(t.nodes().oldestNode() == nullptr);
 }
 
+
+// An internal node that needed a split on the way down stops needing it when
+// cleaning the leaf below frees slots: findKey then returns no candidate.
+TEST_CASE("/resolver/TempConflictBTree/FindKeyDropsCandidateClearedBelow") {
+	TestTree t;
+	InternalBlock* i0 = fullLeafUnderCriticalNode(t);
+	InternalBlock* root = rootNode(t);
+	LeafBlock* leaf = t.leaves[1].leaf;
+	// The first entry is newer than the others, and so is the separator, so
+	// that only the leaf's own cleaning removes them.
+	leaf->cv[leaf->header.order[0]] = 100;
+	i0->separatorsCV[leaf->header.parentSlot] = 100;
+	t.leaves[1].entries.front().cv = 100;
+	Access::setReclaimCV(t.tree, 50);
+
+	const Position p = find(t, t.leaves[1].lowerBound);
+	ASSERT(p.leaf == leaf);
+	ASSERT(p.nodeNeedsSplit == nullptr);
+	ASSERT_EQ(leaf->header.count, LeafCapacity - 49);
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 0);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
+	std::vector<Entry>& entries = t.leaves[1].entries;
+	entries.erase(std::remove_if(entries.begin(), entries.end(),
+								 [](const Entry& e) { return e.cv <= 50; }),
+				  entries.end());
+	checkSameEntries(checkTree(t), modelEntries(t));
+}
