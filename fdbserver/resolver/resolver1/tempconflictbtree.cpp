@@ -298,7 +298,7 @@ void TempConflictBTree::normalizeRoot() {
 		root_ = oldRoot->children[oldRoot->header.order[0]];
 		root_->parent = nullptr;
 		root_->parentSlot = 0;
-		nodeStore_.releaseNode(&oldRoot->header);
+		nodeStore_.releaseNode(oldRoot);
 	}
 }
 
@@ -325,32 +325,28 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 			LeafBlock* oldRight=leaf->right;
 			InternalBlock* oldParent=leaf->parent();
 			removeEmptyChild(leaf->parent(), leaf->parentRank());
-			if (oldLeft==nullptr && oldRight==nullptr) { 
-				//last remaining leaf -> empty tree
-				while (oldParent!=nullptr){
-					InternalBlock* tmp=oldParent;
-					oldParent=oldParent->parent();
-					nodeStore_.releaseNode(tmp);
-				}
-				root_=nullptr;
-				leaf=nullptr;
+			// Remove the ancestors left empty. Without other leaves this
+			// reaches the root, which normalizeRoot then releases.
+			while (oldParent->header.count == 0 && oldParent->parent() != nullptr) {
+				InternalBlock* tmp = oldParent;
+				oldParent = tmp->parent();
+				removeEmptyChild(oldParent, tmp->parentRank());
+			}
+			if (oldParent->header.count > 0) {
+				updateMinSeparator(oldParent);
+			}
+			normalizeRoot();
+			if (oldRight!=nullptr) {
+				leaf= oldRight;
+				rank= 0;
+			} else if (oldLeft!=nullptr) {
+				leaf= oldLeft;
+				rank=leaf->header.count;
 			} else {
-				if (oldRight!=nullptr) {
-					leaf= oldRight;
-					rank= 0;
-				} else { // oldLeft cannot be nullptr
-					leaf= oldLeft;
-					rank=leaf->header.count;
-				}
-				while (oldParent->header.count == 0 && oldParent->parent() != nullptr) {
-					InternalBlock* tmp = oldParent;
-					oldParent = tmp->parent();
-					removeEmptyChild(oldParent, tmp->parentRank());
-				}
-				if (oldParent->header.count > 0) {
-					updateMinSeparator(oldParent);
-				}
-				normalizeRoot();
+				//last remaining leaf -> empty tree
+				assert(root_ == nullptr);
+				leaf=nullptr;
+				rank=0;
 			}
 		}
 	} else {
