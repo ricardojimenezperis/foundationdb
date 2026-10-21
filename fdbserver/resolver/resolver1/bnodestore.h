@@ -215,6 +215,8 @@ public:
 		std::size_t rank,
 		LeafBlock* node);
 
+	inline void unlinkNode(BNodeHeader* node);
+
 private:
 	PagePool& pool_;
 	KeyStore& keyStore_;
@@ -222,7 +224,6 @@ private:
 	BNodeHeader* oldestNode_ = nullptr;
 	BNodeHeader* newestNode_ = nullptr;
 
-	inline void unlinkNode(BNodeHeader* node);
 	inline void insertLast(BNodeHeader* node);
 };
 

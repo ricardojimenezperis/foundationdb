@@ -144,6 +144,13 @@ private:
 	// the root. The subtree is not released; it is returned without parent,
 	// its leaves taken out of the leaf chain. Requires a non-empty subtree.
 	BNodeHeader* eraseAt(std::size_t rank, InternalBlock* node);
+	// Takes the run of leaves from first to last out of the leaf chain,
+	// linking its neighbours to each other. The run keeps its inner links;
+	// its ends are left without neighbours.
+	static void unlinkLeaves(LeafBlock* first, LeafBlock* last);
+	static void unlinkLeaf(LeafBlock* leaf) {
+		unlinkLeaves(leaf, leaf);
+	}
 	// The first and last leaves of the subtree under node.
 	static LeafBlock* firstLeaf(BNodeHeader* node);
 	static LeafBlock* lastLeaf(BNodeHeader* node);
@@ -244,4 +251,5 @@ private:
 			   bool found, Version cv);
 	void normalizeRoot();
 	void removeSubtree(BNodeHeader* node);
+	void removeSubtreeRec(BNodeHeader* node);
 };

@@ -359,17 +359,8 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 
 BNodeHeader* TempConflictBTree::eraseAt(std::size_t rank, InternalBlock* node) {
 	BNodeHeader* child = node->children[node->header.order[rank]];
-	// Take the subtree's leaves, a contiguous run, out of the leaf chain.
-	LeafBlock* first = firstLeaf(child);
-	LeafBlock* last = lastLeaf(child);
-	if (first->left != nullptr) {
-		first->left->right = last->right;
-	}
-	if (last->right != nullptr) {
-		last->right->left = first->left;
-	}
-	first->left = nullptr;
-	last->right = nullptr;
+	// The subtree's leaves are a contiguous run of the leaf chain.
+	unlinkLeaves(firstLeaf(child), lastLeaf(child));
 	const bool splitBefore = needsSplit(node);
 	if (needsSplit(child)) {
 		--node->header.childrenNeedingSplit;
@@ -394,6 +385,17 @@ BNodeHeader* TempConflictBTree::eraseAt(std::size_t rank, InternalBlock* node) {
 	return child;
 }
 
+void TempConflictBTree::unlinkLeaves(LeafBlock* first, LeafBlock* last) {
+	if (first->left != nullptr) {
+		first->left->right = last->right;
+	}
+	if (last->right != nullptr) {
+		last->right->left = first->left;
+	}
+	first->left = nullptr;
+	last->right = nullptr;
+}
+
 LeafBlock* TempConflictBTree::firstLeaf(BNodeHeader* node) {
 	while (node->kind == BNodeKind::Internal) {
 		auto* internal = reinterpret_cast<InternalBlock*>(node);
@@ -412,20 +414,21 @@ LeafBlock* TempConflictBTree::lastLeaf(BNodeHeader* node) {
 
 void  TempConflictBTree::removeSubtreeRec(BNodeHeader* node) {
 
-	while (node->kind==BNodeKind::Internal) {
+	if (node->kind==BNodeKind::Internal) {
 		for (size_t rank=0;rank<node->count;rank++){
 			size_t order=node->order[rank];
-			removeSubtreeRec(reinterpret_cast<InternalBlock*>(node)->children[rank]);
+			removeSubtreeRec(reinterpret_cast<InternalBlock*>(node)->children[order]);
 		}
 	}
-	LeafBlock* leaf=reinterpret_cast<LeafBlock*>(node);
-	nodeStore_.unlinkNode(leaf);
-	nodeStore_.releaseNode(leaf);
-
+	nodeStore_.releaseNode(node);
 }
 
 void  TempConflictBTree::removeSubtree(BNodeHeader* node) {
-	eraseAt(node->parentRank(), node->parent);
+	if (node->parent==nullptr){
+		root_=nullptr;
+	} else {
+		eraseAt(node->parentRank(), node->parent);
+	}
 	removeSubtreeRec(node);	
 }
 
@@ -530,13 +533,7 @@ void TempConflictBTree::removeEmptyChild(
 	const bool splitBefore = needsSplit(parent);
 
 	if (child->kind == BNodeKind::Leaf) {
-		auto* leaf = reinterpret_cast<LeafBlock*>(child);
-		if (leaf->left != nullptr) {
-			leaf->left->right = leaf->right;
-		}
-		if (leaf->right != nullptr) {
-			leaf->right->left = leaf->left;
-		}
+		unlinkLeaf(reinterpret_cast<LeafBlock*>(child));
 	}
 
 	// The empty child no longer needs splitting. Its transition
