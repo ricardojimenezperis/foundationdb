@@ -279,11 +279,29 @@ void  TempConflictBTree::insertAt(
 			}
 			updateCV = parent->header.maxCV < current->maxCV;
 			if (updateCV) {
-				nodeStore_.updateCV(&parent->header, current->maxCV);
+				nodeStore_.updateCV(parent, current->maxCV);
 			}
 		}
 		current=&parent->header;
 		parent=current->parent;
+	}
+}
+
+void TempConflictBTree::normalizeRoot() {
+	while (root_ != nullptr) {
+		if (root_->count == 0) {
+			nodeStore_.releaseNode(root_);
+			root_ = nullptr;
+			return;
+		}
+		if (root_->kind != BNodeKind::Internal || root_->count != 1) {
+			return;
+		}
+		auto* oldRoot = reinterpret_cast<InternalBlock*>(root_);
+		root_ = oldRoot->children[oldRoot->header.order[0]];
+		root_->parent = nullptr;
+		root_->parentSlot = 0;
+		nodeStore_.releaseNode(&oldRoot->header);
 	}
 }
 
@@ -295,27 +313,25 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 	bool splitBefore=needsSplit(leaf);
 	nodeStore_.eraseAt(rank,leaf);
 	if (leaf!=nullptr && splitBefore && !needsSplit(leaf)) {
-		propagateSplitCleared(&leaf->header);
+		propagateSplitCleared(leaf);
 	}
 	if (leaf->header.count==0) {
 		if (leaf->parent()==nullptr){
-			nodeStore_.releaseNode(&leaf->header);
+			nodeStore_.releaseNode(leaf);
 			root_=nullptr;
 			leaf=nullptr;
 		} else {
+			LeafBlock* oldLeft=leaf->left;
+			LeafBlock* oldRight=leaf->right;
 			removeEmptyChild(leaf->parent(), leaf->parentRank());
-			if (leaf->left!=nullptr){
-				leaf->left->right= leaf->right;
-			}
-			if (leaf->right!=nullptr) {
-				leaf->right->left= leaf->left;
-			}
-			if (leaf->right!=nullptr) {
-				leaf= leaf->right;
+			if (oldRight!=nullptr) {
+				leaf= oldRight;
 				rank= 0;
-			} else if (leaf->left!=nullptr){
-				leaf= leaf->right;
+			} else if (oldLeft!=nullptr){
+				leaf= oldLeft;
 				rank=leaf->header.count;
+			} else { //last remaining leaf
+				normalizeRoot();
 			}
 		}
 	} else {
@@ -417,7 +433,7 @@ bool TempConflictBTree::cleanExpired(LeafBlock* leaf) {
 	}
 
 	if (splitBefore && !needsSplit(leaf)) {
-		propagateSplitCleared(&leaf->header);
+		propagateSplitCleared(leaf);
 	}
 	return deleted;
 }
@@ -446,7 +462,7 @@ void TempConflictBTree::removeEmptyChild(
 	nodeStore_.releaseNode(child);
 
 	if (splitBefore && !needsSplit(parent)) {
-		propagateSplitCleared(&parent->header);
+		propagateSplitCleared(parent);
 	}
 }
 
@@ -626,7 +642,7 @@ void TempConflictBTree::split(
 		assert(parentSplitBefore || !parentSplitAfter);
 
 		if (parentSplitBefore && !parentSplitAfter) {
-			propagateSplitCleared(&parentNode->header);
+			propagateSplitCleared(parentNode);
 		}
 	}
 
@@ -643,7 +659,7 @@ void TempConflictBTree::split(
 		if (parent->header.maxCV >= current->maxCV) {
 			break;
 		}
-		nodeStore_.updateCV(&parent->header, current->maxCV);
+		nodeStore_.updateCV(parent, current->maxCV);
 		current = &parent->header;
 	}
 }

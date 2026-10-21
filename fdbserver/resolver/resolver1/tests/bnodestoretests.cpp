@@ -1149,3 +1149,28 @@ TEST_CASE("/resolver/BNodeStore/ParentAndParentRank") {
 	store.eraseAt(0, node);
 	ASSERT_EQ(leaf->parentRank(), 0);
 }
+
+// releaseNode and updateCV accept both block kinds directly.
+TEST_CASE("/resolver/BNodeStore/BlockOverloads") {
+	PagePool pool(PageSize, BlockSize);
+	KeyStore keys(pool);
+	BNodeStore store(pool, keys);
+	const std::size_t available = freeBlockCount(pool);
+
+	LeafBlock* leaf = store.allocateLeaf(1);
+	InternalBlock* internal = store.allocateInternal(2);
+	ASSERT(store.oldestNode() == &leaf->header);
+
+	store.updateCV(leaf, 3);
+	ASSERT_EQ(leaf->header.maxCV, 3);
+	ASSERT(store.oldestNode() == &internal->header);
+	store.updateCV(internal, 4);
+	ASSERT_EQ(internal->header.maxCV, 4);
+	ASSERT(store.oldestNode() == &leaf->header);
+
+	store.releaseNode(leaf);
+	ASSERT(store.oldestNode() == &internal->header);
+	store.releaseNode(internal);
+	ASSERT(store.oldestNode() == nullptr);
+	ASSERT_EQ(freeBlockCount(pool), available);
+}

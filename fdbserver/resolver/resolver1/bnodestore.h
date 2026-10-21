@@ -167,7 +167,19 @@ public:
 
 	// node should be previously unlinked from the tree
 	inline void releaseNode(BNodeHeader* node);
+	void releaseNode(LeafBlock* node) {
+		releaseNode(&node->header);
+	}
+	void releaseNode(InternalBlock* node) {
+		releaseNode(&node->header);
+	}
 	inline void updateCV(BNodeHeader* node, Version cv);
+	void updateCV(LeafBlock* node, Version cv) {
+		updateCV(&node->header, cv);
+	}
+	void updateCV(InternalBlock* node, Version cv) {
+		updateCV(&node->header, cv);
+	}
 
 	inline std::optional<Version> oldestCV() const;
 	inline BNodeHeader* oldestNode() const;
@@ -336,7 +348,7 @@ inline void BNodeStore::insertAt(std::size_t rank,
 	node->cv[slot] = cv;
 	node->ranges[slot] = range;
 	if (cv > node->header.maxCV) {
-		updateCV(&node->header, cv);
+		updateCV(node, cv);
 	}
 }
 

@@ -148,6 +148,12 @@ private:
 	// parent's count of children needing a split and continues upwards
 	// while the parent also stops needing one.
 	void propagateSplitCleared(BNodeHeader* node);
+	void propagateSplitCleared(LeafBlock* node) {
+		propagateSplitCleared(&node->header);
+	}
+	void propagateSplitCleared(InternalBlock* node) {
+		propagateSplitCleared(&node->header);
+	}
 	// Splits node, updating the tree and split counters.
 	// If node is leaf, adjusts leaf and rank to preserve the position
 	// returned by findKey; found is the value findKey returned. A key not
@@ -155,4 +161,5 @@ private:
 	// below the first key of the new one.
 	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank,
 			   bool found, Version cv);
+	void normalizeRoot();
 };
