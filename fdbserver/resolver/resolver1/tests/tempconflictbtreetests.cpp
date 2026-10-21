@@ -80,11 +80,11 @@ struct LeafModel {
 	std::vector<Entry> entries;     // in key order
 };
 
-// A leaf needs a split when it is full; an internal node when every free
-// slot may be taken by the split of a child that needs one.
+// A leaf needs a split when it has at most one free slot; an internal node
+// when every free slot may be taken by the split of a child that needs one.
 bool needsSplit(const BNodeHeader* node) {
 	if (node->kind == BNodeKind::Leaf) {
-		return !node->hasSpace();
+		return node->freeSlotCount() <= 1;
 	}
 	return node->childrenNeedingSplit == node->freeSlotCount();
 }
@@ -793,14 +793,16 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyLeaf") {
 
 namespace {
 
-// root -> [I0, I1]. I0 has a single free slot and its second child, a leaf,
-// is full with CVs 1..LeafCapacity, so I0 needs a split and the root counts
-// it. The other leaves hold one entry each, with CV 100.
-InternalBlock* fullLeafUnderCriticalNode(TestTree& t) {
+// root -> [I0, I1]. I0 has a single free slot and its second child is a leaf
+// with entries CVs 1..entries, full by default, so I0 needs a split and the
+// root counts it when that leaf needs one. The other leaves hold one entry
+// each, with CV 100.
+InternalBlock* fullLeafUnderCriticalNode(TestTree& t,
+										 unsigned entries = LeafCapacity) {
 	constexpr std::size_t children = InternalCapacity - 1;
 	t.addLeaf({}, entriesFrom(10, 1, 100));
-	t.addLeaf(key(12), entriesFrom(12, LeafCapacity, 1));
-	unsigned first = 12 + 2 * LeafCapacity;
+	t.addLeaf(key(12), entriesFrom(12, entries, 1));
+	unsigned first = 12 + 2 * entries;
 	for (std::size_t i = 2; i <= children; ++i, first += 2) {
 		t.addLeaf(key(first), entriesFrom(first, 1, 100));
 	}
@@ -811,26 +813,28 @@ InternalBlock* fullLeafUnderCriticalNode(TestTree& t) {
 	ASSERT_EQ(root->header.count, 2);
 	auto* i0 = reinterpret_cast<InternalBlock*>(childAt(root, 0));
 	ASSERT_EQ(i0->header.count, children);
-	ASSERT_EQ(i0->header.childrenNeedingSplit, 1);
-	ASSERT(needsSplit(&i0->header));
-	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
+	const bool leafNeedsSplit = entries + 1 >= LeafCapacity;
+	ASSERT_EQ(i0->header.childrenNeedingSplit, leafNeedsSplit);
+	ASSERT_EQ(needsSplit(&i0->header), leafNeedsSplit);
+	ASSERT_EQ(root->header.childrenNeedingSplit, leafNeedsSplit);
 	ASSERT(!needsSplit(&root->header));
 	return i0;
 }
 
 } // namespace
 
-// When the full leaf is cleaned it stops needing a split, and so does its
-// parent, which has the leaf's slot free again: both counts go down.
+// When cleaning leaves two free slots in the full leaf, it stops needing a
+// split, and so does its parent, which no longer counts it: both counts go
+// down.
 TEST_CASE("/resolver/TempConflictBTree/CleanExpiredPropagatesSplitCleared") {
 	TestTree t;
 	InternalBlock* i0 = fullLeafUnderCriticalNode(t);
 	InternalBlock* root = rootNode(t);
 
-	Access::setReclaimCV(t.tree, 1);
+	Access::setReclaimCV(t.tree, 2);
 	ASSERT(Access::cleanExpired(t.tree, t.leaves[1].leaf));
 
-	ASSERT(t.leaves[1].leaf->header.hasSpace());
+	ASSERT_EQ(t.leaves[1].leaf->header.freeSlotCount(), 2);
 	ASSERT_EQ(i0->header.childrenNeedingSplit, 0);
 	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
 	checkTree(t);
@@ -1078,19 +1082,23 @@ std::vector<Bytes> wideSearchKeys(unsigned first, unsigned count,
 
 } // namespace
 
-// The header overload agrees with the typed ones: a leaf needs a split only
-// when full, an internal node when its free slots equal its children
-// needing a split.
+// The header overload agrees with the typed ones: a leaf needs a split when
+// it has at most one free slot, an internal node when its free slots equal
+// its children needing a split.
 TEST_CASE("/resolver/TempConflictBTree/NeedsSplitOfHeaderMatchesNodeKind") {
 	TestTree t;
 	LeafBlock* leaf = t.nodes().allocateLeaf(0);
 	InternalBlock* internal = t.nodes().allocateInternal(0);
 
-	for (std::uint64_t freeSlots : {LeafSlotMask, std::uint64_t{1},
-									std::uint64_t{1} << (LeafCapacity - 1),
-									std::uint64_t{0}}) {
+	std::vector<std::uint64_t> leafPatterns{
+		std::uint64_t{1}, std::uint64_t{1} << (LeafCapacity - 1),
+		std::uint64_t{1} | std::uint64_t{1} << (LeafCapacity - 1)};
+	for (std::size_t used = 0; used <= LeafCapacity; ++used) {
+		leafPatterns.push_back(LeafSlotMask >> used << used);
+	}
+	for (std::uint64_t freeSlots : leafPatterns) {
 		leaf->header.freeSlots = freeSlots;
-		const bool expected = freeSlots == 0;
+		const bool expected = std::popcount(freeSlots) <= 1;
 		ASSERT_EQ(Access::needsSplit(leaf), expected);
 		ASSERT_EQ(Access::needsSplit(&leaf->header), expected);
 	}
@@ -1347,5 +1355,107 @@ TEST_CASE("/resolver/TempConflictBTree/SplitInternalUnderParent") {
 		ASSERT(p.leaf == t.leaves[i].leaf);
 		ASSERT(p.nodeNeedsSplit ==
 			   (full[i] ? &t.leaves[i].leaf->header : nullptr));
+	}
+}
+
+// Leaves with LeafCapacity - 2, LeafCapacity - 1 and LeafCapacity entries:
+// only the last two need a split, are counted by their parent and are
+// returned by findKey.
+TEST_CASE("/resolver/TempConflictBTree/LeafNeedsSplitWithOneFreeSlot") {
+	const unsigned counts[] = {LeafCapacity - 2, LeafCapacity - 1, LeafCapacity};
+	TestTree t;
+	unsigned first = 10;
+	for (std::size_t i = 0; i < 3; ++i) {
+		t.addLeaf(i == 0 ? Bytes{} : wideKey(first),
+				  wideEntriesFrom(first, counts[i], 1));
+		first += 2 * counts[i];
+	}
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 2);
+
+	for (std::size_t i = 0; i < 3; ++i) {
+		LeafBlock* leaf = t.leaves[i].leaf;
+		ASSERT_EQ(leaf->header.freeSlotCount(), LeafCapacity - counts[i]);
+		ASSERT_EQ(Access::needsSplit(leaf), i > 0);
+		ASSERT_EQ(Access::needsSplit(&leaf->header), i > 0);
+		const Position p =
+			find(t, i == 0 ? wideKey(10) : t.leaves[i].lowerBound);
+		ASSERT(p.leaf == leaf);
+		ASSERT(p.nodeNeedsSplit == (i > 0 ? &leaf->header : nullptr));
+	}
+	checkTree(t);
+}
+
+// Cleaning a leaf reports its transition once, and only when it goes from
+// at most one free slot to at least two. The parent has a single free slot,
+// so the transition also reaches the root.
+TEST_CASE("/resolver/TempConflictBTree/CleanExpiredReportsLeafTransitionOnce") {
+	struct Case {
+		unsigned entries;
+		Version reclaim;     // removes the entries with CVs 1..reclaim
+		bool before;
+		bool after;
+	};
+	const Case cases[] = {
+		{LeafCapacity, 0, true, true},
+		{LeafCapacity, 1, true, true},             // full -> one free
+		{LeafCapacity, 2, true, false},            // full -> two free
+		{LeafCapacity, 5, true, false},
+		{LeafCapacity - 1, 1, true, false},        // one free -> two free
+		{LeafCapacity - 1, LeafCapacity - 1, true, false},
+		{LeafCapacity - 2, 1, false, false},
+		{LeafCapacity - 2, 0, false, false},
+	};
+	for (const Case& c : cases) {
+		TestTree t;
+		InternalBlock* i0 = fullLeafUnderCriticalNode(t, c.entries);
+		InternalBlock* root = rootNode(t);
+		LeafBlock* leaf = t.leaves[1].leaf;
+		ASSERT_EQ(Access::needsSplit(leaf), c.before);
+
+		Access::setReclaimCV(t.tree, c.reclaim);
+		ASSERT_EQ(Access::cleanExpired(t.tree, leaf), c.reclaim > 0);
+
+		ASSERT_EQ(leaf->header.count, c.entries - c.reclaim);
+		ASSERT_EQ(Access::needsSplit(leaf), c.after);
+		ASSERT_EQ(i0->header.childrenNeedingSplit, c.after);
+		ASSERT_EQ(Access::needsSplit(i0), c.after);
+		ASSERT_EQ(root->header.childrenNeedingSplit, c.after);
+		checkTree(t);
+	}
+}
+
+// A leaf with one free slot splits into two halves of LeafCapacity / 2, and
+// split keeps every position findKey returns.
+TEST_CASE("/resolver/TempConflictBTree/SplitLeafWithOneFreeSlot") {
+	constexpr unsigned entries = LeafCapacity - 1;
+	const auto makeTree = [](TestTree& t) {
+		t.addLeaf({}, wideEntriesFrom(10, 2, 1));
+		t.addLeaf(wideKey(14), wideEntriesFrom(14, entries, 1));
+		t.addLeaf(wideKey(14 + 2 * entries),
+				  wideEntriesFrom(14 + 2 * entries, 2, 1));
+		t.build(3);
+	};
+
+	TestTree t;
+	makeTree(t);
+	InternalBlock* root = rootNode(t);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
+	LeafBlock* old = t.leaves[1].leaf;
+	LeafBlock* leaf = old;
+	std::size_t rank = 0;
+	Access::split(t.tree, &old->header, leaf, rank, false, 50);
+
+	auto* sibling = reinterpret_cast<LeafBlock*>(childAt(root, 2));
+	ASSERT_EQ(old->header.count, entries / 2);
+	ASSERT_EQ(sibling->header.count, entries - entries / 2);
+	ASSERT(!Access::needsSplit(old));
+	ASSERT(!Access::needsSplit(sibling));
+	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
+	checkSameEntries(checkTree(t), modelEntries(t));
+
+	for (const Bytes& k : wideSearchKeys(14, entries, false)) {
+		checkLeafSplitKeepsPosition(makeTree, k);
 	}
 }

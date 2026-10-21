@@ -304,6 +304,9 @@ inline void BNodeStore::insertAt(std::size_t rank,
 	node->header.freeSlots&=~(std::uint64_t{1}<<slot);
 	node->cv[slot] = cv;
 	node->ranges[slot] = range;
+	if (cv > node->header.maxCV) {
+		updateCV(&node->header, cv);
+	}
 }
 
 inline bool BNodeStore::findKey(const StringRef& key,

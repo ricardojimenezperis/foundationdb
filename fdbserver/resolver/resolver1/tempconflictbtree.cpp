@@ -140,7 +140,7 @@ bool TempConflictBTree::findKey(
 
 	leaf = reinterpret_cast<LeafBlock*>(current);
 	cleanExpired(leaf);
-	if (!leaf->header.hasSpace()) {
+	if (needsSplit(leaf)) {
 		nodeNeedsSplit=current;
 	} else {
 		while (!needSplit.empty()){
@@ -249,15 +249,58 @@ bool TempConflictBTree::prevRank(
 	return true;
 }
 
-// Inserts range at the given logical rank, splitting nodes as needed.
-// On return, leaf and rank identify the inserted entry, even if a split
-// moved it to another leaf. rank is a position in order, not a physical slot.
 void  TempConflictBTree::insertAt(
 	std::size_t& rank,
 	const RangeRef& range,
 	Version cv,
 	LeafBlock*& leaf) {
 
+	const bool splitBefore = needsSplit(leaf);
+	nodeStore_.insertAt(rank, range, cv, leaf);
+	bool updateSplit=!splitBefore && needsSplit(leaf);
+	bool updateSeparator = (rank == 0);
+	bool updateCV= true;
+	BNodeHeader* current=reinterpret_cast<BNodeHeader*>(leaf);
+	InternalBlock* parent=reinterpret_cast<InternalBloc*> (leaf->header.parent);
+	while (parent!=nullptr && (updateSplit || updateSeparator || updateCV)){
+		if (updateSplit) {
+			const bool parentSplitBefore = needsSplit(parent);
+			++parent->childrenNeedingSplit;
+			updateSplit= !parentSplitBefore && needsSplit(parent); 
+		}
+		if (updateSeparator){
+			const auto slot = current->parentSlot;
+			parent->separators[slot] = keyStore_.beginKey(range);
+			parent->separatorsCV[slot] = cv;
+			updateSeparator = (parent->header.order[0] == slot);
+		}
+	}
+
+	
+	BNodeHeader* current = &leaf->header;
+	bool updateStartSeparator = (rank == 0);
+	while (updateStartSeparator && current->parent != nullptr) {
+		auto* parent = reinterpret_cast<InternalBlock*>(current->parent);
+		const auto slot = current->parentSlot;
+		parent->separators[slot] = keyStore_.beginKey(range);
+		parent->separatorsCV[slot] = cv;
+		updateStartSeparator = (parent->header.order[0] == slot);
+		current = &parent->header;
+	}
+
+	current = &leaf->header;
+	while (current->parent != nullptr) {
+		auto* parent = reinterpret_cast<InternalBlock*>(current->parent);
+		const auto slot = current->parentSlot;
+		if (parent->maxSubtreesCV[slot] < current->maxCV) {
+			parent->maxSubtreesCV[slot] = current->maxCV;
+		}
+		if (parent->header.maxCV >= current->maxCV) {
+			break;
+		}
+		nodeStore_.updateCV(&parent->header, current->maxCV);
+		current = &parent->header;
+	}
 }
 
 // Removes the entry at the given logical rank and repairs the tree.
@@ -281,10 +324,8 @@ void TempConflictBTree::propagateSplitCleared(BNodeHeader* node) {
 		BNodeHeader* parent = node->parent;
 		auto* internal = reinterpret_cast<InternalBlock*>(parent);
 		const bool splitBefore = needsSplit(internal);
-
 		assert(parent->childrenNeedingSplit > 0);
 		--parent->childrenNeedingSplit;
-
 		if (!splitBefore || needsSplit(internal)) {
 			break;
 		}
@@ -298,18 +339,15 @@ bool TempConflictBTree::refreshSeparator(
 	if (node->separatorsCV[slot] > reclaimCV_) {
 		return false;
 	}
-
 	if (node->children[slot]->kind == BNodeKind::Internal) {
 		auto* child =
 			reinterpret_cast<InternalBlock*>(node->children[slot]);
-
 		// Removing the first grandchild exposes the next one, whose
 		// separator may also have expired.
 		while (child->header.count > 0 &&
 			   child->separatorsCV[child->header.order[0]] <= reclaimCV_) {
 			refreshSeparator(child, 0);
 		}
-
 		if (child->header.count == 0) {
 			removeEmptyChild(node, rank);
 		} else {
@@ -320,9 +358,7 @@ bool TempConflictBTree::refreshSeparator(
 	} else {
 		auto* child =
 			reinterpret_cast<LeafBlock*>(node->children[slot]);
-
 		cleanExpired(child);
-
 		if (child->header.count == 0) {
 			removeEmptyChild(node, rank);
 		} else {
@@ -350,7 +386,7 @@ bool TempConflictBTree::refreshSeparators(InternalBlock* node) {
 }
 
 bool TempConflictBTree::cleanExpired(LeafBlock* leaf) {
-	const bool splitBefore = !leaf->header.hasSpace();
+	const bool splitBefore = needsSplit(leaf);
 	bool deleted = false;
 	std::size_t rank = 0;
 
@@ -364,7 +400,7 @@ bool TempConflictBTree::cleanExpired(LeafBlock* leaf) {
 		}
 	}
 
-	if (splitBefore && leaf->header.hasSpace()) {
+	if (splitBefore && !needsSplit(leaf)) {
 		propagateSplitCleared(&leaf->header);
 	}
 	return deleted;
@@ -397,6 +433,7 @@ void TempConflictBTree::removeEmptyChild(
 		propagateSplitCleared(&parent->header);
 	}
 }
+
 void TempConflictBTree::split(
 		BNodeHeader* node,
 		LeafBlock*& leaf,
