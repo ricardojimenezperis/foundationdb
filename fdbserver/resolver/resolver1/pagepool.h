@@ -5,7 +5,8 @@
 // Both uses share the same free-block list, so released blocks can be reused
 // for either purpose.
 //
-// Provides block allocation and release.
+// Provides block allocation and release, and counts the free blocks, so
+// that callers can reclaim history until enough blocks are available.
 // History reclamation is handled by the caller.
 #pragma once
 
@@ -37,6 +38,8 @@ public:
 	std::size_t blockSize() const { return blockSize_; }
 	std::size_t budget() const { return budget_; }
 	std::size_t allocatedBytes() const { return numPages_ * PageSize; }
+	// Free blocks, whichever store released them.
+	std::size_t availableBlocks() const { return availableBlocks_; }
 
 private:
 	std::size_t budget_;
@@ -46,5 +49,6 @@ private:
 	std::size_t numPages_ = 0;
 
 	FreeBlock* freeBlocks_ = nullptr;
+	std::size_t availableBlocks_ = 0;
 	Page* pages_ = nullptr;
 };

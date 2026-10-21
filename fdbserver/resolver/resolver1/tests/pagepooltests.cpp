@@ -1,6 +1,7 @@
 #include "test.h"
 #include "pagepool.h"
 #include <cstdint>
+#include <vector>
 
 TEST_CASE("/resolver/PagePool/AllocationOrder") {
 	PagePool pool(2 * PageSize, 1024);
@@ -225,4 +226,34 @@ TEST_CASE("/resolver/PagePool/ReleaseBlockFromAnotherPage") {
 
 	ASSERT_EQ(pool.allocateBlock(), first);
 	ASSERT_EQ(pool.allocateBlock(), second);
+}
+
+// The count of free blocks starts at every block of the whole pages, goes
+// down with each allocation and up with each release, and stays at zero
+// when allocation fails.
+TEST_CASE("/resolver/PagePool/AvailableBlocks") {
+	PagePool pool(2 * PageSize + 100, 1000);
+	const std::size_t total = 2 * (PageSize / 1000);
+	ASSERT_EQ(pool.availableBlocks(), total);
+
+	std::vector<std::byte*> blocks;
+	for (std::size_t n = 1; n <= total; ++n) {
+		blocks.push_back(pool.allocateBlock());
+		ASSERT(blocks.back() != nullptr);
+		ASSERT_EQ(pool.availableBlocks(), total - n);
+	}
+	ASSERT_EQ(pool.allocateBlock(), nullptr);
+	ASSERT_EQ(pool.availableBlocks(), 0);
+
+	for (std::size_t n = 1; n <= total; ++n) {
+		pool.releaseBlock(blocks[n - 1]);
+		ASSERT_EQ(pool.availableBlocks(), n);
+	}
+}
+
+TEST_CASE("/resolver/PagePool/AvailableBlocksOfEmptyPool") {
+	PagePool pool(PageSize - 1, 1024);
+	ASSERT_EQ(pool.availableBlocks(), 0);
+	ASSERT_EQ(pool.allocateBlock(), nullptr);
+	ASSERT_EQ(pool.availableBlocks(), 0);
 }

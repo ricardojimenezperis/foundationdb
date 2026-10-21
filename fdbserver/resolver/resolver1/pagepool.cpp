@@ -36,10 +36,12 @@ std::byte* PagePool::allocateBlock() {
 
 	FreeBlock* block = freeBlocks_;
 	freeBlocks_ = block->next;
+	--availableBlocks_;
 
 	return reinterpret_cast<std::byte*>(block);
 }
 
 void PagePool::releaseBlock(void* block) {
 	freeBlocks_ = ::new (block) FreeBlock{freeBlocks_};
+	++availableBlocks_;
 }

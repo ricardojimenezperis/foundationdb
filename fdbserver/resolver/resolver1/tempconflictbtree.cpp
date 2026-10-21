@@ -432,23 +432,31 @@ void  TempConflictBTree::removeSubtree(BNodeHeader* node) {
 	removeSubtreeRec(node);	
 }
 
-void  TempConflictBTree::reclaimOldest() {
-	Version minKeyCV=keyStore_.oldestCV().value_or(0);
-	Version minNodeCV=nodeStore_.oldestCV().value_or(0);
-	Version minCV=std::min(minKeyCV,minKeyCV);
-	if (minCV==0) return;
-	while (minKeyCV != 0 && keyStore_.oldestCV().value_or(0)==minKeyCV){
-		minKeyCV=keyStore_.reclaimOldest().value_or(0);
+bool TempConflictBTree::reclaimOldest() {
+	const Version minKeyCV = keyStore_.oldestCV().value_or(0);
+	const Version minNodeCV = nodeStore_.oldestCV().value_or(0);
+	if (minKeyCV == 0 && minNodeCV == 0) {
+		return false;
 	}
-	while (minNodeCV != 0 && nodeStore_.oldestCV().value_or(0)==minNodeCV){
-		BNodeHeader* toDel=nodeStore_.oldestNode();
-		removeSubtree(toDel);
-		minNodeCV=nodeStore_.oldestCV().value_or(0);
+	const Version minCV = minKeyCV == 0 ? minNodeCV
+		: minNodeCV == 0 ? minKeyCV : std::min(minKeyCV, minNodeCV);
+	reclaimCV_ = minCV;
+	while (nodeStore_.oldestCV().value_or(0) == minCV) {
+		removeSubtree(nodeStore_.oldestNode());
 	}
+	while (keyStore_.oldestCV().value_or(0) == minCV) {
+		keyStore_.reclaimOldest();
+	}
+	return true;
 }
 
-void  TempConflictBTree::reclaimUntilAvail(int n) {
-	
+bool TempConflictBTree::reclaimUntilAvail(std::size_t n) {
+	while (pool_.availableBlocks() < n) {
+		if (!reclaimOldest()) {
+			return false;
+		}
+	}
+	return true;
 }
 
 bool TempConflictBTree::refreshSeparator(

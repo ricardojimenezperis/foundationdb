@@ -169,7 +169,7 @@ private:
 	// Reclamation must keep the tree invariant that only the root leaf may be
 	// empty: leaves it empties, and internal nodes left without children, are
 	// removed before it returns.
-	void reclaimOldest();
+	bool reclaimOldest();
 	void reclaimUntilAvail(int n);
 	// Removes expired entries without releasing the leaf itself.
 	// The leaf may be left empty, which only the root leaf may stay: the
