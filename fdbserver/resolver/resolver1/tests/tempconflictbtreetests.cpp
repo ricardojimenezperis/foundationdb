@@ -58,6 +58,10 @@ struct TempConflictBTreeTestAccess {
 						 const StringRef& end, Version cv) {
 		t.addWrite({begin, end}, cv);
 	}
+	static BNodeHeader* detach(TempConflictBTree& t, std::size_t rank,
+							   InternalBlock* node) {
+		return t.eraseAt(rank, node);
+	}
 	static void eraseAt(TempConflictBTree& t, std::size_t& rank, LeafBlock*& leaf) {
 		t.eraseAt(rank, leaf);
 	}
@@ -2288,3 +2292,143 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyDropsCandidateClearedBelow") {
 				  entries.end());
 	checkSameEntries(checkTree(t), modelEntries(t));
 }
+
+namespace {
+
+void collectLeaves(BNodeHeader* node, std::vector<LeafBlock*>& leaves) {
+	if (node->kind == BNodeKind::Leaf) {
+		leaves.push_back(reinterpret_cast<LeafBlock*>(node));
+		return;
+	}
+	auto* internal = reinterpret_cast<InternalBlock*>(node);
+	for (std::size_t r = 0; r < internal->header.count; ++r) {
+		collectLeaves(childAt(internal, r), leaves);
+	}
+}
+
+// Detaches the child at rank of node and checks the result: the subtree is
+// returned without parent, its leaves still chained among themselves and
+// out of the tree's chain, and the tree holds every other entry.
+BNodeHeader* detachAndCheck(TestTree& t, InternalBlock* node, std::size_t rank) {
+	BNodeHeader* expected = childAt(node, rank);
+	std::vector<LeafBlock*> detached;
+	collectLeaves(expected, detached);
+	BNodeHeader* subtree = Access::detach(t.tree, rank, node);
+	ASSERT(subtree == expected);
+	ASSERT(subtree->parent == nullptr);
+	ASSERT(detached.front()->left == nullptr);
+	ASSERT(detached.back()->right == nullptr);
+	for (std::size_t i = 0; i + 1 < detached.size(); ++i) {
+		ASSERT(detached[i]->right == detached[i + 1]);
+		ASSERT(detached[i + 1]->left == detached[i]);
+	}
+	for (LeafModel& l : t.leaves) {
+		if (std::find(detached.begin(), detached.end(), l.leaf) != detached.end()) {
+			l.entries.clear();
+		}
+	}
+	checkSameEntries(checkTree(t), modelEntries(t));
+	return subtree;
+}
+
+} // namespace
+
+// Detaching a leaf in the middle of its parent links its neighbours.
+TEST_CASE("/resolver/TempConflictBTree/DetachLeaf") {
+	TestTree t;
+	spacedRanges(t, 6, 2, 3);
+	InternalBlock* i0 = t.leaves[1].leaf->parent();
+	detachAndCheck(t, i0, 1);
+	ASSERT_EQ(i0->header.count, 2);
+	ASSERT(t.leaves[0].leaf->right == t.leaves[2].leaf);
+	ASSERT(t.leaves[2].leaf->left == t.leaves[0].leaf);
+}
+
+// Detaching an internal node takes its whole run of leaves out of the chain.
+TEST_CASE("/resolver/TempConflictBTree/DetachInternalNode") {
+	TestTree t;
+	spacedRanges(t, 9, 1, 3);
+	InternalBlock* root = rootNode(t);
+	ASSERT_EQ(root->header.count, 3);
+	BNodeHeader* subtree = detachAndCheck(t, root, 1);
+	ASSERT(subtree->kind == BNodeKind::Internal);
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT(t.leaves[2].leaf->right == t.leaves[6].leaf);
+	ASSERT(t.leaves[6].leaf->left == t.leaves[2].leaf);
+}
+
+// Detaching a first child changes the separators above while the node is a
+// first child itself.
+TEST_CASE("/resolver/TempConflictBTree/DetachFirstChildUpdatesSeparators") {
+	// root -> [J0, J1, J2], J -> 3 internal nodes, each with 3 leaves.
+	TestTree t;
+	std::vector<Entry> model = spacedRanges(t, 27, 1, 3);
+	LeafBlock* leaf = t.leaves[9].leaf;
+	InternalBlock* parent = leaf->parent();
+	InternalBlock* grandparent = parent->parent();
+	ASSERT(childAt(parent, 0) == &leaf->header);
+	ASSERT(childAt(grandparent, 0) == &parent->header);
+	detachAndCheck(t, parent, 0);
+	ASSERT_EQ(t.keys().compareKeys(asRef(model[10].begin), separatorOf(&parent->header)), 0);
+	ASSERT_EQ(separatorCVOf(&parent->header), model[10].cv);
+	ASSERT_EQ(t.keys().compareKeys(asRef(model[10].begin), separatorOf(&grandparent->header)), 0);
+	ASSERT_EQ(separatorCVOf(&grandparent->header), model[10].cv);
+}
+
+// The parent no longer counts a detached child that needed a split, and a
+// parent that needed one stops when it gets a slot back.
+TEST_CASE("/resolver/TempConflictBTree/DetachUpdatesSplitCounts") {
+	for (std::size_t rank : {std::size_t{1}, std::size_t{2}}) {
+		TestTree t;
+		InternalBlock* i0 = fullLeafUnderCriticalNode(t);
+		InternalBlock* root = rootNode(t);
+		detachAndCheck(t, i0, rank);
+		ASSERT_EQ(i0->header.childrenNeedingSplit, rank == 1 ? 0 : 1);
+		ASSERT(!Access::needsSplit(i0));
+		ASSERT_EQ(root->header.childrenNeedingSplit, 0);
+	}
+}
+
+// Detaching the last child of an internal node removes the node, and a root
+// left with one child is replaced by it.
+TEST_CASE("/resolver/TempConflictBTree/DetachRemovesEmptyParents") {
+	// root -> [I0 -> [L0, L1], I1 -> [L2, L3]].
+	TestTree t;
+	spacedRanges(t, 4, 1, 2);
+	InternalBlock* i0 = t.leaves[0].leaf->parent();
+	InternalBlock* i1 = t.leaves[2].leaf->parent();
+	detachAndCheck(t, i1, 0);
+	ASSERT_EQ(i1->header.count, 1);
+	detachAndCheck(t, i1, 0);
+	ASSERT(Access::root(t.tree) == &i0->header);
+	ASSERT(i0->parent() == nullptr);
+	ASSERT(t.leaves[1].leaf->right == nullptr);
+	// A root with two leaves, after detaching one, is the other leaf.
+	detachAndCheck(t, i0, 1);
+	ASSERT(Access::root(t.tree) == &t.leaves[0].leaf->header);
+	ASSERT(t.leaves[0].leaf->parent() == nullptr);
+}
+
+// Detaching the only leaf, under a chain of internal nodes with one child
+// each, empties the tree.
+TEST_CASE("/resolver/TempConflictBTree/DetachEmptiesTree") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 1, 0), {20}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 1, 0), {5}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 1, 0), {5}));
+	t.addLeaf(key(70), withCVs(entriesFrom(70, 1, 0), {5}));
+	t.build(2);
+	InternalBlock* root = rootNode(t);
+	auto* i0 = reinterpret_cast<InternalBlock*>(childAt(root, 0));
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparators(t.tree, root));
+	ASSERT(Access::refreshSeparators(t.tree, i0));
+	ASSERT_EQ(i0->header.count, 1);
+	for (std::size_t i = 1; i < 4; ++i) {
+		t.leaves[i].entries.clear();
+	}
+	detachAndCheck(t, i0, 0);
+	ASSERT(Access::root(t.tree) == nullptr);
+	ASSERT(t.nodes().oldestNode() == &t.leaves[0].leaf->header);
+}
+

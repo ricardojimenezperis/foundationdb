@@ -357,8 +357,26 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 	}
 }
 
-void  TempConflictBTree::reclaimOldest() {
+void  TempConflictBTree::removeSubtree(BNodeHeader* node) {
+	eraseAt(node->parentRank(), node.parent);
+	if (node->kind==BNodeKind::Leaf) {
 
+	}
+}
+
+void  TempConflictBTree::reclaimOldest() {
+	Version minKeyCV=keyStore_.oldestCV().value_or(0);
+	Version minNodeCV=nodeStore_.oldestCV().value_or(0);
+	Version minCV=std::min(minKeyCV,minKeyNode);
+	if (minCV==0) return;
+	while (minKeyCV != 0 && keyStore_.oldestCV().value_or(0)==minKeyCV){
+		minKeyCV=keyStore_.reclaimOldest().value_or(0);
+	}
+	while (minNodeCV != 0 && nodeStore_.oldestCV().value_or(0)==minNodeCV){
+		BNodeHeader* toDel=nodeStore_.oldestNode();
+		removeSubtree(toDel);
+		minNodeCV=nodeStore_.oldestCV().value_or(0);
+	}
 }
 
 void  TempConflictBTree::reclaimUntilAvail(int n) {

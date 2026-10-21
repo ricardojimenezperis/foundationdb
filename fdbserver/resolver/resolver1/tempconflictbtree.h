@@ -139,6 +139,14 @@ private:
 	// (rank == count) in the last leaf.
 	// If the tree becomes empty, leaf is nullptr and rank is zero.
 	void eraseAt(std::size_t& rank, LeafBlock*& leaf);
+	// Detaches the child at rank from node and repairs the tree as eraseAt
+	// does for an entry: split counts, separators, ancestors left empty and
+	// the root. The subtree is not released; it is returned without parent,
+	// its leaves taken out of the leaf chain. Requires a non-empty subtree.
+	BNodeHeader* eraseAt(std::size_t rank, InternalBlock* node);
+	// The first and last leaves of the subtree under node.
+	static LeafBlock* firstLeaf(BNodeHeader* node);
+	static LeafBlock* lastLeaf(BNodeHeader* node);
 	// Advances to the next entry. The leaf to the right, if any, is not empty:
 	// only the root leaf may be.
 	// Requires leaf != nullptr and rank <= leaf->header.count.
