@@ -29,80 +29,105 @@ void TempConflictBTree::addWrites(
 void TempConflictBTree::addWrite(
 	const std::pair<StringRef, StringRef>& write,
 	Version cv) {
-
 	constexpr std::size_t MaxWriteBlocks = 35;
 	reclaimUntilAvail(MaxWriteBlocks);
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 0;
 	BNodeHeader* nodeNeedsSplit = nullptr;
 	const bool found = findKey(write.first, leaf, rank, nodeNeedsSplit);
-	if (leaf == nullptr) {
-		// empty tree
-		auto range = keyStore_.appendRange(write.first, write.second, cv);
-		leaf = nodeStore_.allocateLeaf(cv);
-		nodeStore_.insertAt(std::size_t{0}, *range, cv, leaf);
-		root_ = &leaf->header;
-		return;
-	}
-	if (nodeNeedsSplit!=nullptr){
+	if (nodeNeedsSplit != nullptr) {
 		split(nodeNeedsSplit, leaf, rank, found, cv);
 	}
-	std::size_t slot = 0;
-	bool hasPrevious = false;
-	if (!found) {
-		hasPrevious = prevRank(leaf, rank, slot);
-	}
-	auto rangeInt =
-		keyStore_.appendRange(write.first, write.second, cv);
-	if (hasPrevious) {
-		const RangeRef oldRef = leaf->ranges[slot];
-		const Version oldCV = leaf->cv[slot];
-		if (keyStore_.compareEnd(write.first, oldRef) < 0) {
-			// Preserve the left exterior with its original CV.
-			auto rangeExtLeft =
-				keyStore_.appendRange(oldRef, write.first, oldCV);
-			leaf->ranges[slot] = *rangeExtLeft;
-
-			if (keyStore_.compareEnd(write.second, oldRef) < 0) {
-				// Both exteriors come from the same original interval.
-				auto rangeExtRight =
-					keyStore_.appendRange(write.second, oldRef, oldCV);
-				++rank;
-				insertAt(rank, *rangeInt, cv, leaf);
-				++rank;
-				insertAt(rank, *rangeExtRight, oldCV, leaf);
-				return;
-			}
+	auto range = keyStore_.appendRange(write.first, write.second, cv);
+	if (leaf != nullptr) {
+		if (preserveLeftExterior(write, *range, cv, found, leaf, rank)) {
+			return;
 		}
-		nextRank(leaf, rank, slot);
-	}
-
-	int comp = 0;
-	while (leaf != nullptr && rank < leaf->header.count) {
-		slot = leaf->header.order[rank];
-		comp = keyStore_.compareEnd(write.second, leaf->ranges[slot]);
-		if (comp < 0) {
-			break;
-		}
-		// remove overlapping ranges
-		eraseAt(rank, leaf);
-	}
-	if (leaf != nullptr && rank < leaf->header.count) {
-		slot = leaf->header.order[rank];
-		if (comp < 0 &&
-			keyStore_.compareBegin(write.second, leaf->ranges[slot]) > 0) {
-			// Preserve the right exterior with its original CV.
-			auto rangeExtRight = keyStore_.appendRange(
-				write.second, leaf->ranges[slot], leaf->cv[slot]);
-			leaf->ranges[slot] = *rangeExtRight;
-		}
+		eraseCoveredRanges(write.second, leaf, rank);
+		preserveRightExterior(write.second, leaf, rank);
 	}
 	if (leaf == nullptr) {
-		leaf = nodeStore_.allocateLeaf(cv);
-		root_ = &leaf->header;
+		leaf = createRootLeaf(cv);
 		rank = 0;
 	}
-	insertAt(rank, *rangeInt, cv, leaf);
+	insertAt(rank, *range, cv, leaf);
+}
+
+bool TempConflictBTree::preserveLeftExterior(
+		const std::pair<StringRef, StringRef>& write,
+		const RangeRef& range,
+		Version cv,
+		bool found,
+		LeafBlock*& leaf,
+		std::size_t& rank) {
+	if (found) {
+		return false;
+	}
+	std::size_t slot = 0;
+	if (!prevRank(leaf, rank, slot)) {
+		return false;
+	}
+	const RangeRef oldRef = leaf->ranges[slot];
+	const Version oldCV = leaf->cv[slot];
+	if (keyStore_.compareEnd(write.first, oldRef) < 0) {
+		// The previous range overlaps the start of the write: keep its left
+		// exterior with its original CV.
+		auto left = keyStore_.appendRange(oldRef, write.first, oldCV);
+		leaf->ranges[slot] = *left;
+		if (keyStore_.compareEnd(write.second, oldRef) < 0) {
+			// The write lies inside that range: keep its right exterior too.
+			auto right = keyStore_.appendRange(write.second, oldRef, oldCV);
+			++rank;
+			insertAt(rank, range, cv, leaf);
+			++rank;
+			insertAt(rank, *right, oldCV, leaf);
+			return true;
+		}
+	}
+	nextRank(leaf, rank, slot);
+	return false;
+}
+
+void TempConflictBTree::eraseCoveredRanges(
+		const StringRef& end,
+		LeafBlock*& leaf,
+		std::size_t& rank) {
+	while (leaf != nullptr && rank < leaf->header.count) {
+		const auto slot = leaf->header.order[rank];
+		if (keyStore_.compareEnd(end, leaf->ranges[slot]) < 0) {
+			return;
+		}
+		eraseAt(rank, leaf);
+	}
+}
+
+void TempConflictBTree::preserveRightExterior(
+		const StringRef& end,
+		LeafBlock* leaf,
+		std::size_t rank) {
+	if (leaf == nullptr || rank >= leaf->header.count) {
+		return;
+	}
+	const auto slot = leaf->header.order[rank];
+	const RangeRef& oldRef = leaf->ranges[slot];
+	if (keyStore_.compareBegin(end, oldRef) <= 0 ||
+			keyStore_.compareEnd(end, oldRef) >= 0) {
+		return;
+	}
+	auto right = keyStore_.appendRange(end, oldRef, leaf->cv[slot]);
+	leaf->ranges[slot] = *right;
+	if (rank == 0) {
+		// The first key of the leaf has changed; its CV has not.
+		propagateUpdates(leaf, 0, true, false);
+	}
+}
+
+LeafBlock* TempConflictBTree::createRootLeaf(Version cv) {
+	assert(root_ == nullptr);
+	LeafBlock* leaf = nodeStore_.allocateLeaf(cv);
+	assert(leaf != nullptr);
+	root_ = &leaf->header;
+	return leaf;
 }
 
 bool TempConflictBTree::findKey(
@@ -209,15 +234,13 @@ bool TempConflictBTree::nextRank(
 	}
 
 	LeafBlock* next = leaf->right;
-	while (next != nullptr && next->header.count == 0) {
-		next = next->right;
-	}
-
 	if (next == nullptr) {
 		rank = leaf->header.count;
 		return false;
 	}
 
+	// Only the root leaf may be empty, and it has no neighbours.
+	assert(next->header.count > 0);
 	leaf = next;
 	rank = 0;
 	slot = leaf->header.order[rank];
@@ -235,14 +258,11 @@ bool TempConflictBTree::prevRank(
 	}
 
 	LeafBlock* previous = leaf->left;
-	while (previous != nullptr && previous->header.count == 0) {
-		previous = previous->left;
-	}
-
 	if (previous == nullptr) {
 		return false;
 	}
 
+	assert(previous->header.count > 0);
 	leaf = previous;
 	rank = leaf->header.count - 1;
 	slot = leaf->header.order[rank];

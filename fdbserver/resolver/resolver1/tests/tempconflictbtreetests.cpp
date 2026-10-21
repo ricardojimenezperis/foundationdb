@@ -54,6 +54,17 @@ struct TempConflictBTreeTestAccess {
 	static void updateSeparator(TempConflictBTree& t, InternalBlock* node) {
 		t.propagateUpdates(node, 0, true, false);
 	}
+	static void addWrite(TempConflictBTree& t, const StringRef& begin,
+						 const StringRef& end, Version cv) {
+		t.addWrite({begin, end}, cv);
+	}
+	static void eraseAt(TempConflictBTree& t, std::size_t& rank, LeafBlock*& leaf) {
+		t.eraseAt(rank, leaf);
+	}
+	static void preserveRightExterior(TempConflictBTree& t, const StringRef& end,
+									  LeafBlock* leaf, std::size_t rank) {
+		t.preserveRightExterior(end, leaf, rank);
+	}
 	static void insertAt(TempConflictBTree& t, std::size_t& rank,
 						 const RangeRef& range, Version cv, LeafBlock*& leaf) {
 		t.insertAt(rank, range, cv, leaf);
@@ -107,9 +118,6 @@ std::uint8_t childrenNeedingSplit(const InternalBlock* node) {
 	return count;
 }
 
-// Separator CV given to empty leaves by TestTree::build.
-constexpr Version EmptyLeafCV = 1000;
-
 // A tree built directly from nodes. Entries are inserted in reverse order,
 // always at rank 0, so that order is never the identity.
 class TestTree {
@@ -151,15 +159,15 @@ public:
 		struct Child {
 			BNodeHeader* node;
 			Bytes lowerBound;
-			// CV of the first entry below, as refreshing sets it. An empty
-			// leaf gets EmptyLeafCV, newer than any entry, as if its entries
-			// had been overwritten after its separator was set.
+			// CV of the first entry below, as refreshing sets it.
 			Version cv;
 		};
 		std::vector<Child> level;
 		for (const LeafModel& l : leaves) {
+			// Only a root leaf may be empty.
+			ASSERT(!l.entries.empty() || leaves.size() == 1);
 			level.push_back({&l.leaf->header, l.lowerBound,
-							 l.entries.empty() ? EmptyLeafCV : l.entries.front().cv});
+							 l.entries.empty() ? 0 : l.entries.front().cv});
 		}
 
 		while (level.size() > 1) {
@@ -331,36 +339,16 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyThroughTwoInternalLevels") {
 	}
 }
 
-// A leaf without entries is reached for the keys between its neighbours.
-TEST_CASE("/resolver/TempConflictBTree/FindKeyReachesEmptyLeaf") {
-	TestTree t;
-	t.addLeaf({}, entriesFrom(10, 3, 1));
-	t.addLeaf(key(20), {});
-	t.addLeaf(key(30), entriesFrom(30, 3, 1));
-	t.build(3);
-
-	for (const Bytes& k : searchKeys(50)) {
-		checkFindKey(t, k);
-	}
-
-	LeafBlock* leaf = nullptr;
-	std::size_t rank = 999;
-	BNodeHeader* nodeNeedsSplit = nullptr;
-	ASSERT(!Access::findKey(t.tree, asRef(key(25)), leaf, rank, nodeNeedsSplit));
-	ASSERT(leaf == t.leaves[1].leaf);
-	ASSERT_EQ(rank, 0);
-}
-
 namespace {
 
-// Leaves with 3, 0, 2, 0, 0 and 4 entries, so that moving between entries
-// crosses one and two empty leaves.
-TestTree& leavesWithGaps(TestTree& t) {
+// Leaves with 3, 1, 2, 1, 1 and 4 entries, under two internal nodes, so
+// that moving between entries crosses leaves and internal nodes.
+TestTree& variedLeaves(TestTree& t) {
 	t.addLeaf({}, entriesFrom(10, 3, 1));
-	t.addLeaf(key(20), {});
+	t.addLeaf(key(20), entriesFrom(20, 1, 1));
 	t.addLeaf(key(30), entriesFrom(30, 2, 1));
-	t.addLeaf(key(40), {});
-	t.addLeaf(key(50), {});
+	t.addLeaf(key(40), entriesFrom(40, 1, 1));
+	t.addLeaf(key(50), entriesFrom(50, 1, 1));
 	t.addLeaf(key(60), entriesFrom(60, 4, 1));
 	t.build(3);
 	return t;
@@ -381,7 +369,7 @@ std::vector<std::pair<LeafBlock*, std::size_t>> allPositions(const TestTree& t) 
 
 TEST_CASE("/resolver/TempConflictBTree/NextRankVisitsEveryEntry") {
 	TestTree t;
-	leavesWithGaps(t);
+	variedLeaves(t);
 	const auto positions = allPositions(t);
 
 	LeafBlock* leaf = t.leaves[0].leaf;
@@ -406,7 +394,7 @@ TEST_CASE("/resolver/TempConflictBTree/NextRankVisitsEveryEntry") {
 
 TEST_CASE("/resolver/TempConflictBTree/PrevRankVisitsEveryEntry") {
 	TestTree t;
-	leavesWithGaps(t);
+	variedLeaves(t);
 	const auto positions = allPositions(t);
 
 	// From the end position of the last leaf.
@@ -429,11 +417,12 @@ TEST_CASE("/resolver/TempConflictBTree/PrevRankVisitsEveryEntry") {
 	ASSERT_EQ(slot, firstSlot);
 }
 
-// From the position of an empty leaf, both directions skip to the nearest
-// entries; from the end position of a leaf, nextRank goes right.
-TEST_CASE("/resolver/TempConflictBTree/RankMovesFromEmptyLeaves") {
+// From the first entry of a leaf both directions cross to the neighbours,
+// also across internal nodes; from the end position of a leaf, nextRank
+// goes right.
+TEST_CASE("/resolver/TempConflictBTree/RankMovesBetweenLeaves") {
 	TestTree t;
-	leavesWithGaps(t);
+	variedLeaves(t);
 	std::size_t slot = 999;
 
 	LeafBlock* leaf = t.leaves[3].leaf;
@@ -446,17 +435,17 @@ TEST_CASE("/resolver/TempConflictBTree/RankMovesFromEmptyLeaves") {
 	leaf = t.leaves[3].leaf;
 	rank = 0;
 	ASSERT(Access::nextRank(t.tree, leaf, rank, slot));
-	ASSERT(leaf == t.leaves[5].leaf);
+	ASSERT(leaf == t.leaves[4].leaf);
 	ASSERT_EQ(rank, 0);
 	ASSERT_EQ(slot, leaf->header.order[0]);
 
 	leaf = t.leaves[0].leaf;
 	rank = leaf->header.count;
 	ASSERT(Access::nextRank(t.tree, leaf, rank, slot));
-	ASSERT(leaf == t.leaves[2].leaf);
+	ASSERT(leaf == t.leaves[1].leaf);
 	ASSERT_EQ(rank, 0);
 
-	// A single empty leaf has no entries in either direction.
+	// An empty root leaf has no entries in either direction.
 	TestTree single;
 	single.addLeaf({}, {});
 	single.build(3);
@@ -519,16 +508,14 @@ TEST_CASE("/resolver/TempConflictBTree/HasConflictAgainstReference") {
 			return state >> 8;
 		};
 
-		// Ten leaves over k(10)..k(209), some of them empty, with random CVs.
-		// With fanout 3 the first leaf is empty too.
+		// Ten leaves over k(10)..k(209), with gaps between them and random
+		// CVs. Some leaves hold a single entry.
 		for (unsigned i = 0; i < 10; ++i) {
 			const unsigned first = 10 + 20 * i;
-			std::vector<Entry> entries;
-			if (i % 4 != 2 && !(i == 0 && fanout == 3)) {
-				entries = entriesFrom(first, 1 + next() % 6, 0);
-				for (Entry& e : entries) {
-					e.cv = static_cast<Version>(next() % 50);
-				}
+			std::vector<Entry> entries =
+				entriesFrom(first, i % 4 == 2 ? 1 : 1 + next() % 6, 0);
+			for (Entry& e : entries) {
+				e.cv = static_cast<Version>(next() % 50);
 			}
 			t.addLeaf(i == 0 ? Bytes{} : key(first), std::move(entries));
 		}
@@ -571,19 +558,6 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyBeforeFirstSeparator") {
 	ASSERT(!Access::findKey(t.tree, asRef(key(5)), leaf, rank, nodeNeedsSplit));
 	ASSERT(leaf == t.leaves[0].leaf);
 	ASSERT_EQ(rank, 0);
-}
-
-// The search lands in an empty first leaf: there is no previous entry and
-// no candidate in that leaf, so the ranges to the right are checked.
-TEST_CASE("/resolver/TempConflictBTree/HasConflictFromEmptyFirstLeaf") {
-	TestTree t;
-	t.addLeaf({}, {});
-	t.addLeaf(key(20), {{key(20), key(30), 10}});
-	t.build(3);
-
-	ASSERT(t.hasConflict(key(10), key(25), 9));
-	ASSERT(!t.hasConflict(key(10), key(25), 10));
-	ASSERT(!t.hasConflict(key(10), key(20), 0));
 }
 
 TEST_CASE("/resolver/TempConflictBTree/NewTreeHasNoReclaimedHistory") {
@@ -633,6 +607,8 @@ void checkSubtree(TestTree& t, const BNodeHeader* node,
 				  std::vector<Entry>& entries) {
 	if (node->kind == BNodeKind::Leaf) {
 		const auto* leaf = reinterpret_cast<const LeafBlock*>(node);
+		// Only the root leaf may be empty.
+		ASSERT(node->parent == nullptr || leaf->header.count > 0);
 		leaves.push_back(leaf);
 		for (const Entry& e : leafEntries(t, leaf)) {
 			ASSERT(entries.empty() || !(e.begin < entries.back().end));
@@ -667,9 +643,9 @@ void checkSubtree(TestTree& t, const BNodeHeader* node,
 	}
 }
 
-// Checks the whole tree: structure, leaf links and reads against a
-// brute-force scan of the entries left in it.
-std::vector<Entry> checkTree(TestTree& t) {
+// Checks the structure of the tree and its leaf links, and returns its
+// entries in key order.
+std::vector<Entry> checkStructure(TestTree& t) {
 	std::vector<const LeafBlock*> leaves;
 	std::vector<Entry> entries;
 	BNodeHeader* root = Access::root(t.tree);
@@ -682,7 +658,13 @@ std::vector<Entry> checkTree(TestTree& t) {
 		ASSERT(leaves[i]->right ==
 			   (i + 1 == leaves.size() ? nullptr : leaves[i + 1]));
 	}
+	return entries;
+}
 
+// Checks the whole tree: structure, leaf links and reads against a
+// brute-force scan of the entries left in it.
+std::vector<Entry> checkTree(TestTree& t) {
+	const std::vector<Entry> entries = checkStructure(t);
 	for (unsigned b = 0; b <= 230; b += 3) {
 		for (unsigned e = b + 1; e <= 231; e += 7) {
 			// Reads are admitted only at or above reclaimCV, and may clean
@@ -854,7 +836,8 @@ TEST_CASE("/resolver/TempConflictBTree/CleanExpiredPropagatesSplitCleared") {
 	checkTree(t);
 }
 
-// Cleaning a leaf that was not full leaves the counts unchanged.
+// Cleaning a leaf that was not full leaves the counts unchanged. The leaf
+// is left empty, which its caller would then have to resolve.
 TEST_CASE("/resolver/TempConflictBTree/CleanExpiredKeepsSplitCountsOfNonFullLeaf") {
 	TestTree t;
 	InternalBlock* i0 = fullLeafUnderCriticalNode(t);
@@ -1059,7 +1042,8 @@ Position find(TestTree& t, const Bytes& k) {
 
 // Builds a tree with makeTree, finds k, splits the leaf found, and checks
 // that the leaf and rank returned by split are those findKey returns on the
-// split tree. Also checks the whole tree and that no entry was lost.
+// split tree. Also checks the structure of the tree and that no entry was
+// lost.
 template<typename MakeTree>
 void checkLeafSplitKeepsPosition(MakeTree makeTree, const Bytes& k) {
 	TestTree t;
@@ -1078,7 +1062,7 @@ void checkLeafSplitKeepsPosition(MakeTree makeTree, const Bytes& k) {
 	ASSERT(leaf == after.leaf);
 	ASSERT_EQ(rank, after.rank);
 	ASSERT(after.nodeNeedsSplit == nullptr);
-	checkSameEntries(checkTree(t), entries);
+	checkSameEntries(checkStructure(t), entries);
 }
 
 // Keys to search for in a full leaf of wide keys starting at first: every
@@ -1420,7 +1404,7 @@ TEST_CASE("/resolver/TempConflictBTree/CleanExpiredReportsLeafTransitionOnce") {
 		{LeafCapacity, 2, true, false},            // full -> two free
 		{LeafCapacity, 5, true, false},
 		{LeafCapacity - 1, 1, true, false},        // one free -> two free
-		{LeafCapacity - 1, LeafCapacity - 1, true, false},
+		{LeafCapacity - 1, LeafCapacity - 2, true, false},
 		{LeafCapacity - 2, 1, false, false},
 		{LeafCapacity - 2, 0, false, false},
 	};
@@ -1568,20 +1552,24 @@ TEST_CASE("/resolver/TempConflictBTree/InsertAtFillsRootLeaf") {
 	checkTree(t);
 }
 
-// An empty leaf between two others is filled in a scattered order. Its
-// separator follows its first key, the parent's CVs follow the leaf's, and
-// the parent counts the leaf once from its last but one entry on.
+// A leaf between two others, starting with a single entry, is filled in a
+// scattered order. Its separator follows its first key, the parent's CVs
+// follow the leaf's, and the parent counts the leaf once from its last but
+// one entry on.
 TEST_CASE("/resolver/TempConflictBTree/InsertAtFillsLeafUnderParent") {
+	const std::vector<unsigned> order = fillOrder();
+	const unsigned k0 = order.front();
 	TestTree t;
 	t.addLeaf({}, wideEntriesFrom(2, 2, 1));
-	t.addLeaf(wideKey(8), {});
+	t.addLeaf(wideKey(10 + 2 * k0),
+			  {{wideKey(10 + 2 * k0), keyAfter(wideKey(10 + 2 * k0)), 1}});
 	t.addLeaf(wideKey(200), wideEntriesFrom(200, 2, 1));
 	t.build(3);
 	InternalBlock* root = rootNode(t);
 	LeafBlock* leaf = t.leaves[1].leaf;
 
-	std::vector<unsigned> inserted;
-	for (unsigned k : fillOrder()) {
+	std::vector<unsigned> inserted{k0};
+	for (unsigned k : std::vector<unsigned>(order.begin() + 1, order.end())) {
 		const Version cv = 100 + static_cast<Version>(inserted.size());
 		const std::size_t rank = rankAmong(inserted, k);
 		insertEntry(t, 1, rank, wideKey(10 + 2 * k),
@@ -1600,7 +1588,7 @@ TEST_CASE("/resolver/TempConflictBTree/InsertAtFillsLeafUnderParent") {
 		const bool needs = inserted.size() + 1 >= LeafCapacity;
 		ASSERT_EQ(Access::needsSplit(leaf), needs);
 		ASSERT_EQ(root->header.childrenNeedingSplit, needs);
-		checkTree(t);
+		checkStructure(t);
 	}
 	checkSameEntries(checkTree(t), modelEntries(t));
 }
@@ -1830,3 +1818,437 @@ TEST_CASE("/resolver/TempConflictBTree/PropagateUpdatesSeparatorOfInternalNode")
 	Access::updateSeparator(single.tree, single.leaves[0].leaf);
 	checkTree(single);
 }
+
+// A leaf whose entries have all expired is removed while searching, before
+// it can be reached: the search for a key in its range ends after the last
+// entry of its left neighbour, and its neighbours are linked.
+TEST_CASE("/resolver/TempConflictBTree/FindKeyRemovesExpiredLeaf") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {20, 20, 20}));
+	t.addLeaf(key(20), withCVs(entriesFrom(20, 3, 0), {5, 6, 7}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {20, 20, 20}));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+	Access::setReclaimCV(t.tree, 10);
+
+	LeafBlock* leaf = nullptr;
+	std::size_t rank = 999;
+	BNodeHeader* nodeNeedsSplit = nullptr;
+	ASSERT(!Access::findKey(t.tree, asRef(key(25)), leaf, rank, nodeNeedsSplit));
+	ASSERT(leaf == t.leaves[0].leaf);
+	ASSERT_EQ(rank, 3);
+	ASSERT(nodeNeedsSplit == nullptr);
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT(t.leaves[0].leaf->right == t.leaves[2].leaf);
+	ASSERT(t.leaves[2].leaf->left == t.leaves[0].leaf);
+	ASSERT_EQ(t.keys().compareKeys(asRef(key(30)),
+								   separatorOf(&t.leaves[2].leaf->header)), 0);
+	t.leaves[1].entries.clear();
+	checkSameEntries(checkTree(t), modelEntries(t));
+}
+
+// The first leaf has expired and is removed by the search, so a read that
+// starts below every remaining key lands at the start of the next leaf:
+// there is no previous entry, and the ranges to the right are checked.
+TEST_CASE("/resolver/TempConflictBTree/HasConflictAfterFirstLeafRemoved") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 2, 0), {5, 6}));
+	t.addLeaf(key(20), {{key(20), key(30), 30}});
+	t.addLeaf(key(40), {{key(40), key(50), 30}});
+	t.build(3);
+	Access::setReclaimCV(t.tree, 10);
+
+	ASSERT(t.hasConflict(key(10), key(25), 20));
+	ASSERT_EQ(rootNode(t)->header.count, 2);
+	ASSERT(t.leaves[1].leaf->left == nullptr);
+	ASSERT(!t.hasConflict(key(10), key(25), 30));
+	ASSERT(!t.hasConflict(key(10), key(20), 10));
+	t.leaves[0].entries.clear();
+	checkSameEntries(checkTree(t), modelEntries(t));
+}
+
+namespace {
+
+// The entries after writing [begin, end) with cv over entries: covered parts
+// are replaced, and the parts of a range outside the write keep its CV.
+std::vector<Entry> applyWrite(const std::vector<Entry>& entries,
+							  const Bytes& begin, const Bytes& end, Version cv) {
+	std::vector<Entry> result;
+	for (const Entry& e : entries) {
+		if (!(e.begin < end) || !(begin < e.end)) {
+			result.push_back(e);
+			continue;
+		}
+		if (e.begin < begin) {
+			result.push_back({e.begin, begin, e.cv});
+		}
+		if (end < e.end) {
+			result.push_back({end, e.end, e.cv});
+		}
+	}
+	result.push_back({begin, end, cv});
+	std::sort(result.begin(), result.end(),
+			  [](const Entry& a, const Entry& b) { return a.begin < b.begin; });
+	return result;
+}
+
+// Writes [begin, end) with cv and checks the tree, its entries and its
+// conflicts against the model, which is updated.
+void checkWrite(TestTree& t, std::vector<Entry>& model, const Bytes& begin,
+				const Bytes& end, Version cv) {
+	model = applyWrite(model, begin, end, cv);
+	Access::addWrite(t.tree, asRef(begin), asRef(end), cv);
+	checkSameEntries(checkTree(t), model);
+}
+
+// Leaves of perLeaf entries [100 + 20 j, 110 + 20 j) with CV 1 + j, over
+// wide keys, so that writes can fall inside, across and between ranges.
+std::vector<Entry> spacedRanges(TestTree& t, unsigned leaves, unsigned perLeaf,
+								std::size_t fanout) {
+	unsigned j = 0;
+	for (unsigned i = 0; i < leaves; ++i) {
+		std::vector<Entry> entries;
+		for (unsigned n = 0; n < perLeaf; ++n, ++j) {
+			entries.push_back({wideKey(100 + 20 * j), wideKey(110 + 20 * j),
+							   1 + static_cast<Version>(j)});
+		}
+		const Bytes lowerBound = i == 0 ? Bytes{} : entries.front().begin;
+		t.addLeaf(lowerBound, std::move(entries));
+	}
+	t.build(fanout);
+	return modelEntries(t);
+}
+
+} // namespace
+
+// Each kind of write, alone on a fresh tree of three leaves:
+// inside a range, over the start or the end of ranges, with boundaries
+// equal to those of ranges, and in a gap.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteKinds") {
+	struct Case {
+		unsigned begin;
+		unsigned end;
+	};
+	const Case cases[] = {
+		{103, 107},  // inside a range: both exteriors keep CV 1
+		{105, 115},  // left exterior only
+		{115, 125},  // right exterior only
+		{105, 125},  // left and right exteriors of different ranges
+		{105, 165},  // and the ranges between them erased
+		{100, 110},  // exactly one range
+		{120, 150},  // exactly two ranges and the gap between them
+		{110, 120},  // exactly a gap, touching both neighbours
+		{112, 118},  // inside a gap
+		{100, 105},  // the start of a range
+		{105, 110},  // the end of a range
+		{90, 95},    // before every range
+		{400, 410},  // after every range
+		{90, 400},   // over every range
+		{275, 285},  // over the end of a leaf and the start of the next
+	};
+	for (const Case& c : cases) {
+		TestTree t;
+		std::vector<Entry> model = spacedRanges(t, 3, 3, 3);
+		checkWrite(t, model, wideKey(c.begin), wideKey(c.end), 1000);
+	}
+}
+
+// Many writes in a row, at random places and of random lengths, grow the
+// tree through several levels of splits; after each one the tree matches
+// the model.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteAgainstModel") {
+	TestTree t(64 * PageSize);
+	std::vector<Entry> model;
+	std::uint32_t state = 777;
+	auto next = [&state]() {
+		state = state * 1103515245u + 12345u;
+		return state >> 8;
+	};
+	for (unsigned n = 0; n < 4000; ++n) {
+		const unsigned begin = next() % 30000;
+		const unsigned length = n % 50 == 0 ? 1 + next() % 400 : 1 + next() % 8;
+		model = applyWrite(model, wideKey(begin), wideKey(begin + length),
+						   1000 + n);
+		Access::addWrite(t.tree, asRef(wideKey(begin)),
+						 asRef(wideKey(begin + length)), 1000 + n);
+		if (n % 400 == 399) {
+			checkSameEntries(checkStructure(t), model);
+		}
+	}
+	checkSameEntries(checkTree(t), model);
+	BNodeHeader* root = Access::root(t.tree);
+	ASSERT(root->kind == BNodeKind::Internal);
+	ASSERT(childAt(reinterpret_cast<InternalBlock*>(root), 0)->kind ==
+		   BNodeKind::Internal);
+}
+
+// The two writes that showed the need for the invariant, now over a valid
+// tree: both erase what they cover and keep the separators in order.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteAcrossLeaves") {
+	for (unsigned end : {25u, 31u}) {
+		TestTree t;
+		t.addLeaf({}, entriesFrom(10, 2, 1));
+		t.addLeaf(key(30), entriesFrom(30, 2, 1));
+		t.build(3);
+		std::vector<Entry> model = modelEntries(t);
+		checkWrite(t, model, key(11), key(end), 1000);
+	}
+}
+
+// A write that covers the whole tree erases every leaf and internal node;
+// its range ends up alone in a new root leaf.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteErasesWholeTree") {
+	TestTree t;
+	std::vector<Entry> model = spacedRanges(t, 9, 3, 3);
+	checkWrite(t, model, wideKey(0), wideKey(60000), 1000);
+	BNodeHeader* root = Access::root(t.tree);
+	ASSERT(root->kind == BNodeKind::Leaf);
+	ASSERT_EQ(root->count, 1);
+	ASSERT(root->ageNext == nullptr && root->agePrevious == nullptr);
+	checkWrite(t, model, wideKey(10), wideKey(20), 1001);
+}
+
+// A write into an empty tree creates the root leaf.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteToEmptyTree") {
+	TestTree t;
+	std::vector<Entry> model;
+	checkWrite(t, model, key(10), key(20), 5);
+	ASSERT(Access::root(t.tree)->kind == BNodeKind::Leaf);
+	checkWrite(t, model, key(15), key(30), 6);
+}
+
+// A write ending inside the first range of a leaf, starting in the previous
+// leaf, trims that range and is inserted first in the leaf. The separators
+// of the leaf and of its parent become the start of the write.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteTrimsFirstRangeOfLeaf") {
+	TestTree t;
+	std::vector<Entry> model = spacedRanges(t, 6, 3, 3);
+	LeafBlock* leaf = t.leaves[3].leaf;
+	InternalBlock* parent = leaf->parent();
+	ASSERT(childAt(parent, 0) == &leaf->header);
+	checkWrite(t, model, wideKey(275), wideKey(285), 1000);
+	ASSERT(leaf->parent() == parent);
+	ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(275)), separatorOf(&leaf->header)), 0);
+	ASSERT_EQ(separatorCVOf(&leaf->header), 1000);
+	ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(275)), separatorOf(&parent->header)), 0);
+	ASSERT_EQ(separatorCVOf(&parent->header), 1000);
+}
+
+// Trimming the first range of a leaf on its own moves the separators to the
+// new start, keeping the range's CV, up while the leaf is a first child.
+// Elsewhere, or without a contained end, nothing changes.
+TEST_CASE("/resolver/TempConflictBTree/PreserveRightExteriorUpdatesSeparator") {
+	TestTree t;
+	spacedRanges(t, 6, 3, 3);
+	LeafBlock* leaf = t.leaves[3].leaf;
+	InternalBlock* parent = leaf->parent();
+	const Version cv = t.leaves[3].entries.front().cv;
+
+	Access::preserveRightExterior(t.tree, asRef(wideKey(285)), leaf, 0);
+	ASSERT_EQ(t.keys().compareBegin(asRef(wideKey(285)),
+									leaf->ranges[leaf->header.order[0]]), 0);
+	ASSERT_EQ(leaf->cv[leaf->header.order[0]], cv);
+	ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(285)), separatorOf(&leaf->header)), 0);
+	ASSERT_EQ(separatorCVOf(&leaf->header), cv);
+	ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(285)), separatorOf(&parent->header)), 0);
+	t.leaves[3].entries.front().begin = wideKey(285);
+	checkSameEntries(checkTree(t), modelEntries(t));
+
+	// Not the first entry: only the range changes.
+	const KeyRef separator = separatorOf(&leaf->header);
+	Access::preserveRightExterior(t.tree, asRef(wideKey(305)), leaf, 1);
+	ASSERT(separatorOf(&leaf->header).keyOffset == separator.keyOffset);
+	t.leaves[3].entries[1].begin = wideKey(305);
+	checkSameEntries(checkTree(t), modelEntries(t));
+
+	// end at or beyond the range's bounds, a null leaf or the end position:
+	// nothing to do.
+	Access::preserveRightExterior(t.tree, asRef(wideKey(285)), leaf, 0);
+	Access::preserveRightExterior(t.tree, asRef(wideKey(290)), leaf, 0);
+	Access::preserveRightExterior(t.tree, asRef(wideKey(400)), leaf, 0);
+	Access::preserveRightExterior(t.tree, asRef(wideKey(285)), nullptr, 0);
+	Access::preserveRightExterior(t.tree, asRef(wideKey(285)), leaf, 3);
+	checkSameEntries(checkTree(t), modelEntries(t));
+}
+
+namespace {
+
+// Erases the entry at (leaf, rank) and checks the tree and the cursor: it
+// must identify the entry that followed the erased one, or be the end
+// position of the last leaf, or be null when the tree becomes empty.
+void eraseAndCheck(TestTree& t, std::vector<Entry>& model, LeafBlock*& leaf,
+				   std::size_t& rank) {
+	const RangeRef& range = leaf->ranges[leaf->header.order[rank]];
+	std::size_t index = 0;
+	while (t.keys().compareBegin(asRef(model[index].begin), range) != 0) {
+		++index;
+	}
+	model.erase(model.begin() + index);
+	Access::eraseAt(t.tree, rank, leaf);
+	if (model.empty()) {
+		ASSERT(leaf == nullptr);
+		ASSERT_EQ(rank, 0);
+		ASSERT(Access::root(t.tree) == nullptr);
+	} else if (index < model.size()) {
+		ASSERT(leaf != nullptr && rank < leaf->header.count);
+		ASSERT_EQ(t.keys().compareBegin(asRef(model[index].begin),
+										leaf->ranges[leaf->header.order[rank]]), 0);
+	} else {
+		ASSERT(leaf != nullptr && leaf->right == nullptr);
+		ASSERT_EQ(rank, leaf->header.count);
+	}
+	checkSameEntries(checkTree(t), model);
+}
+
+} // namespace
+
+// Erasing entries that leave their leaf non-empty: in the middle, first
+// (the separators follow, across levels while the leaf is a first child),
+// last with a leaf to the right, and last of the last leaf.
+TEST_CASE("/resolver/TempConflictBTree/EraseAtKeepsLeaf") {
+	struct Case {
+		std::size_t leaf;
+		std::size_t rank;
+	};
+	for (const Case c : {Case{1, 1}, Case{3, 0}, Case{4, 0}, Case{0, 0},
+						 Case{2, 2}, Case{5, 2}}) {
+		TestTree t;
+		std::vector<Entry> model = spacedRanges(t, 6, 3, 3);
+		LeafBlock* leaf = t.leaves[c.leaf].leaf;
+		LeafBlock* const erasedFrom = leaf;
+		std::size_t rank = c.rank;
+		eraseAndCheck(t, model, leaf, rank);
+		if (c.rank == 0) {
+			const auto first = erasedFrom->header.order[0];
+			ASSERT_EQ(t.keys().compareBegin(
+						  [&] {
+							  const KeyRef k = separatorOf(&erasedFrom->header);
+							  (void)k;
+							  return asRef(model[3 * c.leaf].begin);
+						  }(),
+						  erasedFrom->ranges[first]), 0);
+			if (c.leaf != 0) {
+				ASSERT_EQ(t.keys().compareKeys(asRef(model[3 * c.leaf].begin),
+											   separatorOf(&erasedFrom->header)), 0);
+				ASSERT_EQ(separatorCVOf(&erasedFrom->header), model[3 * c.leaf].cv);
+			}
+		}
+	}
+}
+
+// A leaf that stops needing a split by an erasure is no longer counted, up
+// through a parent with a single free slot.
+TEST_CASE("/resolver/TempConflictBTree/EraseAtPropagatesSplitCleared") {
+	TestTree t;
+	InternalBlock* i0 = fullLeafUnderCriticalNode(t, LeafCapacity - 1);
+	InternalBlock* root = rootNode(t);
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 1);
+	std::vector<Entry> model = modelEntries(t);
+	LeafBlock* leaf = t.leaves[1].leaf;
+	std::size_t rank = 5;
+	eraseAndCheck(t, model, leaf, rank);
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 0);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
+}
+
+// A full leaf still needs a split after losing one entry: the counts above
+// do not change.
+TEST_CASE("/resolver/TempConflictBTree/EraseAtKeepsSplitOfFullLeaf") {
+	TestTree t;
+	InternalBlock* i0 = fullLeafUnderCriticalNode(t);
+	InternalBlock* root = rootNode(t);
+	std::vector<Entry> model = modelEntries(t);
+	LeafBlock* leaf = t.leaves[1].leaf;
+	std::size_t rank = 5;
+	eraseAndCheck(t, model, leaf, rank);
+	ASSERT(Access::needsSplit(t.leaves[1].leaf));
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 1);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
+}
+
+// Erasing the only entry of a leaf removes it: its neighbours are linked,
+// the parent loses it, and the cursor moves to the next leaf, or to the end
+// of the previous one when it was the last leaf. When it was a first child,
+// the separators above follow the parent's new first key.
+TEST_CASE("/resolver/TempConflictBTree/EraseAtRemovesLeaf") {
+	for (std::size_t i : {std::size_t{1}, std::size_t{3}, std::size_t{5}, std::size_t{0}}) {
+		TestTree t;
+		std::vector<Entry> model = spacedRanges(t, 6, 1, 3);
+		LeafBlock* leaf = t.leaves[i].leaf;
+		InternalBlock* parent = leaf->parent();
+		const std::size_t count = parent->header.count;
+		std::size_t rank = 0;
+		eraseAndCheck(t, model, leaf, rank);
+		ASSERT_EQ(parent->header.count, count - 1);
+		if (i + 1 < t.leaves.size()) {
+			ASSERT(leaf == t.leaves[i + 1].leaf);
+			ASSERT(leaf->left == (i == 0 ? nullptr : t.leaves[i - 1].leaf));
+		} else {
+			ASSERT(leaf == t.leaves[i - 1].leaf);
+			ASSERT(leaf->right == nullptr);
+		}
+		if (i == 3) {
+			ASSERT_EQ(t.keys().compareKeys(asRef(model[3].begin),
+										   separatorOf(&parent->header)), 0);
+			ASSERT_EQ(separatorCVOf(&parent->header), model[3].cv);
+		}
+	}
+}
+
+// Removing the last leaf of an internal node removes the node too, and a
+// root left with a single child is replaced by it, down to a leaf.
+TEST_CASE("/resolver/TempConflictBTree/EraseAtRemovesEmptyParents") {
+	// root -> [I0 -> [L0, L1], I1 -> [L2, L3]], one entry per leaf.
+	TestTree t;
+	std::vector<Entry> model = spacedRanges(t, 4, 1, 2);
+	InternalBlock* root = rootNode(t);
+	ASSERT_EQ(root->header.count, 2);
+	LeafBlock* leaf = t.leaves[3].leaf;
+	std::size_t rank = 0;
+	eraseAndCheck(t, model, leaf, rank);
+	leaf = t.leaves[2].leaf;
+	rank = 0;
+	// I1 is left empty and removed; the root, with I0 alone, is replaced by
+	// I0, which still has two leaves.
+	eraseAndCheck(t, model, leaf, rank);
+	BNodeHeader* newRoot = Access::root(t.tree);
+	ASSERT(newRoot->kind == BNodeKind::Internal);
+	ASSERT_EQ(newRoot->count, 2);
+	ASSERT(newRoot->parent == nullptr);
+	leaf = t.leaves[1].leaf;
+	rank = 0;
+	// I0 with L0 alone is replaced by L0.
+	eraseAndCheck(t, model, leaf, rank);
+	ASSERT(Access::root(t.tree) == &t.leaves[0].leaf->header);
+	ASSERT(t.leaves[0].leaf->parent() == nullptr);
+	ASSERT(t.nodes().oldestNode() == &t.leaves[0].leaf->header);
+	ASSERT(t.leaves[0].leaf->header.ageNext == nullptr);
+	leaf = t.leaves[0].leaf;
+	rank = 0;
+	eraseAndCheck(t, model, leaf, rank);
+	ASSERT(t.nodes().oldestNode() == nullptr);
+}
+
+// The only leaf left, under a chain of internal nodes with one child each
+// (refreshing does not shorten the tree), is erased with all of them.
+TEST_CASE("/resolver/TempConflictBTree/EraseAtRemovesChainToRoot") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 1, 0), {20}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 1, 0), {5}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 1, 0), {5}));
+	t.addLeaf(key(70), withCVs(entriesFrom(70, 1, 0), {5}));
+	t.build(2);
+	InternalBlock* root = rootNode(t);
+	auto* i0 = reinterpret_cast<InternalBlock*>(childAt(root, 0));
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparators(t.tree, root));
+	ASSERT(Access::refreshSeparators(t.tree, i0));
+	ASSERT_EQ(root->header.count, 1);
+	ASSERT_EQ(i0->header.count, 1);
+	std::vector<Entry> model{t.leaves[0].entries.front()};
+	LeafBlock* leaf = t.leaves[0].leaf;
+	std::size_t rank = 0;
+	eraseAndCheck(t, model, leaf, rank);
+	ASSERT(t.nodes().oldestNode() == nullptr);
+}
+

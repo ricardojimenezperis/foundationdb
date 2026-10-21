@@ -15,6 +15,10 @@
 // and links between leaves. Entries remain in physical slots; permutations
 // maintain their logical key order.
 //
+// Only the root leaf may be empty when an operation returns. A leaf emptied
+// during an operation is removed, with any internal node left without
+// children, before the operation returns.
+//
 // Reclamation advances a commit-version cutoff (reclaimCV). Expired leaf
 // entries are removed during local cleanup, and expired internal separators
 // are refreshed before use. Entire expired subtrees can be detached and
@@ -84,6 +88,36 @@ private:
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);
 	bool hasConflict(const ReadConflictRange& read);
+	// Helpers of addWrite, in the order it calls them. leaf and rank are the
+	// write's position: from findKey, after any split, then moved forward.
+	//
+	// Unless found, keeps the left exterior of the previous range when it
+	// overlaps the start of the write, with its original CV. If the write lies
+	// inside that range, also keeps its right exterior, inserts range with cv,
+	// and returns true: the write is done. Otherwise returns false with the
+	// position at the first entry eraseCoveredRanges must examine.
+	bool preserveLeftExterior(
+		const std::pair<StringRef, StringRef>& write,
+		const RangeRef& range,
+		Version cv,
+		bool found,
+		LeafBlock*& leaf,
+		std::size_t& rank);
+	// Erases the entries from the position on whose end is not after end.
+	// Leaves the position at the first entry ending after end, at the end
+	// position, or with leaf == nullptr if the tree becomes empty.
+	void eraseCoveredRanges(
+		const StringRef& end,
+		LeafBlock*& leaf,
+		std::size_t& rank);
+	// If the entry at the position strictly contains end, replaces its range
+	// with [end, its end), keeping its CV. Does nothing without an entry.
+	void preserveRightExterior(
+		const StringRef& end,
+		LeafBlock* leaf,
+		std::size_t rank);
+	// Requires an empty tree. Installs a new leaf, still empty, as the root.
+	LeafBlock* createRootLeaf(Version cv);
 	// Inserts range at the given logical rank, splitting nodes as needed.
 	// On return, leaf and rank identify the inserted entry, even if a split
 	// moved it to another leaf. rank is a position in order, not a physical slot.
@@ -97,20 +131,26 @@ private:
 	// (rank == count) in the last leaf.
 	// If the tree becomes empty, leaf is nullptr and rank is zero.
 	void eraseAt(std::size_t& rank, LeafBlock*& leaf);
-	// Advances to the next entry, skipping empty leaves.
+	// Advances to the next entry. The leaf to the right, if any, is not empty:
+	// only the root leaf may be.
 	// Requires leaf != nullptr and rank <= leaf->header.count.
 	// Returns true if an entry is found, updating leaf, rank and its slot.
 	// Otherwise, returns false, keeps leaf unchanged, and sets rank to count.
 	bool nextRank(LeafBlock*& leaf, std::size_t& rank, std::size_t& slot) const;
-	// Moves to the previous entry, skipping empty leaves.
+	// Moves to the previous entry. The leaf to the left, if any, is not empty.
 	// Requires leaf != nullptr and rank <= leaf->header.count.
 	// rank == count is accepted as an insertion position after the last entry.
 	// Returns true if an entry is found, updating leaf, rank and its slot.
 	// Otherwise, returns false and leaves both parameters unchanged.
 	bool prevRank(LeafBlock*& leaf, std::size_t& rank, std::size_t& slot) const;	
+	// Reclamation must keep the tree invariant that only the root leaf may be
+	// empty: leaves it empties, and internal nodes left without children, are
+	// removed before it returns.
 	void reclaimOldest();
 	void reclaimUntilAvail(int n);
 	// Removes expired entries without releasing the leaf itself.
+	// The leaf may be left empty, which only the root leaf may stay: the
+	// caller must then remove it before the operation returns.
 	// Returns true if any entry was removed.
 	bool cleanExpired(LeafBlock* leaf);
 	// Refreshes every expired separator of node with refreshSeparator.
