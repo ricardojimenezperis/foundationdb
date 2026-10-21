@@ -48,6 +48,10 @@ struct TempConflictBTreeTestAccess {
 					  Version cv) {
 		t.split(node, leaf, rank, found, cv);
 	}
+	static void insertAt(TempConflictBTree& t, std::size_t& rank,
+						 const RangeRef& range, Version cv, LeafBlock*& leaf) {
+		t.insertAt(rank, range, cv, leaf);
+	}
 	static bool needsSplit(const BNodeHeader* node) {
 		return TempConflictBTree::needsSplit(node);
 	}
@@ -1465,4 +1469,284 @@ TEST_CASE("/resolver/TempConflictBTree/SplitLeafWithOneFreeSlot") {
 	for (const Bytes& k : wideSearchKeys(14, entries, false)) {
 		checkLeafSplitKeepsPosition(makeTree, k);
 	}
+}
+
+namespace {
+
+// Inserts [begin, end) with cv into leaf i of the tree at rank, and keeps the
+// model up to date. Checks that leaf and rank still identify the entry.
+void insertEntry(TestTree& t, std::size_t i, std::size_t rank,
+				 const Bytes& begin, const Bytes& end, Version cv) {
+	const std::optional<RangeRef> range =
+		t.keys().appendRange(asRef(begin), asRef(end), cv);
+	ASSERT(range.has_value());
+	LeafBlock* leaf = t.leaves[i].leaf;
+	std::size_t r = rank;
+	Access::insertAt(t.tree, r, *range, cv, leaf);
+	ASSERT(leaf == t.leaves[i].leaf);
+	ASSERT_EQ(r, rank);
+	const auto slot = leaf->header.order[rank];
+	ASSERT_EQ(leaf->cv[slot], cv);
+	ASSERT_EQ(t.keys().compareBegin(asRef(begin), leaf->ranges[slot]), 0);
+
+	std::vector<Entry>& entries = t.leaves[i].entries;
+	entries.insert(entries.begin() + rank, {begin, end, cv});
+	t.newestCV = std::max(t.newestCV, cv);
+}
+
+// The separator of node in its parent.
+const KeyRef& separatorOf(const BNodeHeader* node) {
+	return node->parent->separators[node->parentSlot];
+}
+
+Version separatorCVOf(const BNodeHeader* node) {
+	return node->parent->separatorsCV[node->parentSlot];
+}
+
+// Adds leaves with the given entry counts and wide keys. Every leaf but the
+// first has a lower bound one below its first key, so that a key can be
+// inserted before its first entry without leaving it.
+void addGapLeaves(TestTree& t, const std::vector<unsigned>& counts) {
+	unsigned first = 10;
+	for (std::size_t i = 0; i < counts.size(); ++i) {
+		t.addLeaf(i == 0 ? Bytes{} : wideKey(first - 1),
+				  wideEntriesFrom(first, counts[i], 1));
+		first += 2 * counts[i] + 2;
+	}
+}
+
+// Order in which the fill tests insert LeafCapacity keys: 23 is coprime with
+// LeafCapacity, so every key is inserted once, at the front, the back and
+// in between.
+std::vector<unsigned> fillOrder() {
+	std::vector<unsigned> order;
+	for (unsigned n = 0; n < LeafCapacity; ++n) {
+		order.push_back(n * 23 % LeafCapacity);
+	}
+	return order;
+}
+
+std::size_t rankAmong(const std::vector<unsigned>& inserted, unsigned key) {
+	return static_cast<std::size_t>(
+		std::count_if(inserted.begin(), inserted.end(),
+					  [key](unsigned k) { return k < key; }));
+}
+
+} // namespace
+
+// An empty root leaf is filled in a scattered order. Each insertion raises
+// the leaf's maximum CV, and the leaf needs a split from its last but one
+// entry on.
+TEST_CASE("/resolver/TempConflictBTree/InsertAtFillsRootLeaf") {
+	TestTree t;
+	t.addLeaf({}, {});
+	t.build(2);
+	LeafBlock* leaf = t.leaves[0].leaf;
+	ASSERT(Access::root(t.tree) == &leaf->header);
+
+	std::vector<unsigned> inserted;
+	for (unsigned k : fillOrder()) {
+		const Version cv = 100 + static_cast<Version>(inserted.size());
+		insertEntry(t, 0, rankAmong(inserted, k), wideKey(10 + 2 * k),
+					keyAfter(wideKey(10 + 2 * k)), cv);
+		inserted.push_back(k);
+
+		ASSERT_EQ(leaf->header.count, inserted.size());
+		ASSERT_EQ(leaf->header.maxCV, cv);
+		ASSERT(t.nodes().oldestNode() == &leaf->header);
+		ASSERT_EQ(Access::needsSplit(leaf),
+				  inserted.size() + 1 >= LeafCapacity);
+		checkSameEntries(leafEntries(t, leaf), t.leaves[0].entries);
+	}
+	ASSERT(!leaf->header.hasSpace());
+	checkTree(t);
+}
+
+// An empty leaf between two others is filled in a scattered order. Its
+// separator follows its first key, the parent's CVs follow the leaf's, and
+// the parent counts the leaf once from its last but one entry on.
+TEST_CASE("/resolver/TempConflictBTree/InsertAtFillsLeafUnderParent") {
+	TestTree t;
+	t.addLeaf({}, wideEntriesFrom(2, 2, 1));
+	t.addLeaf(wideKey(8), {});
+	t.addLeaf(wideKey(200), wideEntriesFrom(200, 2, 1));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+	LeafBlock* leaf = t.leaves[1].leaf;
+
+	std::vector<unsigned> inserted;
+	for (unsigned k : fillOrder()) {
+		const Version cv = 100 + static_cast<Version>(inserted.size());
+		const std::size_t rank = rankAmong(inserted, k);
+		insertEntry(t, 1, rank, wideKey(10 + 2 * k),
+					keyAfter(wideKey(10 + 2 * k)), cv);
+		inserted.push_back(k);
+
+		const auto first = *std::min_element(inserted.begin(), inserted.end());
+		ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(10 + 2 * first)),
+									   separatorOf(&leaf->header)), 0);
+		if (rank == 0) {
+			ASSERT_EQ(separatorCVOf(&leaf->header), cv);
+		}
+		ASSERT_EQ(leaf->header.maxCV, cv);
+		ASSERT_EQ(root->maxSubtreesCV[leaf->header.parentSlot], cv);
+		ASSERT_EQ(root->header.maxCV, cv);
+		const bool needs = inserted.size() + 1 >= LeafCapacity;
+		ASSERT_EQ(Access::needsSplit(leaf), needs);
+		ASSERT_EQ(root->header.childrenNeedingSplit, needs);
+		checkTree(t);
+	}
+	checkSameEntries(checkTree(t), modelEntries(t));
+}
+
+// Every combination of the three updates an insertion may cause in the
+// parent: the leaf starts needing a split, the separator changes because the
+// entry goes first, and the maximum CV rises because the entry is newer.
+TEST_CASE("/resolver/TempConflictBTree/InsertAtUpdateCombinations") {
+	for (unsigned mask = 0; mask < 8; ++mask) {
+		const bool split = mask & 1;
+		const bool first = mask & 2;
+		const bool newer = mask & 4;
+
+		TestTree t;
+		const unsigned count = split ? LeafCapacity - 2 : 3;
+		addGapLeaves(t, {2, count, 2});
+		t.build(3);
+		InternalBlock* root = rootNode(t);
+		LeafBlock* leaf = t.leaves[1].leaf;
+		const auto slot = leaf->header.parentSlot;
+		const KeyRef separator = separatorOf(&leaf->header);
+		const Version separatorCV = separatorCVOf(&leaf->header);
+		const Version leafCV = leaf->header.maxCV;
+		const Version subtreeCV = root->maxSubtreesCV[slot];
+		const Version rootCV = root->header.maxCV;
+		ASSERT(!Access::needsSplit(leaf));
+		ASSERT_EQ(root->header.childrenNeedingSplit, 0);
+
+		// The leaf's entries start at 16, its lower bound is 15, and its
+		// last entry is [16 + 2 (count - 1), +1).
+		const unsigned last = 16 + 2 * (count - 1);
+		const Bytes begin = first ? wideKey(15) : wideKey(last + 1);
+		const Bytes end = keyAfter(begin);
+		const Version cv = newer ? 500 : 1;
+		ASSERT(newer == (cv > leafCV));
+		insertEntry(t, 1, first ? 0 : count, begin, end, cv);
+
+		ASSERT_EQ(Access::needsSplit(leaf), split);
+		ASSERT_EQ(root->header.childrenNeedingSplit, split);
+		if (first) {
+			ASSERT_EQ(t.keys().compareKeys(asRef(begin), separatorOf(&leaf->header)), 0);
+			ASSERT_EQ(separatorCVOf(&leaf->header), cv);
+		} else {
+			ASSERT(separatorOf(&leaf->header).firstBlock == separator.firstBlock);
+			ASSERT_EQ(separatorOf(&leaf->header).keyOffset, separator.keyOffset);
+			ASSERT_EQ(separatorCVOf(&leaf->header), separatorCV);
+		}
+		ASSERT_EQ(leaf->header.maxCV, newer ? cv : leafCV);
+		ASSERT_EQ(root->maxSubtreesCV[slot], newer ? cv : subtreeCV);
+		ASSERT_EQ(root->header.maxCV, newer ? cv : rootCV);
+		checkSameEntries(checkTree(t), modelEntries(t));
+	}
+}
+
+// An entry inserted first in the first leaf of a subtree changes the
+// separators up to the first ancestor where its subtree is not the first.
+TEST_CASE("/resolver/TempConflictBTree/InsertAtPropagatesSeparator") {
+	// Leaves 0..2 under I0, 3..5 under I1. Each case inserts first in a leaf
+	// and lists the levels whose separator changes: 1 for the leaf's own,
+	// 2 also for its parent's.
+	struct Case {
+		std::size_t leaf;
+		int levels;
+	};
+	for (const Case c : {Case{0, 2}, Case{1, 1}, Case{3, 2}, Case{4, 1}}) {
+		TestTree t;
+		addGapLeaves(t, {3, 3, 3, 3, 3, 3});
+		t.build(3);
+		InternalBlock* root = rootNode(t);
+		LeafBlock* leaf = t.leaves[c.leaf].leaf;
+		InternalBlock* parent = leaf->header.parent;
+		const KeyRef parentSeparator = separatorOf(&parent->header);
+		const Version parentSeparatorCV = separatorCVOf(&parent->header);
+
+		// A key below the leaf's first entry, still within the leaf.
+		const Bytes begin = c.leaf == 0
+			? wideKey(9)
+			: t.leaves[c.leaf].lowerBound;
+		insertEntry(t, c.leaf, 0, begin, keyAfter(begin), 500);
+
+		ASSERT_EQ(t.keys().compareKeys(asRef(begin), separatorOf(&leaf->header)), 0);
+		ASSERT_EQ(separatorCVOf(&leaf->header), 500);
+		if (c.levels == 2) {
+			ASSERT_EQ(t.keys().compareKeys(asRef(begin), separatorOf(&parent->header)), 0);
+			ASSERT_EQ(separatorCVOf(&parent->header), 500);
+		} else {
+			ASSERT(separatorOf(&parent->header).firstBlock == parentSeparator.firstBlock);
+			ASSERT_EQ(separatorOf(&parent->header).keyOffset, parentSeparator.keyOffset);
+			ASSERT_EQ(separatorCVOf(&parent->header), parentSeparatorCV);
+		}
+		ASSERT(root->header.parent == nullptr);
+		checkSameEntries(checkTree(t), modelEntries(t));
+	}
+}
+
+// A leaf that starts needing a split under a parent with a single free slot
+// makes the parent need one too, and the root counts the parent.
+TEST_CASE("/resolver/TempConflictBTree/InsertAtPropagatesNeedsSplit") {
+	TestTree t;
+	InternalBlock* i0 = fullLeafUnderCriticalNode(t, LeafCapacity - 2);
+	InternalBlock* root = rootNode(t);
+	ASSERT(!Access::needsSplit(i0));
+
+	// After the last entry of the leaf and before the next leaf.
+	const Entry& last = t.leaves[1].entries.back();
+	insertEntry(t, 1, LeafCapacity - 2, last.end, keyAfter(last.end), 1);
+
+	ASSERT(Access::needsSplit(t.leaves[1].leaf));
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 1);
+	ASSERT(Access::needsSplit(i0));
+	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
+	ASSERT(!Access::needsSplit(root));
+	checkSameEntries(checkTree(t), modelEntries(t));
+
+	// A further entry fills the leaf, which is already counted.
+	const Entry& next = t.leaves[1].entries.back();
+	insertEntry(t, 1, LeafCapacity - 1, next.end, keyAfter(next.end), 1);
+	ASSERT(!t.leaves[1].leaf->header.hasSpace());
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 1);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 1);
+	checkSameEntries(checkTree(t), modelEntries(t));
+}
+
+// A newer entry raises the maximum CV up to the root. A second one with the
+// same CV, in another leaf under the same parent, stops at the parent,
+// whose maximum CV is already that high.
+TEST_CASE("/resolver/TempConflictBTree/InsertAtPropagatesMaxCV") {
+	TestTree t;
+	addGapLeaves(t, {3, 3, 3, 3, 3, 3});
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+	LeafBlock* a = t.leaves[3].leaf;
+	LeafBlock* b = t.leaves[4].leaf;
+	InternalBlock* parent = a->header.parent;
+	ASSERT(b->header.parent == parent);
+
+	const Entry& lastA = t.leaves[3].entries.back();
+	insertEntry(t, 3, 3, lastA.end, keyAfter(lastA.end), 500);
+	ASSERT_EQ(a->header.maxCV, 500);
+	ASSERT_EQ(parent->maxSubtreesCV[a->header.parentSlot], 500);
+	ASSERT_EQ(parent->header.maxCV, 500);
+	ASSERT_EQ(root->maxSubtreesCV[parent->header.parentSlot], 500);
+	ASSERT_EQ(root->header.maxCV, 500);
+	checkTree(t);
+
+	const Version before = parent->maxSubtreesCV[b->header.parentSlot];
+	ASSERT(before < 500);
+	const Entry& lastB = t.leaves[4].entries.back();
+	insertEntry(t, 4, 3, lastB.end, keyAfter(lastB.end), 500);
+	ASSERT_EQ(b->header.maxCV, 500);
+	ASSERT_EQ(parent->maxSubtreesCV[b->header.parentSlot], 500);
+	ASSERT_EQ(parent->header.maxCV, 500);
+	ASSERT_EQ(root->header.maxCV, 500);
+	checkSameEntries(checkTree(t), modelEntries(t));
 }

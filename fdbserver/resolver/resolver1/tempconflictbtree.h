@@ -70,6 +70,7 @@ private:
 
 	BNodeHeader* root_ = nullptr;
 	Version reclaimCV_ = 0;
+
 	// Returns the insertion point, leaf & rank, and whether is found.
 	// If the tree is empty return nullptr as leaf.
 	bool findKey(

@@ -250,11 +250,10 @@ bool TempConflictBTree::prevRank(
 }
 
 void  TempConflictBTree::insertAt(
-	std::size_t& rank,
-	const RangeRef& range,
-	Version cv,
-	LeafBlock*& leaf) {
-
+		std::size_t& rank,
+		const RangeRef& range,
+		Version cv,
+		LeafBlock*& leaf) {
 	const bool splitBefore = needsSplit(leaf);
 	nodeStore_.insertAt(rank, range, cv, leaf);
 	bool updateSplit=!splitBefore && needsSplit(leaf);
@@ -293,7 +292,40 @@ void  TempConflictBTree::insertAt(
 // (rank == count) in the last leaf.
 // If the tree becomes empty, leaf is nullptr and rank is zero.
 void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
+	bool splitBefore=needsSplit(leaf);
+	nodeStore_.eraseAt(rank,leaf);
+	if (leaf->header.count==0) {
 
+		removeEmptyChild(leaf->header.parent, parentRank);
+		if (leaf->header.parent==nullptr){
+			root_=nullptr;
+			leaf=nullptr;
+		} else {
+			if (leaf->left!=nullptr){
+				leaf->left->right= leaf->right;
+			}
+			if (leaf->right!=nullptr) {
+				leaf->right->left= leaf->left;
+			}
+			if (leaf->right!=nullptr) {
+				leaf= leaf->right;
+				rank= 0;
+			} else if (leaf->left!=nullptr){
+				leaf= leaf->right;
+				rank=leaf->header.count;
+			}
+		}
+	} else {
+		if (rank==leaf->header.count){
+			if (leaf->right!=nullptr) {
+				leaf= leaf->right;
+				rank= 0;
+			}
+		}
+	}
+	if (splitBefore && !needsSplit(leaf)) {
+		propagateSplitCleared(&leaf->header);
+	}
 }
 
 void  TempConflictBTree::reclaimOldest() {
