@@ -412,6 +412,60 @@ TEST_CASE("/resolver/BNodeStore/HasSpace") {
 	ASSERT(!internal->header.hasSpace());
 }
 
+// setFree and unsetFree change only their own bit, on all 64 slots;
+// freeSlotCount counts free slots and firstFree returns the lowest one.
+TEST_CASE("/resolver/BNodeStore/HeaderFreeSlots") {
+	BNodeHeader header;
+	ASSERT_EQ(header.freeSlots, 0);
+	ASSERT_EQ(header.freeSlotCount(), 0);
+
+	for (std::size_t slot = 0; slot < 64; ++slot) {
+		header.setFree(slot);
+		ASSERT_EQ(header.freeSlots, UINT64_MAX >> (63 - slot));
+		ASSERT_EQ(header.freeSlotCount(), slot + 1);
+		ASSERT_EQ(header.firstFree(), 0);
+	}
+
+	// Setting a free slot again changes nothing.
+	header.setFree(63);
+	ASSERT_EQ(header.freeSlots, UINT64_MAX);
+
+	for (std::size_t slot = 0; slot < 64; ++slot) {
+		ASSERT_EQ(header.firstFree(), slot);
+		header.unsetFree(slot);
+		ASSERT_EQ(header.freeSlots, slot == 63 ? 0 : UINT64_MAX << (slot + 1));
+		ASSERT_EQ(header.freeSlotCount(), 63 - slot);
+	}
+	ASSERT(!header.hasSpace());
+
+	// Unsetting a used slot changes nothing.
+	header.unsetFree(5);
+	ASSERT_EQ(header.freeSlots, 0);
+
+	// firstFree ignores higher free slots.
+	header.setFree(40);
+	header.setFree(7);
+	header.setFree(63);
+	ASSERT_EQ(header.firstFree(), 7);
+	ASSERT_EQ(header.freeSlotCount(), 3);
+	header.unsetFree(7);
+	ASSERT_EQ(header.firstFree(), 40);
+}
+
+// Allocated nodes start with all their slots free.
+TEST_CASE("/resolver/BNodeStore/AllocatedNodesHaveAllSlotsFree") {
+	PagePool pool(PageSize, BlockSize);
+	KeyStore keys(pool);
+	BNodeStore store(pool, keys);
+
+	LeafBlock* leaf = store.allocateLeaf(1);
+	InternalBlock* internal = store.allocateInternal(1);
+	ASSERT_EQ(leaf->header.freeSlotCount(), LeafCapacity);
+	ASSERT_EQ(internal->header.freeSlotCount(), InternalCapacity);
+	ASSERT_EQ(leaf->header.firstFree(), 0);
+	ASSERT_EQ(internal->header.firstFree(), 0);
+}
+
 namespace {
 
 struct Entry {

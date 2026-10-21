@@ -146,6 +146,9 @@ private:
 	void propagateSplitCleared(BNodeHeader* node);
 	// Splits node, updating the tree and split counters.
 	// If node is leaf, adjusts leaf and rank to preserve the position
-	// returned by findKey.
-	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank, Version cv);
+	// returned by findKey; found is the value findKey returned. A key not
+	// found at the cut rank stays at the end of the old leaf, since it is
+	// below the first key of the new one.
+	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank,
+			   bool found, Version cv);
 };

@@ -45,7 +45,7 @@ void TempConflictBTree::addWrite(
 		return;
 	}
 	if (nodeNeedsSplit!=nullptr){
-		split(nodeNeedsSplit, leaf, rank, cv);
+		split(nodeNeedsSplit, leaf, rank, found, cv);
 	}
 	std::size_t slot = 0;
 	bool hasPrevious = false;
@@ -401,6 +401,7 @@ void TempConflictBTree::split(
 		BNodeHeader* node,
 		LeafBlock*& leaf,
 		std::size_t& rank,
+		bool found,
 		Version cv) {
 	assert(node != nullptr);
 	assert(needsSplit(node));
@@ -519,7 +520,7 @@ void TempConflictBTree::split(
 		}
 		oldNode->right = newNode;
 
-		if (rank >= cutRank) {
+		if (rank > cutRank || (found && rank == cutRank)) {
 			leaf = newNode;
 			rank -= cutRank;
 		}
