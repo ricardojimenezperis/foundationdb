@@ -530,6 +530,7 @@ void checkInternalNode(const InternalBlock* node,
 		ASSERT_EQ(node->maxSubtreesCV[slot], e.child->maxCV);
 		ASSERT(e.child->parent == node);
 		ASSERT_EQ(e.child->parentSlot, slot);
+		ASSERT_EQ(e.child->parentRank(), i);
 	}
 
 	ASSERT_EQ(node->header.freeSlots, InternalSlotMask & ~used);
@@ -1113,4 +1114,38 @@ TEST_CASE("/resolver/BNodeStore/InsertAtRaisesLeafCV") {
 	ASSERT((ageList(&a->header) ==
 			std::vector<const BNodeHeader*>{&b->header, &a->header}));
 	ASSERT_EQ(*store.oldestCV(), 20);
+}
+
+// parent() of both block kinds returns the parent block, and parentRank()
+// the child's position in it, which follows insertions before it rather
+// than its physical slot.
+TEST_CASE("/resolver/BNodeStore/ParentAndParentRank") {
+	PagePool pool(4 * PageSize, BlockSize);
+	KeyStore keys(pool);
+	BNodeStore store(pool, keys);
+
+	InternalBlock* node = store.allocateInternal(1);
+	LeafBlock* leaf = store.allocateLeaf(1);
+	InternalBlock* internal = store.allocateInternal(1);
+	ASSERT(leaf->parent() == nullptr);
+	ASSERT(internal->parent() == nullptr);
+
+	const std::optional<KeyRef> key = keys.appendKey(nullptr, 0, 1);
+	ASSERT(key.has_value());
+	store.insertAt(0, *key, &leaf->header, 1, node);
+	ASSERT(leaf->parent() == node);
+	ASSERT_EQ(leaf->parentRank(), 0);
+
+	// Inserted before the leaf, in a later slot.
+	store.insertAt(0, *key, &internal->header, 1, node);
+	ASSERT(internal->parent() == node);
+	ASSERT_EQ(internal->parentRank(), 0);
+	ASSERT_EQ(leaf->parentRank(), 1);
+	ASSERT_EQ(leaf->header.parentRank(), 1);
+	ASSERT_EQ(leaf->header.parentSlot, 0);
+	ASSERT_EQ(internal->header.parentSlot, 1);
+
+	// Erasing the first child moves the leaf back to rank 0.
+	store.eraseAt(0, node);
+	ASSERT_EQ(leaf->parentRank(), 0);
 }

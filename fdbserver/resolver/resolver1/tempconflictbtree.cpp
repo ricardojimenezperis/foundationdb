@@ -260,7 +260,7 @@ void  TempConflictBTree::insertAt(
 	bool updateSeparator = (rank == 0);
 	bool updateCV= true;
 	BNodeHeader* current=&leaf->header;
-	InternalBlock* parent = leaf->header.parent;
+	InternalBlock* parent = leaf->parent();
 	while (parent!=nullptr && (updateSplit || updateSeparator || updateCV)){
 		if (updateSplit) {
 			const bool parentSplitBefore = needsSplit(parent);
@@ -294,13 +294,16 @@ void  TempConflictBTree::insertAt(
 void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 	bool splitBefore=needsSplit(leaf);
 	nodeStore_.eraseAt(rank,leaf);
+	if (leaf!=nullptr && splitBefore && !needsSplit(leaf)) {
+		propagateSplitCleared(&leaf->header);
+	}
 	if (leaf->header.count==0) {
-
-		removeEmptyChild(leaf->header.parent, parentRank);
-		if (leaf->header.parent==nullptr){
+		if (leaf->parent()==nullptr){
+			nodeStore_.releaseNode(&leaf->header);
 			root_=nullptr;
 			leaf=nullptr;
 		} else {
+			removeEmptyChild(leaf->parent(), leaf->parentRank());
 			if (leaf->left!=nullptr){
 				leaf->left->right= leaf->right;
 			}
@@ -322,9 +325,6 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 				rank= 0;
 			}
 		}
-	}
-	if (splitBefore && !needsSplit(leaf)) {
-		propagateSplitCleared(&leaf->header);
 	}
 }
 
@@ -605,13 +605,7 @@ void TempConflictBTree::split(
 
 		root_ = &parentNode->header;
 	} else {
-		std::size_t parentRank = 0;
-		while (parentRank < parentNode->header.count &&
-			   parentNode->header.order[parentRank] !=
-				   node->parentSlot) {
-			++parentRank;
-		}
-		assert(parentRank < parentNode->header.count);
+		const std::size_t parentRank = node->parentRank();
 		assert(parentNode->header.freeSlotCount() > 0);
 
 		nodeStore_.insertAt(

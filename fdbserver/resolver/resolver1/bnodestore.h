@@ -67,6 +67,8 @@ struct BNodeHeader {
 		assert(freeSlots != 0);
 		return static_cast<unsigned>(std::countr_zero(freeSlots));
 	}
+	// Rank of this node in its parent. Requires a parent.
+	inline std::size_t parentRank() const;
 };
 
 template<std::size_t C>
@@ -78,6 +80,13 @@ struct InternalBlockLayout {
 	Version separatorsCV[C];
 	KeyRef separators[C];
 	BNodeHeader* children[C];
+
+	InternalBlock* parent() const {
+		return header.parent;
+	}
+	std::size_t parentRank() const {
+		return header.parentRank();
+	}
 };
 
 template<std::size_t C>
@@ -89,6 +98,13 @@ struct LeafBlockLayout {
 	RangeRef ranges[C];
 	LeafBlockLayout<C>* left = nullptr;
 	LeafBlockLayout<C>* right = nullptr;
+
+	InternalBlock* parent() const {
+		return header.parent;
+	}
+	std::size_t parentRank() const {
+		return header.parentRank();
+	}
 };
 
 template<template<std::size_t> class Layout, std::size_t C = 1>
@@ -114,6 +130,16 @@ static_assert(LeafCapacity > 0);
 // A struct rather than an alias, so that BNodeHeader can declare it before
 // its capacity is known.
 struct InternalBlock : InternalBlockLayout<InternalCapacity> {};
+
+inline std::size_t BNodeHeader::parentRank() const {
+	assert(parent != nullptr);
+	std::size_t rank = 0;
+	while (parent->header.order[rank] != parentSlot) {
+		++rank;
+		assert(rank < parent->header.count);
+	}
+	return rank;
+}
 using LeafBlock = LeafBlockLayout<LeafCapacity>;
 
 inline constexpr std::uint64_t InternalSlotMask =
