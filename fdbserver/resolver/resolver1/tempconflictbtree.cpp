@@ -260,46 +260,31 @@ void  TempConflictBTree::insertAt(
 	bool updateSplit=!splitBefore && needsSplit(leaf);
 	bool updateSeparator = (rank == 0);
 	bool updateCV= true;
-	BNodeHeader* current=reinterpret_cast<BNodeHeader*>(leaf);
-	InternalBlock* parent=reinterpret_cast<InternalBloc*> (leaf->header.parent);
+	BNodeHeader* current=&leaf->header;
+	InternalBlock* parent = leaf->header.parent;
 	while (parent!=nullptr && (updateSplit || updateSeparator || updateCV)){
 		if (updateSplit) {
 			const bool parentSplitBefore = needsSplit(parent);
-			++parent->childrenNeedingSplit;
+			++parent->header.childrenNeedingSplit;
 			updateSplit= !parentSplitBefore && needsSplit(parent); 
 		}
+		const auto slot = current->parentSlot;
 		if (updateSeparator){
-			const auto slot = current->parentSlot;
 			parent->separators[slot] = keyStore_.beginKey(range);
 			parent->separatorsCV[slot] = cv;
 			updateSeparator = (parent->header.order[0] == slot);
 		}
-	}
-
-	
-	BNodeHeader* current = &leaf->header;
-	bool updateStartSeparator = (rank == 0);
-	while (updateStartSeparator && current->parent != nullptr) {
-		auto* parent = reinterpret_cast<InternalBlock*>(current->parent);
-		const auto slot = current->parentSlot;
-		parent->separators[slot] = keyStore_.beginKey(range);
-		parent->separatorsCV[slot] = cv;
-		updateStartSeparator = (parent->header.order[0] == slot);
-		current = &parent->header;
-	}
-
-	current = &leaf->header;
-	while (current->parent != nullptr) {
-		auto* parent = reinterpret_cast<InternalBlock*>(current->parent);
-		const auto slot = current->parentSlot;
-		if (parent->maxSubtreesCV[slot] < current->maxCV) {
-			parent->maxSubtreesCV[slot] = current->maxCV;
+		if (updateCV) {
+			if (parent->maxSubtreesCV[slot] < current->maxCV) {
+				parent->maxSubtreesCV[slot] = current->maxCV;
+			}
+			updateCV = parent->header.maxCV < current->maxCV;
+			if (updateCV) {
+				nodeStore_.updateCV(&parent->header, current->maxCV);
+			}
 		}
-		if (parent->header.maxCV >= current->maxCV) {
-			break;
-		}
-		nodeStore_.updateCV(&parent->header, current->maxCV);
-		current = &parent->header;
+		current=&parent->header;
+		parent=current->parent;
 	}
 }
 
@@ -321,15 +306,14 @@ void  TempConflictBTree::reclaimUntilAvail(int n) {
 
 void TempConflictBTree::propagateSplitCleared(BNodeHeader* node) {
 	while (node->parent != nullptr) {
-		BNodeHeader* parent = node->parent;
-		auto* internal = reinterpret_cast<InternalBlock*>(parent);
-		const bool splitBefore = needsSplit(internal);
-		assert(parent->childrenNeedingSplit > 0);
-		--parent->childrenNeedingSplit;
-		if (!splitBefore || needsSplit(internal)) {
+		InternalBlock* parent = node->parent;
+		const bool splitBefore = needsSplit(parent);
+		assert(parent->header.childrenNeedingSplit > 0);
+		--parent->header.childrenNeedingSplit;
+		if (!splitBefore || needsSplit(parent)) {
 			break;
 		}
-		node = parent;
+		node = &parent->header;
 	}
 }
 
@@ -444,8 +428,7 @@ void TempConflictBTree::split(
 	assert(needsSplit(node));
 	assert(cv >= node->maxCV);
 
-	auto* parentNode =
-		reinterpret_cast<InternalBlock*>(node->parent);
+	InternalBlock* parentNode = node->parent;
 	const bool parentSplitBefore =
 		parentNode != nullptr && needsSplit(parentNode);
 
@@ -496,7 +479,7 @@ void TempConflictBTree::split(
 				oldNode->maxSubtreesCV[oldSlot];
 			newNode->header.unsetFree(newSlot);
 
-			child->parent = &newNode->header;
+			child->parent = newNode;
 			child->parentSlot = newSlot;
 
 			if (needsSplit(child)) {
@@ -624,8 +607,7 @@ void TempConflictBTree::split(
 	// Propagate the sibling's conservative maximum CV.
 	BNodeHeader* current = sibling;
 	while (current->parent != nullptr) {
-		auto* parent =
-			reinterpret_cast<InternalBlock*>(current->parent);
+		InternalBlock* parent = current->parent;
 		const auto slot = current->parentSlot;
 
 		if (parent->maxSubtreesCV[slot] < current->maxCV) {

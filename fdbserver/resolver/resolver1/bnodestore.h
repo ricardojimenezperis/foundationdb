@@ -33,12 +33,15 @@ enum class BNodeKind : std::uint8_t {
 	Internal
 };
 
+// Defined below; declared here so that a node can point to its parent.
+struct InternalBlock;
+
 struct BNodeHeader {
 	std::uint64_t generation;
 	Version maxCV = 0;
 	BNodeHeader* agePrevious = nullptr;
 	BNodeHeader* ageNext = nullptr;
-	BNodeHeader* parent = nullptr;
+	InternalBlock* parent = nullptr;
 	BNodeKind kind;
 	std::uint8_t count = 0;
 	std::uint8_t parentSlot = 0;
@@ -108,7 +111,9 @@ inline constexpr std::size_t LeafCapacity =
 static_assert(InternalCapacity > 0);
 static_assert(LeafCapacity > 0);
 
-using InternalBlock = InternalBlockLayout<InternalCapacity>;
+// A struct rather than an alias, so that BNodeHeader can declare it before
+// its capacity is known.
+struct InternalBlock : InternalBlockLayout<InternalCapacity> {};
 using LeafBlock = LeafBlockLayout<LeafCapacity>;
 
 inline constexpr std::uint64_t InternalSlotMask =
@@ -284,7 +289,7 @@ inline void BNodeStore::insertAt(std::size_t rank,
 	node->separators[slot]=key;
 	node->children[slot]=child;
 	node->header.freeSlots&=~(std::uint64_t{1}<<slot);
-	child->parent = &node->header;
+	child->parent = node;
 	child->parentSlot = static_cast<std::uint8_t>(slot);
 }
 

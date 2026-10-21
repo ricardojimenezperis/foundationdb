@@ -528,7 +528,7 @@ void checkInternalNode(const InternalBlock* node,
 		ASSERT_EQ(node->separatorsCV[slot], e.cv);
 		ASSERT(node->children[slot] == e.child);
 		ASSERT_EQ(node->maxSubtreesCV[slot], e.child->maxCV);
-		ASSERT(e.child->parent == &node->header);
+		ASSERT(e.child->parent == node);
 		ASSERT_EQ(e.child->parentSlot, slot);
 	}
 
@@ -1086,4 +1086,31 @@ TEST_CASE("/resolver/BNodeStore/EraseThenInsertReusesSlotInLeaf") {
 	ASSERT_EQ(node->header.order[3], slot);
 	checkLeafNode(node, expected);
 	ASSERT(!node->header.hasSpace());
+}
+
+// Inserting an entry newer than a leaf raises the leaf's maximum CV and
+// moves it to the newest end of the age list; an entry that is not newer
+// leaves both unchanged.
+TEST_CASE("/resolver/BNodeStore/InsertAtRaisesLeafCV") {
+	PagePool pool(4 * PageSize, BlockSize);
+	KeyStore keys(pool);
+	BNodeStore store(pool, keys);
+
+	LeafBlock* a = store.allocateLeaf(10);
+	LeafBlock* b = store.allocateLeaf(20);
+
+	store.insertAt(0, storeLeafRange(keys, 0, 5), 5, a);
+	ASSERT_EQ(a->header.maxCV, 10);
+	store.insertAt(1, storeLeafRange(keys, 1, 10), 10, a);
+	ASSERT_EQ(a->header.maxCV, 10);
+	ASSERT(store.oldestNode() == &a->header);
+	ASSERT((ageList(&a->header) ==
+			std::vector<const BNodeHeader*>{&a->header, &b->header}));
+
+	store.insertAt(2, storeLeafRange(keys, 2, 30), 30, a);
+	ASSERT_EQ(a->header.maxCV, 30);
+	ASSERT(store.oldestNode() == &b->header);
+	ASSERT((ageList(&a->header) ==
+			std::vector<const BNodeHeader*>{&b->header, &a->header}));
+	ASSERT_EQ(*store.oldestCV(), 20);
 }
