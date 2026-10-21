@@ -48,6 +48,12 @@ struct TempConflictBTreeTestAccess {
 					  Version cv) {
 		t.split(node, leaf, rank, found, cv);
 	}
+	static void updateMinSeparator(TempConflictBTree& t, LeafBlock* leaf) {
+		t.updateMinSeparator(leaf);
+	}
+	static void updateMinSeparator(TempConflictBTree& t, InternalBlock* node) {
+		t.updateMinSeparator(node);
+	}
 	static void insertAt(TempConflictBTree& t, std::size_t& rank,
 						 const RangeRef& range, Version cv, LeafBlock*& leaf) {
 		t.insertAt(rank, range, cv, leaf);
@@ -1749,4 +1755,78 @@ TEST_CASE("/resolver/TempConflictBTree/InsertAtPropagatesMaxCV") {
 	ASSERT_EQ(parent->header.maxCV, 500);
 	ASSERT_EQ(root->header.maxCV, 500);
 	checkSameEntries(checkTree(t), modelEntries(t));
+}
+
+// updateMinSeparator copies the first key of a node, with its CV, into its
+// parent's separator, and goes on upwards while the node is a first child.
+TEST_CASE("/resolver/TempConflictBTree/UpdateMinSeparator") {
+	// Leaves 0..2 under I0, 3..5 under I1. Each case removes the first entry
+	// of a leaf and lists the levels whose separator follows the new first
+	// key: 1 for the leaf's own, 2 also for its parent's.
+	struct Case {
+		std::size_t leaf;
+		int levels;
+	};
+	for (const Case c : {Case{0, 2}, Case{1, 1}, Case{3, 2}, Case{5, 1}}) {
+		TestTree t;
+		addGapLeaves(t, {3, 3, 3, 3, 3, 3});
+		t.build(3);
+		LeafBlock* leaf = t.leaves[c.leaf].leaf;
+		InternalBlock* parent = leaf->parent();
+		const KeyRef parentSeparator = separatorOf(&parent->header);
+		const Version parentSeparatorCV = separatorCVOf(&parent->header);
+
+		t.nodes().eraseAt(0, leaf);
+		std::vector<Entry>& entries = t.leaves[c.leaf].entries;
+		entries.erase(entries.begin());
+		Access::updateMinSeparator(t.tree, leaf);
+
+		const Entry& first = entries.front();
+		ASSERT_EQ(t.keys().compareKeys(asRef(first.begin), separatorOf(&leaf->header)), 0);
+		ASSERT_EQ(separatorCVOf(&leaf->header), first.cv);
+		if (c.levels == 2) {
+			ASSERT_EQ(t.keys().compareKeys(asRef(first.begin), separatorOf(&parent->header)), 0);
+			ASSERT_EQ(separatorCVOf(&parent->header), first.cv);
+		} else {
+			ASSERT(separatorOf(&parent->header).firstBlock == parentSeparator.firstBlock);
+			ASSERT_EQ(separatorOf(&parent->header).keyOffset, parentSeparator.keyOffset);
+			ASSERT_EQ(separatorCVOf(&parent->header), parentSeparatorCV);
+		}
+		checkSameEntries(checkTree(t), modelEntries(t));
+	}
+}
+
+// The internal version copies the node's first separator; on the root, and
+// on a root leaf, there is nothing to update.
+TEST_CASE("/resolver/TempConflictBTree/UpdateMinSeparatorOfInternalNode") {
+	TestTree t;
+	addGapLeaves(t, {3, 3, 3, 3, 3, 3});
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+	auto* i1 = reinterpret_cast<InternalBlock*>(childAt(root, 1));
+
+	// Make I1's first separator the key one above its lower bound, as if its
+	// first leaf had lost a first entry there.
+	const Bytes k = keyAfter(t.leaves[3].lowerBound);
+	const std::optional<KeyRef> key = t.keys().appendKey(
+		reinterpret_cast<const std::byte*>(k.data()),
+		static_cast<std::uint16_t>(k.size()), 7);
+	ASSERT(key.has_value());
+	const auto first = i1->header.order[0];
+	i1->separators[first] = *key;
+	i1->separatorsCV[first] = 7;
+
+	Access::updateMinSeparator(t.tree, i1);
+	ASSERT_EQ(t.keys().compareKeys(asRef(k), separatorOf(&i1->header)), 0);
+	ASSERT_EQ(separatorCVOf(&i1->header), 7);
+
+	const KeyRef rootFirst = root->separators[root->header.order[0]];
+	Access::updateMinSeparator(t.tree, root);
+	ASSERT(root->separators[root->header.order[0]].firstBlock == rootFirst.firstBlock);
+
+	TestTree single;
+	single.addLeaf({}, entriesFrom(10, 2, 1));
+	single.build(2);
+	Access::updateMinSeparator(single.tree, single.leaves[0].leaf);
+	checkTree(single);
 }

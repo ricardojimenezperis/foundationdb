@@ -144,6 +144,11 @@ private:
 			? needsSplit(reinterpret_cast<const LeafBlock*>(node))
 			: needsSplit(reinterpret_cast<const InternalBlock*>(node));
 	}
+	// Sets the separator of node in its parent to the first key of node, with
+	// its CV, and continues upwards while node is the first child of its
+	// parent. Requires node not to be empty.
+	void updateMinSeparator(LeafBlock* leaf);
+	void updateMinSeparator(InternalBlock* node);
 	// Called when node has just stopped needing a split. Decrements the
 	// parent's count of children needing a split and continues upwards
 	// while the parent also stops needing one.
