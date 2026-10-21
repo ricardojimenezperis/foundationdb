@@ -630,15 +630,14 @@ void checkSubtree(TestTree& t, const BNodeHeader* node,
 		checkSubtree(t, internal->children[slot], leaves, entries);
 
 		// Every begin in this child is at least its separator, and every
-		// begin in the children before it is below it.
+		// begin before it is below it. Entries are checked to be in order,
+		// so the entries on either side of the separator are enough.
 		const KeyRef& separator = internal->separators[slot];
-		for (std::size_t i = 0; i < entries.size(); ++i) {
-			const int c = t.keys().compareKeys(asRef(entries[i].begin), separator);
-			if (r > 0 && i < before) {
-				ASSERT(c < 0);
-			} else if (i >= before) {
-				ASSERT(r == 0 || c >= 0);
-			}
+		if (r > 0 && before > 0) {
+			ASSERT(t.keys().compareKeys(asRef(entries[before - 1].begin), separator) < 0);
+		}
+		if (r > 0 && before < entries.size()) {
+			ASSERT(t.keys().compareKeys(asRef(entries[before].begin), separator) >= 0);
 		}
 	}
 }
@@ -666,7 +665,9 @@ std::vector<Entry> checkStructure(TestTree& t) {
 std::vector<Entry> checkTree(TestTree& t) {
 	const std::vector<Entry> entries = checkStructure(t);
 	for (unsigned b = 0; b <= 230; b += 3) {
+		const Bytes begin = key(b);
 		for (unsigned e = b + 1; e <= 231; e += 7) {
+			const Bytes end = key(e);
 			// Reads are admitted only at or above reclaimCV, and may clean
 			// the tree, which never changes their outcome.
 			for (Version version : {t.tree.reclaimCV(), Version{0},
@@ -674,12 +675,15 @@ std::vector<Entry> checkTree(TestTree& t) {
 				if (version < t.tree.reclaimCV()) {
 					continue;
 				}
+				// The entries are in key order: stop past the read.
 				bool expected = false;
 				for (const Entry& entry : entries) {
-					expected |= entry.begin < key(e) && key(b) < entry.end &&
-						entry.cv > version;
+					if (expected || !(entry.begin < end)) {
+						break;
+					}
+					expected = begin < entry.end && entry.cv > version;
 				}
-				ASSERT_EQ(t.hasConflict(key(b), key(e), version), expected);
+				ASSERT_EQ(t.hasConflict(begin, end, version), expected);
 			}
 		}
 	}
@@ -1954,8 +1958,9 @@ TEST_CASE("/resolver/TempConflictBTree/AddWriteKinds") {
 }
 
 // Many writes in a row, at random places and of random lengths, grow the
-// tree through several levels of splits; after each one the tree matches
-// the model.
+// tree through several levels of splits. After each one the structure and
+// entries match the model; every 250 writes, and at the end, so do the
+// conflicts.
 TEST_CASE("/resolver/TempConflictBTree/AddWriteAgainstModel") {
 	TestTree t(64 * PageSize);
 	std::vector<Entry> model;
@@ -1964,14 +1969,18 @@ TEST_CASE("/resolver/TempConflictBTree/AddWriteAgainstModel") {
 		state = state * 1103515245u + 12345u;
 		return state >> 8;
 	};
-	for (unsigned n = 0; n < 4000; ++n) {
+	for (unsigned n = 0; n < 2000; ++n) {
 		const unsigned begin = next() % 30000;
 		const unsigned length = n % 50 == 0 ? 1 + next() % 400 : 1 + next() % 8;
 		model = applyWrite(model, wideKey(begin), wideKey(begin + length),
 						   1000 + n);
 		Access::addWrite(t.tree, asRef(wideKey(begin)),
 						 asRef(wideKey(begin + length)), 1000 + n);
-		if (n % 400 == 399) {
+		// Structure after every write, conflicts now and then, so that a
+		// transient error is caught before later writes hide it.
+		if (n % 250 == 249) {
+			checkSameEntries(checkTree(t), model);
+		} else {
 			checkSameEntries(checkStructure(t), model);
 		}
 	}

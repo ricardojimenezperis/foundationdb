@@ -235,4 +235,5 @@ private:
 	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank,
 			   bool found, Version cv);
 	void normalizeRoot();
+	void removeSubtree(BNodeHeader* node);
 };
