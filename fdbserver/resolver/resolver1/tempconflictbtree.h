@@ -35,6 +35,7 @@
 
 #include <cstddef>
 #include <span>
+#include <tuple>
 #include <utility>
 
 class TempConflictBTree {
@@ -164,6 +165,20 @@ private:
 						  bool updateSeparator, bool updateCV) {
 		propagateUpdates(&node->header, splitDelta, updateSeparator, updateCV);
 	}
+	// The first key of node, with its CV: the separator node should have in
+	// its parent. Requires node not to be empty.
+	std::pair<KeyRef, Version> minSeparator(const BNodeHeader* node) const;
+	// Moves the upper part of oldNode, cut by weight, to a new node and
+	// returns it. Moved children point to the new node and are counted there.
+	InternalBlock* splitInternal(InternalBlock* oldNode, Version cv);
+	// Moves the upper half of leaf to a new leaf linked after it and returns
+	// it. Adjusts leaf and rank as split does.
+	LeafBlock* splitLeaf(LeafBlock*& leaf, std::size_t& rank, bool found,
+						 Version cv);
+	// Puts sibling right after node in node's parent, creating a new root if
+	// node has none. Requires neither of them to need a split; the parent
+	// then keeps its own state.
+	void insertSibling(BNodeHeader* node, BNodeHeader* sibling, Version cv);
 	// Splits node, updating the tree and split counters.
 	// If node is leaf, adjusts leaf and rank to preserve the position
 	// returned by findKey; found is the value findKey returned. A key not
