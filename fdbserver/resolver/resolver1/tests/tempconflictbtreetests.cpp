@@ -48,11 +48,11 @@ struct TempConflictBTreeTestAccess {
 					  Version cv) {
 		t.split(node, leaf, rank, found, cv);
 	}
-	static void updateMinSeparator(TempConflictBTree& t, LeafBlock* leaf) {
-		t.updateMinSeparator(leaf);
+	static void updateSeparator(TempConflictBTree& t, LeafBlock* leaf) {
+		t.propagateUpdates(leaf, 0, true, false);
 	}
-	static void updateMinSeparator(TempConflictBTree& t, InternalBlock* node) {
-		t.updateMinSeparator(node);
+	static void updateSeparator(TempConflictBTree& t, InternalBlock* node) {
+		t.propagateUpdates(node, 0, true, false);
 	}
 	static void insertAt(TempConflictBTree& t, std::size_t& rank,
 						 const RangeRef& range, Version cv, LeafBlock*& leaf) {
@@ -1757,9 +1757,9 @@ TEST_CASE("/resolver/TempConflictBTree/InsertAtPropagatesMaxCV") {
 	checkSameEntries(checkTree(t), modelEntries(t));
 }
 
-// updateMinSeparator copies the first key of a node, with its CV, into its
+// propagateUpdates with updateSeparator copies the first key of a node, with its CV, into its
 // parent's separator, and goes on upwards while the node is a first child.
-TEST_CASE("/resolver/TempConflictBTree/UpdateMinSeparator") {
+TEST_CASE("/resolver/TempConflictBTree/PropagateUpdatesSeparator") {
 	// Leaves 0..2 under I0, 3..5 under I1. Each case removes the first entry
 	// of a leaf and lists the levels whose separator follows the new first
 	// key: 1 for the leaf's own, 2 also for its parent's.
@@ -1779,7 +1779,7 @@ TEST_CASE("/resolver/TempConflictBTree/UpdateMinSeparator") {
 		t.nodes().eraseAt(0, leaf);
 		std::vector<Entry>& entries = t.leaves[c.leaf].entries;
 		entries.erase(entries.begin());
-		Access::updateMinSeparator(t.tree, leaf);
+		Access::updateSeparator(t.tree, leaf);
 
 		const Entry& first = entries.front();
 		ASSERT_EQ(t.keys().compareKeys(asRef(first.begin), separatorOf(&leaf->header)), 0);
@@ -1798,7 +1798,7 @@ TEST_CASE("/resolver/TempConflictBTree/UpdateMinSeparator") {
 
 // The internal version copies the node's first separator; on the root, and
 // on a root leaf, there is nothing to update.
-TEST_CASE("/resolver/TempConflictBTree/UpdateMinSeparatorOfInternalNode") {
+TEST_CASE("/resolver/TempConflictBTree/PropagateUpdatesSeparatorOfInternalNode") {
 	TestTree t;
 	addGapLeaves(t, {3, 3, 3, 3, 3, 3});
 	t.build(3);
@@ -1816,17 +1816,17 @@ TEST_CASE("/resolver/TempConflictBTree/UpdateMinSeparatorOfInternalNode") {
 	i1->separators[first] = *key;
 	i1->separatorsCV[first] = 7;
 
-	Access::updateMinSeparator(t.tree, i1);
+	Access::updateSeparator(t.tree, i1);
 	ASSERT_EQ(t.keys().compareKeys(asRef(k), separatorOf(&i1->header)), 0);
 	ASSERT_EQ(separatorCVOf(&i1->header), 7);
 
 	const KeyRef rootFirst = root->separators[root->header.order[0]];
-	Access::updateMinSeparator(t.tree, root);
+	Access::updateSeparator(t.tree, root);
 	ASSERT(root->separators[root->header.order[0]].firstBlock == rootFirst.firstBlock);
 
 	TestTree single;
 	single.addLeaf({}, entriesFrom(10, 2, 1));
 	single.build(2);
-	Access::updateMinSeparator(single.tree, single.leaves[0].leaf);
+	Access::updateSeparator(single.tree, single.leaves[0].leaf);
 	checkTree(single);
 }

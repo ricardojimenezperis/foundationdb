@@ -144,20 +144,25 @@ private:
 			? needsSplit(reinterpret_cast<const LeafBlock*>(node))
 			: needsSplit(reinterpret_cast<const InternalBlock*>(node));
 	}
-	// Sets the separator of node in its parent to the first key of node, with
-	// its CV, and continues upwards while node is the first child of its
-	// parent. Requires node not to be empty.
-	void updateMinSeparator(LeafBlock* leaf);
-	void updateMinSeparator(InternalBlock* node);
-	// Called when node has just stopped needing a split. Decrements the
-	// parent's count of children needing a split and continues upwards
-	// while the parent also stops needing one.
-	void propagateSplitCleared(BNodeHeader* node);
-	void propagateSplitCleared(LeafBlock* node) {
-		propagateSplitCleared(&node->header);
+	// Propagates the changes of node to its ancestors in a single ascent,
+	// stopping when no change remains:
+	// - splitDelta is +1 when node has just started needing a split and -1
+	//   when it has just stopped. Each parent's count changes by splitDelta,
+	//   which carries on only while the parent changes state too.
+	// - updateSeparator sets the separator of node in its parent to the first
+	//   key of node, with its CV, and carries on while node is the first child
+	//   of its parent. Requires node not to be empty.
+	// - updateCV raises each parent's bound for node to node's maximum CV,
+	//   and carries on while the parent's maximum CV rises.
+	void propagateUpdates(BNodeHeader* node, int splitDelta,
+						  bool updateSeparator, bool updateCV);
+	void propagateUpdates(LeafBlock* node, int splitDelta,
+						  bool updateSeparator, bool updateCV) {
+		propagateUpdates(&node->header, splitDelta, updateSeparator, updateCV);
 	}
-	void propagateSplitCleared(InternalBlock* node) {
-		propagateSplitCleared(&node->header);
+	void propagateUpdates(InternalBlock* node, int splitDelta,
+						  bool updateSeparator, bool updateCV) {
+		propagateUpdates(&node->header, splitDelta, updateSeparator, updateCV);
 	}
 	// Splits node, updating the tree and split counters.
 	// If node is leaf, adjusts leaf and rank to preserve the position
