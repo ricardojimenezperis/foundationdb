@@ -1865,3 +1865,4 @@ TEST_CASE("/fdbserver/conflictset/reportedConflictingRanges") {
 }
 
 #include "By5ResolverTest.inc"
+#include "SmokeReplay.inc"
