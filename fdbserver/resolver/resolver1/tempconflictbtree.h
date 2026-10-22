@@ -169,8 +169,15 @@ private:
 	// Reclamation must keep the tree invariant that only the root leaf may be
 	// empty: leaves it empties, and internal nodes left without children, are
 	// removed before it returns.
+	//
+	// Reclaims the oldest age: the smallest CV among the oldest node and the
+	// oldest key block. reclaimCV_ advances to it, and every node and key
+	// block with exactly that CV is reclaimed, a node with its subtree.
+	// Returns false, changing nothing, if there is nothing to reclaim.
 	bool reclaimOldest();
-	void reclaimUntilAvail(int n);
+	// Reclaims ages until the pool has at least n available blocks. Returns
+	// false if there is nothing left to reclaim before reaching n.
+	bool reclaimUntilAvail(std::size_t n);
 	// Removes expired entries without releasing the leaf itself.
 	// The leaf may be left empty, which only the root leaf may stay: the
 	// caller must then remove it before the operation returns.
@@ -250,6 +257,9 @@ private:
 	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank,
 			   bool found, Version cv);
 	void normalizeRoot();
+	// Detaches node from the tree, or empties the tree if node is the root,
+	// and releases node and every node below it.
 	void removeSubtree(BNodeHeader* node);
+	// Releases node and every node below it, children first.
 	void removeSubtreeRec(BNodeHeader* node);
 };

@@ -67,6 +67,13 @@ bool TempConflictBTree::preserveLeftExterior(
 	if (!prevRank(leaf, rank, slot)) {
 		return false;
 	}
+	if (leaf->cv[slot] <= reclaimCV_) {
+		// Expired, so its key may be gone: erase it unread. Entries before it
+		// end before it, so none overlaps the write. eraseAt leaves the
+		// position at the next entry, the first to examine.
+		eraseAt(rank, leaf);
+		return false;
+	}
 	const RangeRef oldRef = leaf->ranges[slot];
 	const Version oldCV = leaf->cv[slot];
 	if (keyStore_.compareEnd(write.first, oldRef) < 0) {
@@ -94,7 +101,9 @@ void TempConflictBTree::eraseCoveredRanges(
 		std::size_t& rank) {
 	while (leaf != nullptr && rank < leaf->header.count) {
 		const auto slot = leaf->header.order[rank];
-		if (keyStore_.compareEnd(end, leaf->ranges[slot]) < 0) {
+		// An expired entry, whose key may be gone, is erased unread.
+		if (leaf->cv[slot] > reclaimCV_ &&
+				keyStore_.compareEnd(end, leaf->ranges[slot]) < 0) {
 			return;
 		}
 		eraseAt(rank, leaf);
@@ -203,9 +212,11 @@ bool TempConflictBTree::hasConflict(const ReadConflictRange& read) {
 		slotPresent = true;
 	} else {
 		slotPresent = prevRank(leaf, rank, slot);
-		if (slotPresent &&
-				keyStore_.compareEnd(read.begin, leaf->ranges[slot]) < 0 &&
-			leaf->cv[slot] > read.version) {
+		// Checking the CV first keeps the key of an expired entry, which
+		// may have been reclaimed, unread: the read is not older than the
+		// cut.
+		if (slotPresent && leaf->cv[slot] > read.version &&
+				keyStore_.compareEnd(read.begin, leaf->ranges[slot]) < 0) {
 			return true;
 		}
 		if (slotPresent) {
@@ -219,10 +230,16 @@ bool TempConflictBTree::hasConflict(const ReadConflictRange& read) {
 		}
 	}
 
-	while (slotPresent &&
-			keyStore_.compareBegin(read.end, leaf->ranges[slot]) > 0) {
-		if (leaf->cv[slot] > read.version) {
-			return true;
+	while (slotPresent) {
+		// Entries in leaves not cleaned on the way may have expired, and
+		// their keys been reclaimed: they are skipped unread.
+		if (leaf->cv[slot] > reclaimCV_) {
+			if (keyStore_.compareBegin(read.end, leaf->ranges[slot]) <= 0) {
+				break;
+			}
+			if (leaf->cv[slot] > read.version) {
+				return true;
+			}
 		}
 		slotPresent = nextRank(leaf, rank, slot);
 	}
@@ -433,18 +450,20 @@ void  TempConflictBTree::removeSubtree(BNodeHeader* node) {
 }
 
 bool TempConflictBTree::reclaimOldest() {
-	const Version minKeyCV = keyStore_.oldestCV().value_or(0);
-	const Version minNodeCV = nodeStore_.oldestCV().value_or(0);
-	if (minKeyCV == 0 && minNodeCV == 0) {
+	const std::optional<Version> keyCV = keyStore_.oldestCV();
+	const std::optional<Version> nodeCV = nodeStore_.oldestCV();
+	if (!keyCV && !nodeCV) {
 		return false;
 	}
-	const Version minCV = minKeyCV == 0 ? minNodeCV
-		: minNodeCV == 0 ? minKeyCV : std::min(minKeyCV, minNodeCV);
-	reclaimCV_ = minCV;
-	while (nodeStore_.oldestCV().value_or(0) == minCV) {
+	const Version minCV = !keyCV ? *nodeCV
+		: !nodeCV ? *keyCV : std::min(*keyCV, *nodeCV);
+	// Key blocks are reclaimed in allocation order, and a later block may
+	// hold only records older than the cut: the cut must not move back.
+	reclaimCV_ = std::max(reclaimCV_, minCV);
+	while (nodeStore_.oldestCV() == minCV) {
 		removeSubtree(nodeStore_.oldestNode());
 	}
-	while (keyStore_.oldestCV().value_or(0) == minCV) {
+	while (keyStore_.oldestCV() == minCV) {
 		keyStore_.reclaimOldest();
 	}
 	return true;

@@ -2,6 +2,7 @@
 #include "tempconflictbtree.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -58,6 +59,16 @@ struct TempConflictBTreeTestAccess {
 						 const StringRef& end, Version cv) {
 		t.addWrite({begin, end}, cv);
 	}
+	static bool reclaimOldest(TempConflictBTree& t) {
+		return t.reclaimOldest();
+	}
+	static bool reclaimUntilAvail(TempConflictBTree& t, std::size_t n) {
+		return t.reclaimUntilAvail(n);
+	}
+	static void removeSubtree(TempConflictBTree& t, BNodeHeader* node) {
+		t.removeSubtree(node);
+	}
+	static PagePool& pool(TempConflictBTree& t) { return t.pool_; }
 	static BNodeHeader* detach(TempConflictBTree& t, std::size_t rank,
 							   InternalBlock* node) {
 		return t.eraseAt(rank, node);
@@ -138,14 +149,26 @@ public:
 	BNodeStore& nodes() { return Access::nodes(tree); }
 
 	LeafBlock* addLeaf(const Bytes& lowerBound, std::vector<Entry> entries) {
-		LeafBlock* leaf = nodes().allocateLeaf(newestCV);
-		ASSERT(leaf != nullptr);
-
+		std::vector<RangeRef> ranges;
 		for (auto e = entries.rbegin(); e != entries.rend(); ++e) {
 			const std::optional<RangeRef> range =
 				keys().appendRange(asRef(e->begin), asRef(e->end), e->cv);
 			ASSERT(range.has_value());
-			nodes().insertAt(0, *range, e->cv, leaf);
+			ranges.insert(ranges.begin(), *range);
+		}
+		return addLeaf(lowerBound, std::move(entries), ranges);
+	}
+
+	// As above, with the entries' ranges already stored, so that a test can
+	// choose the order of the records in the key store.
+	LeafBlock* addLeaf(const Bytes& lowerBound, std::vector<Entry> entries,
+					   const std::vector<RangeRef>& ranges) {
+		ASSERT_EQ(entries.size(), ranges.size());
+		LeafBlock* leaf = nodes().allocateLeaf(newestCV);
+		ASSERT(leaf != nullptr);
+
+		for (std::size_t i = entries.size(); i > 0; --i) {
+			nodes().insertAt(0, ranges[i - 1], entries[i - 1].cv, leaf);
 		}
 		newestCV = std::max(newestCV, leaf->header.maxCV);
 
@@ -184,7 +207,8 @@ public:
 					const Bytes& separator = level[j - 1].lowerBound;
 					const std::optional<KeyRef> key = keys().appendKey(
 						reinterpret_cast<const std::byte*>(separator.data()),
-						static_cast<std::uint16_t>(separator.size()), 0);
+						static_cast<std::uint16_t>(separator.size()),
+						level[j - 1].cv);
 					ASSERT(key.has_value());
 					nodes().insertAt(0, *key, level[j - 1].node, level[j - 1].cv,
 									 internal);
@@ -592,11 +616,17 @@ Bytes readRecord(const KeyStore& store, const RangeRef& r, std::size_t start,
 }
 
 // The entries of a leaf, read back from the store, in key order.
+// Entries whose key block has been reclaimed are skipped without reading
+// them; they must have expired.
 std::vector<Entry> leafEntries(TestTree& t, const LeafBlock* leaf) {
 	std::vector<Entry> entries;
 	for (std::size_t r = 0; r < leaf->header.count; ++r) {
 		const auto slot = leaf->header.order[r];
 		const RangeRef& range = leaf->ranges[slot];
+		if (!t.keys().isValid(range)) {
+			ASSERT(leaf->cv[slot] <= t.tree.reclaimCV());
+			continue;
+		}
 		entries.push_back({readRecord(t.keys(), range, 0, range.beginLength),
 						   readRecord(t.keys(), range, range.endStart,
 									  range.endLength),
@@ -637,6 +667,11 @@ void checkSubtree(TestTree& t, const BNodeHeader* node,
 		// begin before it is below it. Entries are checked to be in order,
 		// so the entries on either side of the separator are enough.
 		const KeyRef& separator = internal->separators[slot];
+		// A separator whose key was reclaimed has expired and is not read.
+		if (!t.keys().isValid(separator)) {
+			ASSERT(internal->separatorsCV[slot] <= t.tree.reclaimCV());
+			continue;
+		}
 		if (r > 0 && before > 0) {
 			ASSERT(t.keys().compareKeys(asRef(entries[before - 1].begin), separator) < 0);
 		}
@@ -2432,3 +2467,521 @@ TEST_CASE("/resolver/TempConflictBTree/DetachEmptiesTree") {
 	ASSERT(t.nodes().oldestNode() == &t.leaves[0].leaf->header);
 }
 
+namespace {
+
+// A key of 2023 bytes starting as key(value): its point range is stored as a
+// record of 2024 bytes, which fills a key block on its own.
+Bytes longKey(unsigned value) {
+	Bytes k = key(value);
+	k.resize(2023, 'x');
+	return k;
+}
+
+Entry longPoint(unsigned value, Version cv) {
+	return {longKey(value), keyAfter(longKey(value)), cv};
+}
+
+std::vector<Entry> liveEntries(const std::vector<Entry>& entries, Version cut) {
+	std::vector<Entry> live;
+	for (const Entry& e : entries) {
+		if (e.cv > cut) {
+			live.push_back(e);
+		}
+	}
+	return live;
+}
+
+// Takes the blocks the pool has free, writing over them, so that stale
+// references to reclaimed keys cannot keep working by accident.
+void reuseFreeBlocks(TestTree& t) {
+	PagePool& pool = Access::pool(t.tree);
+	std::vector<std::byte*> blocks;
+	for (std::byte* b = pool.allocateBlock(); b != nullptr; b = pool.allocateBlock()) {
+		std::memset(b, 0xa5, pool.blockSize());
+		blocks.push_back(b);
+	}
+	for (std::byte* b : blocks) {
+		pool.releaseBlock(b);
+	}
+}
+
+// root -> [L0, L1, L2]. L1 starts with a live entry, so its separator does
+// not expire, followed by two entries with CVs firstDead and secondDead
+// whose keys fill the first two key blocks. Every other key, and every
+// node, is newer. L2's lower bound is below its first key.
+std::vector<Entry> deadNeighbourTree(TestTree& t, Version firstDead, Version secondDead) {
+	const Entry d1 = longPoint(22, firstDead);
+	const Entry d2 = longPoint(24, secondDead);
+	const std::optional<RangeRef> r1 =
+		t.keys().appendRange(asRef(d1.begin), asRef(d1.end), d1.cv);
+	const std::optional<RangeRef> r2 =
+		t.keys().appendRange(asRef(d2.begin), asRef(d2.end), d2.cv);
+	ASSERT(r1.has_value() && r2.has_value());
+	ASSERT(r1->firstBlock != r2->firstBlock);
+	t.addLeaf({}, entriesFrom(10, 3, 50));
+	const Entry a = entriesFrom(20, 1, 60).front();
+	const std::optional<RangeRef> ra =
+		t.keys().appendRange(asRef(a.begin), asRef(a.end), a.cv);
+	ASSERT(ra.has_value());
+	t.addLeaf(key(20), {a, d1, d2}, {*ra, *r1, *r2});
+	t.addLeaf(key(28), entriesFrom(30, 3, 70));
+	t.build(3);
+	return modelEntries(t);
+}
+
+// Reclaims the two key blocks of the dead entries and reuses them.
+void reclaimDeadKeys(TestTree& t) {
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 6);
+	ASSERT(!t.keys().isValid(t.leaves[1].leaf->ranges[t.leaves[1].leaf->header.order[1]]));
+	reuseFreeBlocks(t);
+}
+
+} // namespace
+
+// A read that starts in L0 and runs into L1 crosses its dead entries without
+// reading their keys.
+TEST_CASE("/resolver/TempConflictBTree/HasConflictSkipsReclaimedKeysToTheRight") {
+	TestTree t;
+	const std::vector<Entry> model = deadNeighbourTree(t, 5, 6);
+	reclaimDeadKeys(t);
+	ASSERT(!t.hasConflict(key(13), key(26), 100));
+	ASSERT(t.hasConflict(key(13), key(26), 55));
+	checkSameEntries(liveEntries(checkTree(t), 6), liveEntries(model, 6));
+}
+
+// A read that starts in L2, below its first key, finds a dead entry as the
+// previous one and does not read its key.
+TEST_CASE("/resolver/TempConflictBTree/HasConflictSkipsReclaimedPreviousKey") {
+	TestTree t;
+	const std::vector<Entry> model = deadNeighbourTree(t, 5, 6);
+	reclaimDeadKeys(t);
+	ASSERT(!t.hasConflict(key(29), key(30), 6));
+	ASSERT(t.hasConflict(key(29), key(31), 6));
+	checkSameEntries(liveEntries(checkTree(t), 6), liveEntries(model, 6));
+}
+
+// A write from L0 into L2 erases what it covers, dead entries included,
+// without reading reclaimed keys.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteOverReclaimedKeys") {
+	TestTree t;
+	std::vector<Entry> model = liveEntries(deadNeighbourTree(t, 5, 6), 6);
+	reclaimDeadKeys(t);
+	checkWrite(t, model, key(13), key(31), 200);
+	checkWrite(t, model, key(21), key(23), 201);
+}
+
+// A write that starts in L2, below its first key, has a dead entry of L1 as
+// the previous one: it is erased unread, and the write goes on from there.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteAfterReclaimedPreviousKey") {
+	TestTree t;
+	std::vector<Entry> model = liveEntries(deadNeighbourTree(t, 5, 6), 6);
+	reclaimDeadKeys(t);
+	checkWrite(t, model, key(29), key(30), 200);
+	ASSERT_EQ(leafEntries(t, t.leaves[1].leaf).size(), 1);
+	checkWrite(t, model, key(25), key(29), 201);
+}
+
+// A root leaf whose entries have all expired is emptied by the search: a
+// read finds neither a previous entry nor one at its position.
+TEST_CASE("/resolver/TempConflictBTree/HasConflictInExpiredRootLeaf") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 2, 0), {5, 6}));
+	t.build(2);
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(!t.hasConflict(key(11), key(20), 10));
+	ASSERT_EQ(t.leaves[0].leaf->header.count, 0);
+	ASSERT(Access::root(t.tree) == &t.leaves[0].leaf->header);
+	checkTree(t);
+}
+
+// Key blocks are reclaimed in allocation order, and a later block can hold
+// only older records. Reclaiming it must not move the cut back, or entries
+// whose keys are gone would count as live again.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimCVNeverDecreases") {
+	TestTree t;
+	const std::vector<Entry> model = deadNeighbourTree(t, 6, 5);
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 6);
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 6);
+	reuseFreeBlocks(t);
+	ASSERT(!t.hasConflict(key(21), key(25), 6));
+	checkSameEntries(liveEntries(checkTree(t), 6), liveEntries(model, 6));
+}
+
+
+namespace {
+
+std::vector<BNodeHeader*> ageListOf(TestTree& t) {
+	std::vector<BNodeHeader*> nodes;
+	for (BNodeHeader* n = t.nodes().oldestNode(); n != nullptr; n = n->ageNext) {
+		nodes.push_back(n);
+	}
+	return nodes;
+}
+
+void collectNodes(BNodeHeader* node, std::vector<BNodeHeader*>& nodes) {
+	nodes.push_back(node);
+	if (node->kind == BNodeKind::Internal) {
+		auto* internal = reinterpret_cast<InternalBlock*>(node);
+		for (std::size_t r = 0; r < internal->header.count; ++r) {
+			collectNodes(childAt(internal, r), nodes);
+		}
+	}
+}
+
+std::vector<BNodeHeader*> treeNodes(TestTree& t) {
+	std::vector<BNodeHeader*> nodes;
+	if (Access::root(t.tree) != nullptr) {
+		collectNodes(Access::root(t.tree), nodes);
+	}
+	return nodes;
+}
+
+// The age list holds exactly the nodes in the tree.
+void checkAgeList(TestTree& t) {
+	std::vector<BNodeHeader*> listed = ageListOf(t);
+	std::vector<BNodeHeader*> reachable = treeNodes(t);
+	std::sort(listed.begin(), listed.end());
+	std::sort(reachable.begin(), reachable.end());
+	ASSERT(listed == reachable);
+}
+
+bool orderIsIdentity(const InternalBlock* node) {
+	for (std::size_t r = 0; r < node->header.count; ++r) {
+		if (node->header.order[r] != r) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// Removes the subtree under node and checks that its nodes, and any
+// ancestor left empty or replaced as root, are gone from the age list and
+// back in the pool, and that the rest of the tree holds every other entry.
+void removeAndCheck(TestTree& t, BNodeHeader* node) {
+	std::vector<BNodeHeader*> removed;
+	collectNodes(node, removed);
+	std::vector<LeafBlock*> leaves;
+	collectLeaves(node, leaves);
+	const std::size_t nodesBefore = ageListOf(t).size();
+	const std::size_t available = Access::pool(t.tree).availableBlocks();
+	Access::removeSubtree(t.tree, node);
+	for (LeafModel& l : t.leaves) {
+		if (std::find(leaves.begin(), leaves.end(), l.leaf) != leaves.end()) {
+			l.entries.clear();
+		}
+	}
+	const std::vector<BNodeHeader*> listed = ageListOf(t);
+	for (BNodeHeader* r : removed) {
+		ASSERT(std::find(listed.begin(), listed.end(), r) == listed.end());
+	}
+	ASSERT(listed.size() <= nodesBefore - removed.size());
+	ASSERT_EQ(Access::pool(t.tree).availableBlocks(),
+			  available + nodesBefore - listed.size());
+	checkAgeList(t);
+	checkSameEntries(checkTree(t), modelEntries(t));
+}
+
+} // namespace
+
+TEST_CASE("/resolver/TempConflictBTree/RemoveSubtreeOfRootLeaf") {
+	TestTree t;
+	t.addLeaf({}, entriesFrom(10, 2, 1));
+	t.build(2);
+	removeAndCheck(t, Access::root(t.tree));
+	ASSERT(Access::root(t.tree) == nullptr);
+	ASSERT(t.nodes().oldestNode() == nullptr);
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RemoveSubtreeOfWholeTree") {
+	TestTree t;
+	spacedRanges(t, 9, 2, 3);
+	ASSERT_EQ(treeNodes(t).size(), 13);
+	removeAndCheck(t, Access::root(t.tree));
+	ASSERT(Access::root(t.tree) == nullptr);
+	ASSERT(t.nodes().oldestNode() == nullptr);
+}
+
+// Leaves and internal nodes at the first, middle and last ranks of parents
+// whose physical slots are not their ranks.
+TEST_CASE("/resolver/TempConflictBTree/RemoveSubtreeAtEachPosition") {
+	for (bool internal : {false, true}) {
+		for (std::size_t rank = 0; rank < 3; ++rank) {
+			TestTree t;
+			spacedRanges(t, 9, 1, 3);
+			InternalBlock* root = rootNode(t);
+			InternalBlock* parent =
+				internal ? root : reinterpret_cast<InternalBlock*>(childAt(root, 1));
+			ASSERT(!orderIsIdentity(parent));
+			removeAndCheck(t, childAt(parent, rank));
+			ASSERT_EQ(parent->header.count, 2);
+		}
+	}
+}
+
+// Removing the last child of a node removes the node too, and the root left
+// with one child is replaced by it.
+TEST_CASE("/resolver/TempConflictBTree/RemoveSubtreeCollapsesRoot") {
+	// root -> [I0 -> [L0, L1], I1 -> [L2]].
+	TestTree t;
+	spacedRanges(t, 3, 1, 2);
+	InternalBlock* i0 = t.leaves[0].leaf->parent();
+	const std::size_t nodes = ageListOf(t).size();
+	removeAndCheck(t, &t.leaves[2].leaf->header);
+	// L2, I1 left empty, and the root replaced by I0.
+	ASSERT_EQ(ageListOf(t).size(), nodes - 3);
+	ASSERT(Access::root(t.tree) == &i0->header);
+	ASSERT(t.leaves[1].leaf->right == nullptr);
+}
+
+// A removed child that needed a split is no longer counted above.
+TEST_CASE("/resolver/TempConflictBTree/RemoveSubtreeUpdatesSplitCounts") {
+	TestTree t;
+	InternalBlock* i0 = fullLeafUnderCriticalNode(t);
+	InternalBlock* root = rootNode(t);
+	removeAndCheck(t, &t.leaves[1].leaf->header);
+	ASSERT_EQ(i0->header.childrenNeedingSplit, 0);
+	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
+}
+
+TEST_CASE("/resolver/TempConflictBTree/ReclaimOldestWithNothingToReclaim") {
+	TestTree t;
+	const std::size_t available = Access::pool(t.tree).availableBlocks();
+	ASSERT(!Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 0);
+	ASSERT_EQ(Access::pool(t.tree).availableBlocks(), available);
+}
+
+// Only key blocks to reclaim. The record fills its block exactly, so the
+// store opens a new, empty block, with CV 0: an older age than the cut,
+// which reclaiming leaves where it is.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimOldestOnlyKeys") {
+	TestTree t;
+	const std::size_t initial = Access::pool(t.tree).availableBlocks();
+	const Entry e = longPoint(10, 7);
+	ASSERT(t.keys().appendRange(asRef(e.begin), asRef(e.end), e.cv).has_value());
+	ASSERT_EQ(Access::pool(t.tree).availableBlocks(), initial - 2);
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 7);
+	ASSERT_EQ(*t.keys().oldestCV(), 0);
+	ASSERT_EQ(Access::pool(t.tree).availableBlocks(), initial - 1);
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 7);
+	ASSERT(!t.keys().oldestCV().has_value());
+	ASSERT_EQ(Access::pool(t.tree).availableBlocks(), initial);
+	ASSERT(!Access::reclaimOldest(t.tree));
+}
+
+// Only nodes to reclaim: an empty root leaf, with CV 0, which is a CV like
+// any other.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimOldestOnlyNodes") {
+	TestTree t;
+	t.addLeaf({}, {});
+	t.build(2);
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 0);
+	ASSERT(Access::root(t.tree) == nullptr);
+	ASSERT(t.nodes().oldestNode() == nullptr);
+	ASSERT(!Access::reclaimOldest(t.tree));
+}
+
+// The oldest key block is older than every node: only it goes.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimOldestKeysFirst") {
+	TestTree t;
+	const std::vector<Entry> model = deadNeighbourTree(t, 5, 6);
+	const std::vector<BNodeHeader*> nodes = ageListOf(t);
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 5);
+	ASSERT(ageListOf(t) == nodes);
+	ASSERT_EQ(*t.keys().oldestCV(), 6);
+	reuseFreeBlocks(t);
+	checkSameEntries(liveEntries(checkTree(t), 5), liveEntries(model, 5));
+}
+
+namespace {
+
+// Leaves with entries of the given CVs, short keys all in one key block,
+// under a single root. A leaf's CV is the largest of its entries and of the
+// leaves before it.
+std::vector<Entry> agedLeaves(TestTree& t, const std::vector<Version>& cvs) {
+	for (std::size_t i = 0; i < cvs.size(); ++i) {
+		const unsigned first = 10 + 10 * static_cast<unsigned>(i);
+		t.addLeaf(i == 0 ? Bytes{} : key(first),
+				  withCVs(entriesFrom(first, 2, 0), {cvs[i], cvs[i]}));
+	}
+	t.build(cvs.size());
+	return modelEntries(t);
+}
+
+} // namespace
+
+// The oldest node is older than the key block: only it goes.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimOldestNodesFirst") {
+	TestTree t;
+	const std::vector<Entry> model = agedLeaves(t, {10, 20, 30});
+	const Version keyCV = *t.keys().oldestCV();
+	ASSERT_EQ(keyCV, 30);
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 10);
+	ASSERT_EQ(*t.keys().oldestCV(), keyCV);
+	ASSERT_EQ(rootNode(t)->header.count, 2);
+	ASSERT(t.leaves[1].leaf->left == nullptr);
+	checkAgeList(t);
+	checkSameEntries(liveEntries(checkTree(t), 10), liveEntries(model, 10));
+}
+
+// A tie between the stores, and several nodes of the same age: one call
+// reclaims all of them, and the root left with one child is replaced.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimOldestTiesAndEqualAges") {
+	TestTree t;
+	const Entry k = longPoint(200, 10);
+	ASSERT(t.keys().appendRange(asRef(k.begin), asRef(k.end), k.cv).has_value());
+	const std::vector<Entry> model = agedLeaves(t, {10, 10, 30});
+	ASSERT_EQ(*t.keys().oldestCV(), 10);
+	ASSERT_EQ(*t.nodes().oldestCV(), 10);
+	const std::size_t available = Access::pool(t.tree).availableBlocks();
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 10);
+	ASSERT_EQ(*t.keys().oldestCV(), 30);
+	// Two leaves, the old root and one key block.
+	ASSERT_EQ(Access::pool(t.tree).availableBlocks(), available + 4);
+	ASSERT(Access::root(t.tree) == &t.leaves[2].leaf->header);
+	checkAgeList(t);
+	checkSameEntries(liveEntries(checkTree(t), 10), liveEntries(model, 10));
+}
+
+// Each call reclaims one age only; later ages stay for later calls, and the
+// cut only moves forward.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimOldestOneAgeAtATime") {
+	TestTree t;
+	const std::vector<Entry> model = agedLeaves(t, {10, 20, 30});
+	for (Version cut : {10, 20}) {
+		ASSERT(Access::reclaimOldest(t.tree));
+		ASSERT_EQ(t.tree.reclaimCV(), cut);
+		ASSERT(*t.nodes().oldestCV() > cut);
+		checkAgeList(t);
+		checkSameEntries(liveEntries(checkTree(t), cut), liveEntries(model, cut));
+	}
+	// The last leaf, the root and the key block share the last age.
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 30);
+	ASSERT(Access::root(t.tree) == nullptr);
+	ASSERT(!t.keys().oldestCV().has_value());
+	ASSERT(!Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 30);
+}
+
+// A node's CV is a conservative bound: a leaf whose entries are older keeps
+// them, expired, until the cut reaches the leaf's CV.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimOldestWaitsForConservativeCV") {
+	TestTree t;
+	const Entry k = longPoint(200, 15);
+	ASSERT(t.keys().appendRange(asRef(k.begin), asRef(k.end), k.cv).has_value());
+	const std::vector<Entry> model = agedLeaves(t, {20, 15, 30});
+	LeafBlock* leaf = t.leaves[1].leaf;
+	ASSERT_EQ(leaf->header.maxCV, 20);
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 15);
+	ASSERT(leaf->parent() != nullptr);
+	ASSERT_EQ(leaf->header.count, 2);
+	checkSameEntries(liveEntries(checkTree(t), 15), liveEntries(model, 15));
+	ASSERT(Access::reclaimOldest(t.tree));
+	ASSERT_EQ(t.tree.reclaimCV(), 20);
+	checkAgeList(t);
+	ASSERT(Access::root(t.tree) == &t.leaves[2].leaf->header);
+	checkSameEntries(liveEntries(checkTree(t), 20), liveEntries(model, 20));
+}
+
+TEST_CASE("/resolver/TempConflictBTree/ReclaimUntilAvailCases") {
+	// Enough already, or n == 0: nothing is reclaimed.
+	for (bool zero : {false, true}) {
+		TestTree t;
+		agedLeaves(t, {10, 20, 30});
+		const std::size_t available = Access::pool(t.tree).availableBlocks();
+		ASSERT(Access::reclaimUntilAvail(t.tree, zero ? 0 : available));
+		ASSERT_EQ(t.tree.reclaimCV(), 0);
+		ASSERT_EQ(Access::pool(t.tree).availableBlocks(), available);
+	}
+	// One age is enough, then two are needed.
+	for (std::size_t more : {std::size_t{1}, std::size_t{2}}) {
+		TestTree t;
+		const std::vector<Entry> model = agedLeaves(t, {10, 20, 30});
+		const std::size_t available = Access::pool(t.tree).availableBlocks();
+		ASSERT(Access::reclaimUntilAvail(t.tree, available + more));
+		ASSERT_EQ(t.tree.reclaimCV(), more == 1 ? 10 : 20);
+		// L0; then L1 too, and the root, replaced by L2.
+		ASSERT_EQ(Access::pool(t.tree).availableBlocks(),
+				  available + (more == 1 ? 1 : 3));
+		checkAgeList(t);
+		checkSameEntries(liveEntries(checkTree(t), t.tree.reclaimCV()),
+						 liveEntries(model, t.tree.reclaimCV()));
+	}
+	// A single age frees more than asked for: the whole tree.
+	{
+		TestTree t;
+		agedLeaves(t, {10, 10, 10});
+		const std::size_t available = Access::pool(t.tree).availableBlocks();
+		ASSERT(Access::reclaimUntilAvail(t.tree, available + 1));
+		ASSERT_EQ(Access::pool(t.tree).availableBlocks(), available + 5);
+		ASSERT(Access::root(t.tree) == nullptr);
+	}
+	// More than everything: reclaims all and reports failure.
+	{
+		TestTree t;
+		agedLeaves(t, {10, 20, 30});
+		const std::size_t available = Access::pool(t.tree).availableBlocks();
+		ASSERT(!Access::reclaimUntilAvail(t.tree, available + 100));
+		ASSERT_EQ(Access::pool(t.tree).availableBlocks(), available + 5);
+		ASSERT(Access::root(t.tree) == nullptr);
+		ASSERT(!t.keys().oldestCV().has_value());
+	}
+}
+
+// Writes with long keys in a small pool, so that every write may reclaim,
+// and explicit reclamations between them. After each operation the
+// structure holds the live entries of the model; every 50 operations, and
+// at the end, the conflicts match too. Freed blocks are reused so that
+// stale references fail.
+TEST_CASE("/resolver/TempConflictBTree/ReclaimAndWriteAgainstModel") {
+	TestTree t(4 * PageSize);
+	std::vector<Entry> model;
+	std::uint32_t state = 99;
+	auto next = [&state]() {
+		state = state * 1103515245u + 12345u;
+		return state >> 8;
+	};
+	auto keyOf = [](unsigned v) {
+		Bytes k = wideKey(v);
+		k.resize(3 + v % 300, static_cast<uint8_t>('a' + v % 26));
+		return k;
+	};
+	unsigned reclaims = 0;
+	for (unsigned n = 0; n < 1500; ++n) {
+		const Version cv = 1000 + n;
+		if (n % 7 == 6) {
+			reclaims += Access::reclaimOldest(t.tree);
+		} else {
+			const unsigned begin = next() % 2000;
+			const unsigned length = 1 + next() % (n % 10 == 0 ? 200 : 6);
+			const Bytes b = keyOf(begin);
+			const Bytes e = keyOf(begin + length);
+			model = applyWrite(model, b, e, cv);
+			Access::addWrite(t.tree, asRef(b), asRef(e), cv);
+		}
+		const Version cut = t.tree.reclaimCV();
+		model = liveEntries(model, cut);
+		if (n % 50 == 49) {
+			reuseFreeBlocks(t);
+			checkSameEntries(liveEntries(checkTree(t), cut), model);
+		} else {
+			checkSameEntries(liveEntries(checkStructure(t), cut), model);
+		}
+		checkAgeList(t);
+	}
+	ASSERT(reclaims > 0);
+	ASSERT(t.tree.reclaimCV() > 1000);
+	checkSameEntries(liveEntries(checkTree(t), t.tree.reclaimCV()), model);
+}

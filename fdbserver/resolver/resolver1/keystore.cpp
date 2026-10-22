@@ -231,6 +231,7 @@ std::size_t KeyStore::blockSize() const {
 }
 
 int KeyStore::compareKeys(const KeyRef& kr1, const KeyRef& kr2) const {
+	assert(isValid(kr1) && isValid(kr2));
 	const KeyBlockHeader* block1=kr1.firstBlock;
 	const KeyBlockHeader* block2=kr2.firstBlock;
 	std::size_t bytes1 = std::min<std::size_t>(kr1.keyLength, blockSize_ - kr1.keyOffset);
@@ -275,6 +276,7 @@ int KeyStore::compareKeys(const KeyRef& kr1, const KeyRef& kr2) const {
 }
 
 int KeyStore::compareKeys(const StringRef& key, const KeyRef& stored) const {
+	assert(isValid(stored));
 	return compareFrom(key, stored.firstBlock, stored.keyOffset, stored.keyLength);
 }
 
@@ -442,10 +444,12 @@ KeyRef KeyStore::beginKey(const RangeRef& ref) const {
 }
 
 int KeyStore::compareBegin(const StringRef& key, const RangeRef& stored) const {
+	assert(isValid(stored));
 	return compareAt(key, stored, 0, stored.beginLength);
 }
 
 int KeyStore::compareEnd(const StringRef& key, const RangeRef& stored) const {
+	assert(isValid(stored));
 	return compareAt(key, stored, stored.endStart, stored.endLength);
 }
 
