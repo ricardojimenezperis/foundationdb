@@ -39,59 +39,70 @@ void TempConflictBTree::addWrite(
 		split(nodeNeedsSplit, leaf, rank, found, cv);
 	}
 	auto range = keyStore_.appendRange(write.first, write.second, cv);
-	if (leaf != nullptr) {
-		if (preserveLeftExterior(write, *range, cv, found, leaf, rank)) {
-			return;
-		}
+	if (leaf == nullptr) {
+		leaf = createRootLeaf(cv);
+		insertAt(rank, *range, cv, leaf);
+		return;
+	}
+	if (insertWithLeftExterior(write, *range, cv, found, leaf, rank)) {
+		return;
+	}
+	// The write is in its leaf. From the entry after it on, possibly in later
+	// leaves, what it covers is erased and the last range it overlaps keeps
+	// its right exterior; moving on does not change where the write went.
+	std::size_t slot = 0;
+	if (nextRank(leaf, rank, slot)) {
 		eraseCoveredRanges(write.second, leaf, rank);
 		preserveRightExterior(write.second, leaf, rank);
 	}
-	if (leaf == nullptr) {
-		leaf = createRootLeaf(cv);
-		rank = 0;
-	}
-	insertAt(rank, *range, cv, leaf);
 }
 
-bool TempConflictBTree::preserveLeftExterior(
+bool TempConflictBTree::insertWithLeftExterior(
 		const std::pair<StringRef, StringRef>& write,
 		const RangeRef& range,
 		Version cv,
 		bool found,
 		LeafBlock*& leaf,
 		std::size_t& rank) {
-	if (found) {
-		return false;
-	}
+	// Every insertion of a write goes into the leaf findKey reached, which
+	// split left with room for two entries. Other leaves are only trimmed in
+	// place or lose entries.
+	assert(leaf->header.freeSlotCount() >= 2);
+	LeafBlock* previousLeaf = leaf;
+	std::size_t previous = rank;
 	std::size_t slot = 0;
-	if (!prevRank(leaf, rank, slot)) {
-		return false;
-	}
-	if (leaf->cv[slot] <= reclaimCV_) {
-		// Expired, so its key may be gone: erase it unread. Entries before it
-		// end before it, so none overlaps the write. eraseAt leaves the
-		// position at the next entry, the first to examine.
-		eraseAt(rank, leaf);
-		return false;
-	}
-	const RangeRef oldRef = leaf->ranges[slot];
-	const Version oldCV = leaf->cv[slot];
-	if (keyStore_.compareEnd(write.first, oldRef) < 0) {
+	const bool hasPrevious = !found && prevRank(previousLeaf, previous, slot);
+	// An expired range is not read: its key may have been reclaimed.
+	const bool expired = hasPrevious && previousLeaf->cv[slot] <= reclaimCV_;
+	if (hasPrevious && !expired &&
+			keyStore_.compareEnd(write.first, previousLeaf->ranges[slot]) < 0) {
 		// The previous range overlaps the start of the write: keep its left
-		// exterior with its original CV.
+		// exterior with its original CV, in its place.
+		const RangeRef oldRef = previousLeaf->ranges[slot];
+		const Version oldCV = previousLeaf->cv[slot];
 		auto left = keyStore_.appendRange(oldRef, write.first, oldCV);
-		leaf->ranges[slot] = *left;
+		previousLeaf->ranges[slot] = *left;
 		if (keyStore_.compareEnd(write.second, oldRef) < 0) {
-			// The write lies inside that range: keep its right exterior too.
+			// The write lies inside that range: its right exterior follows the
+			// write, in the same leaf, even when the range is in the leaf
+			// before. Live entries are disjoint, so the leaf's own entries
+			// begin after the range ends.
 			auto right = keyStore_.appendRange(write.second, oldRef, oldCV);
-			++rank;
 			insertAt(rank, range, cv, leaf);
 			++rank;
 			insertAt(rank, *right, oldCV, leaf);
 			return true;
 		}
 	}
-	nextRank(leaf, rank, slot);
+	insertAt(rank, range, cv, leaf);
+	if (expired) {
+		// Erased only now, so that its leaf, if it is this one, cannot be left
+		// empty. Entries before it end before it, so none overlaps the write.
+		// eraseAt leaves the position at the next entry: the write.
+		eraseAt(previous, previousLeaf);
+		leaf = previousLeaf;
+		rank = previous;
+	}
 	return false;
 }
 
@@ -99,7 +110,10 @@ void TempConflictBTree::eraseCoveredRanges(
 		const StringRef& end,
 		LeafBlock*& leaf,
 		std::size_t& rank) {
-	while (leaf != nullptr && rank < leaf->header.count) {
+	// The write is already in the tree, before the position, so erasing cannot
+	// empty it.
+	assert(leaf != nullptr);
+	while (rank < leaf->header.count) {
 		const auto slot = leaf->header.order[rank];
 		// An expired entry, whose key may be gone, is erased unread.
 		if (leaf->cv[slot] > reclaimCV_ &&

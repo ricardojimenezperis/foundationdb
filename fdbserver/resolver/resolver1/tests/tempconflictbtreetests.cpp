@@ -2,7 +2,9 @@
 #include "tempconflictbtree.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <map>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -2065,21 +2067,30 @@ TEST_CASE("/resolver/TempConflictBTree/AddWriteToEmptyTree") {
 	checkWrite(t, model, key(15), key(30), 6);
 }
 
-// A write ending inside the first range of a leaf, starting in the previous
-// leaf, trims that range and is inserted first in the leaf. The separators
-// of the leaf and of its parent become the start of the write.
+// A write that starts after the last entry of a leaf and ends inside the
+// first range of the next leaf goes into the leaf findKey reached, after its
+// last entry. The range of the next leaf keeps its right exterior, so the
+// separators of that leaf and of its parent become the new start, with the
+// range's CV.
 TEST_CASE("/resolver/TempConflictBTree/AddWriteTrimsFirstRangeOfLeaf") {
 	TestTree t;
 	std::vector<Entry> model = spacedRanges(t, 6, 3, 3);
+	LeafBlock* previous = t.leaves[2].leaf;
 	LeafBlock* leaf = t.leaves[3].leaf;
 	InternalBlock* parent = leaf->parent();
 	ASSERT(childAt(parent, 0) == &leaf->header);
+	const Version cv = t.leaves[3].entries.front().cv;
 	checkWrite(t, model, wideKey(275), wideKey(285), 1000);
+	ASSERT_EQ(previous->header.count, 4);
+	const auto last = previous->header.order[3];
+	ASSERT_EQ(t.keys().compareBegin(asRef(wideKey(275)), previous->ranges[last]), 0);
+	ASSERT_EQ(previous->cv[last], 1000);
 	ASSERT(leaf->parent() == parent);
-	ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(275)), separatorOf(&leaf->header)), 0);
-	ASSERT_EQ(separatorCVOf(&leaf->header), 1000);
-	ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(275)), separatorOf(&parent->header)), 0);
-	ASSERT_EQ(separatorCVOf(&parent->header), 1000);
+	ASSERT_EQ(leaf->header.count, 3);
+	ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(285)), separatorOf(&leaf->header)), 0);
+	ASSERT_EQ(separatorCVOf(&leaf->header), cv);
+	ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(285)), separatorOf(&parent->header)), 0);
+	ASSERT_EQ(separatorCVOf(&parent->header), cv);
 }
 
 // Trimming the first range of a leaf on its own moves the separators to the
@@ -2984,4 +2995,158 @@ TEST_CASE("/resolver/TempConflictBTree/ReclaimAndWriteAgainstModel") {
 	ASSERT(reclaims > 0);
 	ASSERT(t.tree.reclaimCV() > 1000);
 	checkSameEntries(liveEntries(checkTree(t), t.tree.reclaimCV()), model);
+}
+
+namespace {
+
+Entry wideRange(unsigned begin, unsigned end, Version cv) {
+	return {wideKey(begin), wideKey(end), cv};
+}
+
+} // namespace
+
+// A key absent from a leaf, past its last entry, has its position at the end
+// of that leaf. The write goes there, never into the next leaf, even when that
+// leaf is full: the leaf findKey reached grows and splits instead.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteAtEndOfLeafBeforeFullLeaf") {
+	TestTree t;
+	t.addLeaf({}, wideEntriesFrom(10, 3, 1));
+	t.addLeaf(wideKey(1000), wideEntriesFrom(1000, LeafCapacity, 1));
+	t.addLeaf(wideKey(2000), wideEntriesFrom(2000, 3, 1));
+	t.build(3);
+	std::vector<Entry> model = modelEntries(t);
+	LeafBlock* full = t.leaves[1].leaf;
+	ASSERT(!full->header.hasSpace());
+	Version cv = 1000;
+	for (unsigned k = 17; k < 17 + 2 * LeafCapacity; k += 2) {
+		checkWrite(t, model, wideKey(k), keyAfter(wideKey(k)), cv++);
+		ASSERT_EQ(full->header.count, LeafCapacity);
+	}
+	// The first leaf has split along the way.
+	ASSERT(rootNode(t)->header.count > 3);
+}
+
+// A key found at the start of a range: the write goes before it, and the
+// range keeps its right exterior with its CV, or goes if the write covers it.
+// Also at the first entry of a leaf, whose separator follows.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteAtFoundKey") {
+	struct Case {
+		unsigned begin;
+		unsigned end;
+	};
+	for (const Case c : {Case{120, 125}, Case{140, 155}, Case{280, 283}, Case{280, 295}}) {
+		TestTree t;
+		std::vector<Entry> model = spacedRanges(t, 6, 3, 3);
+		checkWrite(t, model, wideKey(c.begin), wideKey(c.end), 1000);
+	}
+}
+
+// The previous range is in the leaf before and reaches past the separator of
+// the leaf findKey reached. It is trimmed in place; what the write inserts,
+// the write and, when the write lies inside the range, its right exterior,
+// goes first in the leaf findKey reached.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteInsideRangeOfPreviousLeaf") {
+	for (unsigned end : {140u, 155u}) {
+		TestTree t;
+		t.addLeaf({}, {wideRange(100, 110, 5), wideRange(120, 150, 6)});
+		t.addLeaf(wideKey(130), {wideRange(160, 170, 7), wideRange(180, 190, 8)});
+		t.addLeaf(wideKey(200), {wideRange(200, 210, 9)});
+		t.build(3);
+		std::vector<Entry> model = modelEntries(t);
+		LeafBlock* previous = t.leaves[0].leaf;
+		LeafBlock* leaf = t.leaves[1].leaf;
+		checkWrite(t, model, wideKey(135), wideKey(end), 1000);
+		ASSERT_EQ(previous->header.count, 2);
+		ASSERT_EQ(leaf->header.count, end == 140 ? 4 : 3);
+		ASSERT_EQ(t.keys().compareKeys(asRef(wideKey(135)), separatorOf(&leaf->header)), 0);
+	}
+}
+
+// A write from the end of a leaf across a whole internal node and into the
+// first range after it: the leaves and the node go, and the write stays in
+// the leaf it started from.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteRemovesSubtreeFromEndOfLeaf") {
+	TestTree t;
+	std::vector<Entry> model = spacedRanges(t, 9, 3, 3);
+	InternalBlock* root = rootNode(t);
+	LeafBlock* leaf = t.leaves[2].leaf;
+	ASSERT_EQ(root->header.count, 3);
+	checkWrite(t, model, wideKey(275), wideKey(470), 1000);
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT_EQ(leaf->header.count, 4);
+	checkAgeList(t);
+}
+
+// A leaf with exactly two free slots does not need a split, and a write
+// inside one of its ranges takes both: the write and its right exterior.
+// The next such write finds the leaf full and splits it first.
+TEST_CASE("/resolver/TempConflictBTree/AddWriteInsideRangeTakesTwoSlots") {
+	TestTree t;
+	std::vector<Entry> entries;
+	for (unsigned i = 0; i < LeafCapacity - 2; ++i) {
+		entries.push_back(wideRange(100 + 20 * i, 110 + 20 * i, 1));
+	}
+	t.addLeaf({}, entries);
+	t.build(2);
+	std::vector<Entry> model = modelEntries(t);
+	LeafBlock* leaf = t.leaves[0].leaf;
+	ASSERT_EQ(leaf->header.freeSlotCount(), 2);
+	checkWrite(t, model, wideKey(103), wideKey(105), 1000);
+	ASSERT(!leaf->header.hasSpace());
+	checkWrite(t, model, wideKey(123), wideKey(125), 1001);
+	ASSERT(Access::root(t.tree)->kind == BNodeKind::Internal);
+}
+
+// The batch pattern that overflowed a leaf in the smoke test: scattered
+// point reads and writes over 100,000 keys, with many keys falling past the
+// last entry of a leaf. Every read is checked against a model of the points,
+// and the entries against the model at the end.
+TEST_CASE("/resolver/TempConflictBTree/ScatteredPointsRegression") {
+	TestTree t(256 * PageSize);
+	std::uint64_t state = 1001 * 0x9E3779B97F4A7C15ull + 1;
+	auto below = [&state](int n) {
+		state ^= state << 13;
+		state ^= state >> 7;
+		state ^= state << 17;
+		return static_cast<int>(state % static_cast<std::uint64_t>(n));
+	};
+	auto pointKey = [](int n) {
+		char k[16];
+		std::snprintf(k, sizeof k, "k%08d", n);
+		return Bytes(k, k + 9);
+	};
+	std::map<Bytes, Version> written;
+	Version now = 2000;
+	for (int b = 0; b < 2500; ++b, now += 10) {
+		std::vector<int> writes;
+		for (int i = 0; i < 20; ++i) {
+			const Version snapshot = now - 1 - below(1200);
+			for (int r = below(4); r > 0; --r) {
+				const Bytes k = pointKey(below(100000));
+				if (snapshot >= now - 1000) {
+					auto it = written.find(k);
+					const bool expected = it != written.end() && it->second > snapshot;
+					ASSERT_EQ(t.hasConflict(k, keyAfter(k), snapshot), expected);
+				}
+			}
+			for (int w = below(3); w > 0; --w) {
+				writes.push_back(below(100000));
+			}
+		}
+		std::sort(writes.begin(), writes.end());
+		writes.erase(std::unique(writes.begin(), writes.end()), writes.end());
+		for (int n : writes) {
+			const Bytes k = pointKey(n);
+			Access::addWrite(t.tree, asRef(k), asRef(keyAfter(k)), now);
+			written[k] = now;
+		}
+		if (b % 500 == 499) {
+			checkStructure(t);
+		}
+	}
+	std::vector<Entry> model;
+	for (const auto& [k, cv] : written) {
+		model.push_back({k, keyAfter(k), cv});
+	}
+	checkSameEntries(checkStructure(t), model);
 }

@@ -97,23 +97,27 @@ private:
 		Version cv);
 	bool hasConflict(const ReadConflictRange& read);
 	// Helpers of addWrite, in the order it calls them. leaf and rank are the
-	// write's position: from findKey, after any split, then moved forward.
+	// write's position: from findKey, after any split.
 	//
-	// Unless found, keeps the left exterior of the previous range when it
-	// overlaps the start of the write, with its original CV. If the write lies
-	// inside that range, also keeps its right exterior, inserts range with cv,
-	// and returns true: the write is done. Otherwise returns false with the
-	// position at the first entry eraseCoveredRanges must examine.
-	bool preserveLeftExterior(
+	// Inserts range with cv at that position, in that leaf, which needs room
+	// for two entries. Unless found, keeps the left exterior of the previous
+	// range, with its original CV, when it overlaps the start of the write;
+	// the previous range may be in the leaf before, and is trimmed in place.
+	// If the write lies inside it, also inserts its right exterior right
+	// after the write and returns true: the write is done. Otherwise returns
+	// false with the position at the write. An expired previous range is
+	// erased, unread, after the insertion.
+	bool insertWithLeftExterior(
 		const std::pair<StringRef, StringRef>& write,
 		const RangeRef& range,
 		Version cv,
 		bool found,
 		LeafBlock*& leaf,
 		std::size_t& rank);
-	// Erases the entries from the position on whose end is not after end.
-	// Leaves the position at the first entry ending after end, at the end
-	// position, or with leaf == nullptr if the tree becomes empty.
+	// Erases the entries from the position on whose end is not after end. The
+	// write is in the tree before the position, so the tree cannot become
+	// empty. Leaves the position at the first entry ending after end, or at
+	// the end position.
 	void eraseCoveredRanges(
 		const StringRef& end,
 		LeafBlock*& leaf,
