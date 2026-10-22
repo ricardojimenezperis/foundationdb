@@ -6,6 +6,11 @@
 #include <cstdint>
 #include <cstring>
 
+#ifdef RESOLVER1_IN_FDB
+// Built inside FDB (fdbserver/resolver/BTreeV1.cpp): the resolver's own StringRef. Its
+// three-way comparison is the member compare, and a free one would be ambiguous with FDB's.
+using StringRef = ::StringRef;
+#else
 class StringRef {
 public:
 	StringRef() : data(nullptr), length(0) {}
@@ -34,6 +39,7 @@ private:
 inline int compare(const StringRef& l, const StringRef& r) {
 	return l.compare(r);
 }
+#endif
 
 class Arena;
 
@@ -67,6 +73,6 @@ struct ReadConflictRange {
 	}
 
 	bool operator<(const ReadConflictRange& rhs) const {
-		return compare(begin, rhs.begin) < 0;
+		return begin.compare(rhs.begin) < 0;
 	}
 };

@@ -815,6 +815,10 @@ public:
 	double SAMPLE_EXPIRATION_TIME;
 	double SAMPLE_POLL_TIME;
 	int64_t RESOLVER_STATE_MEMORY_LIMIT;
+	// Pages of 64 KiB in the pool of btree-v1, the Resolver's conflict history. The pool is allocated
+	// whole when the conflict set is built and holds all of its history: when a write needs room the
+	// oldest history is reclaimed, and reads older than what remains are rejected as too old
+	int64_t PAGED_RESOLVER_POOL_PAGES;
 
 	// Backup Worker
 	double BACKUP_TIMEOUT; // master's reaction time for backup failure

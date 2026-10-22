@@ -941,6 +941,7 @@ void ServerKnobs::initialize(Randomize randomize, ClientKnobs* clientKnobs, IsSi
 	init( SAMPLE_EXPIRATION_TIME,                                1.0 );
 	init( SAMPLE_POLL_TIME,                                      0.1 );
 	init( RESOLVER_STATE_MEMORY_LIMIT,                           1e6 );
+	init( PAGED_RESOLVER_POOL_PAGES,                            16384 ); // 1 GiB of 64 KiB pages
 	init( LAST_LIMITED_RATIO,                                    2.0 );
 
 	// Backup Worker
