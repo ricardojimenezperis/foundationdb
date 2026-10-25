@@ -96,5 +96,3 @@ that the validation reports in `fdbserver/resolver/resolver1/tests/` describe, a
 - The 7,200 s trace (15.1 GB). `../by5gen` regenerates it byte for byte; its arguments and SHA-256
   are in `../by5gen/README.md`. The rebuilt generator reproduced the 40 s reference trace exactly.
 - The evaluated binaries, identified above by their SHA-256.
-- The runs of the same comparison on a second machine (HP, Intel Core Ultra 9 285K), which were
-  not available when this archive was made.
