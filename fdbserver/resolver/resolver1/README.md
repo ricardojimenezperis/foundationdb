@@ -16,7 +16,8 @@ in FoundationDB as btree-v1.
   one pool (`PagePool`). When a write needs room, the oldest history is reclaimed and the
   boundary `reclaimCV` advances; a read older than the boundary is rejected as too old instead of
   being checked against history that is gone.
-- **Blocks:** 2 KiB by default (`RESOLVER1_BLOCK_SIZE`).
+- **Blocks:** 2 KiB, fixed (`BlockSize` in `common.h`). This snapshot has no option to choose
+  another block size; the FoundationDB integration and the evaluation use 2 KiB.
 
 ## Standalone build and tests
 
@@ -24,8 +25,7 @@ resolver1 builds and tests on its own, without FoundationDB:
 
 ```sh
 cd fdbserver/resolver/resolver1
-make test                  # C++20 compiler; 2 KiB blocks
-make BLOCK_SIZE=4096 test  # other block sizes
+make test                  # C++20 compiler
 bash tests/coverage.sh     # gcov and llvm-cov coverage of PagePool, KeyStore and BNodeStore
 ```
 

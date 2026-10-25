@@ -3,7 +3,10 @@
 The evidence is in the archive `resolver-v1-evidence.tar.xz`, 65,365,216 bytes, SHA-256
 `6a88e7002d959be09a1286b2a2e7f07976eaf78b4cc3fe8ca72cdff9ed9318fe`, an asset of the
 `resolver-v1` release. `SHA256SUMS`, here and in the archive, lists every file in it; the
-archive's README is this file without this paragraph.
+archive's README is this file as it was at the tag, without this paragraph. That copy, and the
+label of `publication-validation/resolver1-standalone.txt`, describe the second standalone run
+as one with blocks of 1 KiB, which it was not (see below); the archive is kept unchanged so that
+its checksum holds.
 
 ## The 6 GiB comparison on Hetzner
 
@@ -75,7 +78,10 @@ commit `1dfa7ffe6a5210c66e36a628552d10a7046649d0` and btree-v1 at the integratio
   for the campaign released at its end. `budget-watch.sh` ran beside FDB's accounting run and
   had nothing to stop.
 - **resolver1 on its own** (`resolver1-standalone.txt`): `make test` at the final snapshot, with
-  Clang 19.1.5 on Linux, passes its 193 tests with blocks of 2 KiB and of 1 KiB.
+  Clang 19.1.5 on Linux, passes its 193 tests with its fixed blocks of 2 KiB, the only
+  configuration tested. The file records two runs; the second, labelled `BLOCK_SIZE=1024`, is a
+  duplicate 2 KiB run: the snapshot's `makefile` ignores that variable, so it built and tested the
+  same configuration again. It is not evidence for any other block size.
 
 `validate.sh`, `compare-runs.py` and `compare-smoke.py` are the scripts that produced these files.
 
