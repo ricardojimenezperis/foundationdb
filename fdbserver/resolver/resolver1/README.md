@@ -57,9 +57,10 @@ harness commit `1dfa7ffe6a5210c66e36a628552d10a7046649d0`, the parent of the int
 
 ## Documentation
 
-The design and evaluation documents of resolver v1 will be published in
-<https://github.com/ricardojimenezperis/fdb-beyond-5s>. The link to their v1 snapshot is pending:
-that snapshot is not public yet.
+The design and evaluation documents of resolver v1 are published in
+<https://github.com/ricardojimenezperis/fdb-beyond-5s>; this version is the snapshot
+<https://github.com/ricardojimenezperis/fdb-beyond-5s/tree/main/resolver/v1>, and the article
+<https://ricardojimenezperis.com/systems/fdb-resolver-v1/> is its readable account.
 
 ## Author
 
