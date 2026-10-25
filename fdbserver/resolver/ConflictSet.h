@@ -34,6 +34,28 @@ ConflictSet* newConflictSet();
 void clearConflictSet(ConflictSet*, Version);
 void destroyConflictSet(ConflictSet*);
 
+// What a conflict set reports to the by5 harness and to skiplisttest. Phase times are the
+// process-wide totals of the batch phases, in seconds. The other fields describe a history kept by
+// capacity rather than by the window; they stay zero for FDB's skip list.
+struct ConflictSetStats {
+	// True for a history kept by capacity, which has a boundary of its own
+	bool paged = false;
+	double checkReadSeconds = 0, checkIntraBatchSeconds = 0, combineSeconds = 0, mergeSeconds = 0,
+	       cleanupSeconds = 0;
+	// Oldest read version the history can still check
+	Version validationMinRV = 0;
+	int64_t poolLimitPages = 0, poolFreePages = 0, poolHeapPages = 0, poolIndexPages = 0;
+	int64_t reclaimedHistoryPages = 0;
+	// Transactions the external window admitted and the history's own boundary rejected
+	int64_t tooOldWithinWindow = 0;
+	// Largest distance by which the history's boundary has passed the external window
+	int64_t boundaryPastWindow = 0;
+	int64_t btreeNodes = 0, btreeLeaves = 0;
+};
+// The history's name, as the harness and skiplisttest print it
+const char* conflictSetIndexName(const ConflictSet*);
+ConflictSetStats getConflictSetStats(const ConflictSet*);
+
 struct ConflictBatch : ConflictBatchStatus {
 	explicit ConflictBatch(ConflictSet*,
 	                       std::map<int, VectorRef<int>>* conflictingKeyRangeMap = nullptr,

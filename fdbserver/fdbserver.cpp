@@ -409,6 +409,7 @@ Future<Void> metricsReport() {
 
 void memoryTest();
 void skipListTest();
+void by5ResolverTest();
 
 Future<Void> startSystemMonitor(std::string dataFolder,
                                 Optional<Standalone<StringRef>> dcId,
@@ -943,6 +944,7 @@ enum class ServerRole {
 	SearchMutations,
 	Simulation,
 	SkipListTest,
+	By5ResolverTest,
 	Test,
 	VersionedMapTest,
 	UnitTests
@@ -1213,6 +1215,8 @@ private:
 					role = ServerRole::MultiTester;
 				else if (!strcmp(sRole, "skiplisttest"))
 					role = ServerRole::SkipListTest;
+				else if (!strcmp(sRole, "by5resolvertest"))
+					role = ServerRole::By5ResolverTest;
 				else if (!strcmp(sRole, "search"))
 					role = ServerRole::SearchMutations;
 				else if (!strcmp(sRole, "versionedmaptest"))
@@ -1907,6 +1911,10 @@ int main(int argc, char* argv[]) {
 
 		if (role == ServerRole::SkipListTest) {
 			skipListTest();
+			flushAndExit(FDB_EXIT_SUCCESS);
+		}
+		if (role == ServerRole::By5ResolverTest) {
+			by5ResolverTest();
 			flushAndExit(FDB_EXIT_SUCCESS);
 		}
 

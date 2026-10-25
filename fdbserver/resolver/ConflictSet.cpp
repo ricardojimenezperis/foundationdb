@@ -22,9 +22,15 @@
 #include <memory.h>
 #include <stdio.h>
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
+#ifdef __linux__
+#include <sched.h>
+#endif
 
 #include "flow/Platform.h"
 #include "fdbrpc/fdbrpc.h"
@@ -762,6 +768,18 @@ struct ConflictSet {
 ConflictSet* newConflictSet() {
 	return new ConflictSet;
 }
+const char* conflictSetIndexName(const ConflictSet*) {
+	return "skiplist";
+}
+ConflictSetStats getConflictSetStats(const ConflictSet*) {
+	ConflictSetStats stats;
+	stats.checkReadSeconds = g_checkRead.getValue();
+	stats.checkIntraBatchSeconds = g_checkBatch.getValue();
+	stats.combineSeconds = g_combine.getValue();
+	stats.mergeSeconds = g_merge.getValue();
+	stats.cleanupSeconds = g_removeBefore.getValue();
+	return stats;
+}
 void clearConflictSet(ConflictSet* cs, Version v) {
 	SkipList(v).swap(cs->versionHistory);
 }
@@ -1050,17 +1068,60 @@ void ConflictBatch::combineWriteConflictRanges() {
 }
 
 namespace {
+// SKIPLISTTEST_KEY_BYTES sets the key length, 16 by default and never less; SKIPLISTTEST_KEY_LAYOUT
+// places the number's four bytes: "tail" (the default) after a common prefix, "head" at bytes 12
+// to 15 before a common suffix. Both keep the numbers' order, so the same ranges resolve the same.
+// "mixed" ignores the length: it puts the number at bytes 8 to 11 and gives each number one of four
+// lengths, 12, 16, 17 or 32 bytes, so a range's ends may fit inline or not; the order is kept too
+int testKeyBytes() {
+	static const int bytes = [] {
+		const char* v = getenv("SKIPLISTTEST_KEY_BYTES");
+		return v ? std::max(16, atoi(v)) : 16;
+	}();
+	return bytes;
+}
+
+bool testKeyAtHead() {
+	static const bool head = [] {
+		const char* v = getenv("SKIPLISTTEST_KEY_LAYOUT");
+		return v && std::string(v) == "head";
+	}();
+	return head;
+}
+
+// "mid" places the number at bytes 16 to 19 (from zero), after a 16-byte common prefix: keys of 20 bytes or
+// more differ only there, past 16 inline bytes but within a 12-byte node reference plus 16
+bool testKeyMid() {
+	static const bool mid = [] {
+		const char* v = getenv("SKIPLISTTEST_KEY_LAYOUT");
+		return v && std::string(v) == "mid";
+	}();
+	return mid;
+}
+
+bool testKeyMixed() {
+	static const bool mixed = [] {
+		const char* v = getenv("SKIPLISTTEST_KEY_LAYOUT");
+		return v && std::string(v) == "mixed";
+	}();
+	return mixed;
+}
+
 StringRef setK(Arena& arena, int i) {
 	char t[sizeof(i)];
 	*(int*)t = i;
 
-	const int keySize = 16;
+	static const int mixedBytes[] = { 12, 16, 17, 32 };
+	const int keySize = testKeyMixed() ? mixedBytes[unsigned(i) % 4] : testKeyBytes();
 
 	char* ss = new (arena) char[keySize];
-	for (int c = 0; c < keySize - sizeof(i); c++)
-		ss[c] = '.';
+	memset(ss, '.', keySize);
+	const int at = testKeyMixed()   ? 8
+	               : testKeyAtHead() ? 16 - int(sizeof(i))
+	               : testKeyMid() && keySize >= 16 + int(sizeof(i)) ? 16
+	                                                          : keySize - int(sizeof(i));
 	for (int c = 0; c < sizeof(i); c++)
-		ss[c + keySize - sizeof(i)] = t[sizeof(i) - 1 - c];
+		ss[at + c] = t[sizeof(i) - 1 - c];
 
 	return StringRef((const uint8_t*)ss, keySize);
 }
@@ -1125,7 +1186,15 @@ void skipListTest() {
 
 	operatorLessThanTest();
 
-	setAffinity(0);
+	// SKIPLISTTEST_CPU chooses the CPU the benchmark pins itself to, 0 by default as upstream;
+	// setAffinity ignores failure, so the CPU it actually runs on is printed
+	const char* cpuVariable = getenv("SKIPLISTTEST_CPU");
+	const int cpu = cpuVariable ? atoi(cpuVariable) : 0;
+	setAffinity(cpu);
+#ifdef __linux__
+	printf("skiplisttest cpu requested=%d running=%d\n", cpu, sched_getcpu());
+#endif
+	printf("skiplisttest keyBytes=%d layout=%s\n", testKeyBytes(), testKeyMixed() ? "mixed" : testKeyAtHead() ? "head" : testKeyMid() ? "mid" : "tail");
 
 	double start;
 
@@ -1134,7 +1203,13 @@ void skipListTest() {
 	Arena testDataArena;
 	VectorRef<VectorRef<KeyRangeRef>> testData;
 	const int batches = 500; // deterministicRandom()->randomInt(500, 5000);
-	const int data_per_batch = 5000;
+	// SKIPLISTTEST_PER_BATCH sets the ranges per batch (half reads, half writes; 5,000 by default) and
+	// SKIPLISTTEST_RANGE_SPAN the most keys a range adds past its begin (10 by default): wider spans make
+	// ranges overlap more. The defaults draw the same sequence as before
+	const char* perBatchEnv = getenv("SKIPLISTTEST_PER_BATCH");
+	const char* spanEnv = getenv("SKIPLISTTEST_RANGE_SPAN");
+	const int data_per_batch = perBatchEnv ? std::max(2, atoi(perBatchEnv)) : 5000;
+	const int rangeSpan = spanEnv ? std::max(0, atoi(spanEnv)) : 10;
 	testData.resize(testDataArena, batches);
 	std::vector<std::vector<uint8_t>> success(batches);
 	std::vector<std::vector<uint8_t>> success2(batches);
@@ -1144,11 +1219,11 @@ void skipListTest() {
 		success2[i].assign(data_per_batch, false);
 		for (int j = 0; j < data_per_batch; j++) {
 			int key = deterministicRandom()->randomInt(0, 20000000);
-			int key2 = key + 1 + deterministicRandom()->randomInt(0, 10);
+			int key2 = key + 1 + deterministicRandom()->randomInt(0, rangeSpan);
 			testData[i][j] = KeyRangeRef(setK(testDataArena, key), setK(testDataArena, key2));
 		}
 	}
-	printf("Test data generated: %d batches, %d/batch\n", batches, data_per_batch);
+	printf("Test data generated: %d batches, %d/batch, span %d\n", batches, data_per_batch, rangeSpan);
 
 	printf("Running\n");
 
@@ -1157,6 +1232,10 @@ void skipListTest() {
 
 	start = timer();
 	std::vector<std::vector<int>> nonConflict(batches);
+	// SKIPLISTTEST_TOOOLD=1 also collects, per batch, the transactions rejected as too old, and writes
+	// them to the decisions file after the committed ones; off, the batch call is unchanged
+	static const bool collectTooOld = getenv("SKIPLISTTEST_TOOOLD") != nullptr;
+	std::vector<std::vector<int>> tooOld(collectTooOld ? nonConflict.size() : 0);
 	Version version = 0;
 	for (const auto& data : testData) {
 		Arena buf;
@@ -1187,7 +1266,7 @@ void skipListTest() {
 		g_add += timer() - t;
 
 		t = timer();
-		batch.detectConflicts(version + 50, version, nonConflict[version]);
+		batch.detectConflicts(version + 50, version, nonConflict[version], collectTooOld ? &tooOld[version] : nullptr);
 		g_detectConflicts += timer() - t;
 
 		version++;
@@ -1213,6 +1292,59 @@ void skipListTest() {
 	}
 
 	printf("%d entries in version history\n", cs->versionHistory.count());
+
+	// The decisions any two histories must agree on, and the phases of the batch
+	size_t committed = 0;
+	for (const auto& batchCommitted : nonConflict) {
+		committed += batchCommitted.size();
+	}
+	printf("%zu transactions without conflict\n", committed);
+	// Per-transaction decisions: an FNV-1a hash over every batch's committed indices, in order,
+	// so two runs agree on it only if they commit the same transactions of the same batches.
+	// SKIPLISTTEST_DECISIONS names a file to receive them in full, one batch per line
+	uint64_t decisionsHash = 1469598103934665603ULL;
+	auto mix = [&](uint64_t value) {
+		for (int b = 0; b < 8; ++b) {
+			decisionsHash = (decisionsHash ^ ((value >> (8 * b)) & 0xFF)) * 1099511628211ULL;
+		}
+	};
+	for (size_t b = 0; b < nonConflict.size(); ++b) {
+		mix(b);
+		mix(nonConflict[b].size());
+		for (int t : nonConflict[b]) {
+			mix(t);
+		}
+	}
+	printf("index=%s decisionsHash=%016llx\n", conflictSetIndexName(cs), (unsigned long long)decisionsHash);
+	if (const char* path = getenv("SKIPLISTTEST_DECISIONS")) {
+		if (FILE* out = fopen(path, "w")) {
+			for (size_t b = 0; b < nonConflict.size(); ++b) {
+				fprintf(out, "%zu:", b);
+				for (int t : nonConflict[b]) {
+					fprintf(out, " %d", t);
+				}
+				if (collectTooOld) {
+					fprintf(out, " |");
+					for (int t : tooOld[b]) {
+						fprintf(out, " %d", t);
+					}
+				}
+				fprintf(out, "\n");
+			}
+			fclose(out);
+		}
+	}
+	const ConflictSetStats stats = getConflictSetStats(cs);
+	printf("phases: checkReadS=%.4f intraBatchS=%.4f combineS=%.4f mergeS=%.4f cleanupS=%.4f\n",
+	       stats.checkReadSeconds,
+	       stats.checkIntraBatchSeconds,
+	       stats.combineSeconds,
+	       stats.mergeSeconds,
+	       stats.cleanupSeconds);
+	printf("residentMiB=%.1f validationMinRV=%lld boundaryPastWindow=%lld\n",
+	       getResidentMemoryUsage() / 1048576.0,
+	       (long long)stats.validationMinRV,
+	       (long long)stats.boundaryPastWindow);
 }
 
 TEST_CASE("/fdbserver/skiplist/miniConflictSetCompatibility") {
@@ -1512,3 +1644,224 @@ TEST_CASE("/fdbserver/skiplist/miniConflictSetCompatibility") {
 
 	return Void();
 }
+
+namespace {
+
+// ---------- The conflict set through the Resolver's path ----------
+//
+// Each case resolves batches through the same ConflictBatch path the Resolver uses, with the
+// history this binary resolves with, and checks the outcomes
+
+struct ResolvedBatch {
+	std::vector<int> committed, tooOld;
+	std::map<int, VectorRef<int>> conflictingKeys;
+	Arena arena;
+
+	bool isCommitted(int t) const { return std::find(committed.begin(), committed.end(), t) != committed.end(); }
+	bool isTooOld(int t) const { return std::find(tooOld.begin(), tooOld.end(), t) != tooOld.end(); }
+	bool isConflict(int t) const { return !isCommitted(t) && !isTooOld(t); }
+	std::vector<int> reported(int t) const {
+		auto it = conflictingKeys.find(t);
+		std::vector<int> ranges;
+		if (it != conflictingKeys.end()) {
+			ranges.assign(it->second.begin(), it->second.end());
+		}
+		std::sort(ranges.begin(), ranges.end());
+		return ranges;
+	}
+};
+
+struct TransactionSpec {
+	Version snapshot;
+	std::vector<std::pair<std::string, std::string>> reads, writes;
+	bool report = false;
+};
+
+std::string keyAfterOf(const std::string& key) {
+	return key + std::string(1, '\0');
+}
+
+// A window of 1000 versions stands in for MAX_WRITE_TRANSACTION_LIFE_VERSIONS
+constexpr Version testWindow = 1000;
+
+void resolve(ConflictSet* cs, Version now, const std::vector<TransactionSpec>& specs, ResolvedBatch& out) {
+	Arena arena;
+	std::vector<CommitTransactionRef> transactions;
+	for (const TransactionSpec& spec : specs) {
+		CommitTransactionRef tr;
+		tr.read_snapshot = spec.snapshot;
+		tr.report_conflicting_keys = spec.report;
+		for (const auto& [from, to] : spec.reads) {
+			tr.read_conflict_ranges.push_back(arena, KeyRangeRef(arena, KeyRangeRef(StringRef(from), StringRef(to))));
+		}
+		for (const auto& [from, to] : spec.writes) {
+			tr.write_conflict_ranges.push_back(arena, KeyRangeRef(arena, KeyRangeRef(StringRef(from), StringRef(to))));
+		}
+		transactions.push_back(tr);
+	}
+	const Version newOldestVersion = now - testWindow;
+	ConflictBatch batch(cs, &out.conflictingKeys, &out.arena);
+	for (const CommitTransactionRef& tr : transactions) {
+		batch.addTransaction(tr, newOldestVersion);
+	}
+	batch.detectConflicts(now, newOldestVersion, out.committed, &out.tooOld);
+}
+
+// Runs a case on a new conflict set of this binary's history, naming the case if it fails
+template <class Case>
+void forEachHistory(const char* name, Case body) {
+	ConflictSet* cs = newConflictSet();
+	try {
+		body(cs);
+	} catch (...) {
+		TraceEvent(SevError, "ConflictSetIntegrationFailed").detail("Case", name).detail("Index", conflictSetIndexName(cs));
+		destroyConflictSet(cs);
+		throw;
+	}
+	destroyConflictSet(cs);
+}
+
+} // namespace
+
+TEST_CASE("/fdbserver/conflictset/historyFromAnEarlierBatch") {
+	forEachHistory("historyFromAnEarlierBatch", [](ConflictSet* cs) {
+		ResolvedBatch first;
+		resolve(cs,
+		        2000,
+		        { { 1900, {}, { { "b", "d" } } }, { 1900, {}, { { "k", keyAfterOf("k") } } } },
+		        first);
+		ASSERT(first.isCommitted(0) && first.isCommitted(1));
+
+		ResolvedBatch second;
+		resolve(cs,
+		        2100,
+		        {
+		            { 1999, { { "c", keyAfterOf("c") } }, {} }, // inside the range written at 2000
+		            { 2000, { { "c", keyAfterOf("c") } }, {} }, // at the write's own version
+		            { 1999, { { "d", "e" } }, {} }, // begins where the range ends
+		            { 1999, { { "a", "b" } }, {} }, // ends where it begins
+		            { 1999, { { "k", keyAfterOf("k") } }, {} }, // the point itself
+		            { 1999, { { keyAfterOf("k"), "l" } }, {} }, // just after the point
+		            { 1999, { { "j", "k" } }, {} }, // ends at the point
+		        },
+		        second);
+		ASSERT(second.isConflict(0));
+		ASSERT(second.isCommitted(1));
+		ASSERT(second.isCommitted(2) && second.isCommitted(3));
+		ASSERT(second.isConflict(4));
+		ASSERT(second.isCommitted(5) && second.isCommitted(6));
+	});
+	return Void();
+}
+
+TEST_CASE("/fdbserver/conflictset/conflictWithinTheBatch") {
+	forEachHistory("conflictWithinTheBatch", [](ConflictSet* cs) {
+		ResolvedBatch batch;
+		resolve(cs,
+		        2000,
+		        {
+		            { 1900, {}, { { "m", "n" } } },
+		            { 1900, { { "m", keyAfterOf("m") } }, {} }, // reads what the first writes
+		            { 1900, { { "n", "o" } }, {} }, // begins where it ends
+		            { 1900, { { "a", "b" } }, { { "x", "y" } } }, // commits and writes x
+		            { 1900, { { "x", "y" } }, {} }, // reads x after it
+		        },
+		        batch);
+		ASSERT(batch.isCommitted(0));
+		ASSERT(batch.isConflict(1));
+		ASSERT(batch.isCommitted(2) && batch.isCommitted(3));
+		ASSERT(batch.isConflict(4));
+	});
+	return Void();
+}
+
+TEST_CASE("/fdbserver/conflictset/aTransactionDoesNotConflictWithItself") {
+	forEachHistory("aTransactionDoesNotConflictWithItself", [](ConflictSet* cs) {
+		ResolvedBatch batch;
+		resolve(cs, 2000, { { 1900, { { "a", "c" } }, { { "a", "c" }, { "b", keyAfterOf("b") } } } }, batch);
+		ASSERT(batch.isCommitted(0));
+	});
+	return Void();
+}
+
+TEST_CASE("/fdbserver/conflictset/rejectedWritesAreNotRecorded") {
+	forEachHistory("rejectedWritesAreNotRecorded", [](ConflictSet* cs) {
+		ResolvedBatch first;
+		resolve(cs, 2000, { { 1900, {}, { { "x", keyAfterOf("x") } } } }, first);
+
+		ResolvedBatch second;
+		resolve(cs,
+		        2100,
+		        {
+		            { 1950, { { "x", keyAfterOf("x") } }, { { "y", "z" } } }, // conflicts with x, writes y
+		            { 2050, { { "y", keyAfterOf("y") } }, {} }, // so its write does not reach this read
+		            { 500, { { "q", "r" } }, { { "p", keyAfterOf("p") } } }, // too old, writes p
+		        },
+		        second);
+		ASSERT(second.isConflict(0));
+		ASSERT(second.isCommitted(1));
+		ASSERT(second.isTooOld(2));
+
+		ResolvedBatch third;
+		resolve(cs,
+		        2200,
+		        { { 2000, { { "y", "z" } }, {} }, { 2000, { { "p", keyAfterOf("p") } }, {} } },
+		        third);
+		ASSERT(third.isCommitted(0) && third.isCommitted(1));
+	});
+	return Void();
+}
+
+TEST_CASE("/fdbserver/conflictset/tooOldAndTransactionsWithoutReads") {
+	forEachHistory("tooOldAndTransactionsWithoutReads", [](ConflictSet* cs) {
+		ResolvedBatch first;
+		resolve(cs,
+		        5000,
+		        {
+		            { 3999, { { "a", "b" } }, {} }, // one below the window
+		            { 4000, { { "a", "b" } }, {} }, // at the window
+		            { 10, {}, { { "w", keyAfterOf("w") } } }, // far below it, but reads nothing
+		        },
+		        first);
+		ASSERT(first.isTooOld(0));
+		ASSERT(first.isCommitted(1));
+		ASSERT(first.isCommitted(2));
+
+		// The write of the transaction without reads was recorded
+		ResolvedBatch second;
+		resolve(cs, 5100, { { 4999, { { "w", keyAfterOf("w") } }, {} } }, second);
+		ASSERT(second.isConflict(0));
+	});
+	return Void();
+}
+
+TEST_CASE("/fdbserver/conflictset/reportedConflictingRanges") {
+	forEachHistory("reportedConflictingRanges", [](ConflictSet* cs) {
+		ResolvedBatch first;
+		resolve(cs, 2000, { { 1900, {}, { { "b", keyAfterOf("b") }, { "d", "f" } } } }, first);
+
+		ResolvedBatch second;
+		resolve(cs,
+		        2100,
+		        {
+		            // Ranges 1 and 3 conflict with history; every one of them is reported
+		            { 1950,
+		              { { "a", "b" }, { "b", "c" }, { "g", "h" }, { "e", keyAfterOf("e") } },
+		              {},
+		              true },
+		            // No history conflict: the batch reports its first conflicting range only
+		            { 2000, {}, { { "m", "n" } } },
+		            { 2000, { { "k", "l" }, { "m", keyAfterOf("m") }, { "m", "o" } }, {}, true },
+		            // A conflict without reporting leaves no entry
+		            { 1950, { { "b", "c" } }, {} },
+		        },
+		        second);
+		ASSERT(second.isConflict(0) && (second.reported(0) == std::vector<int>{ 1, 3 }));
+		ASSERT(second.isCommitted(1));
+		ASSERT(second.isConflict(2) && (second.reported(2) == std::vector<int>{ 1 }));
+		ASSERT(second.isConflict(3) && second.conflictingKeys.count(3) == 0);
+	});
+	return Void();
+}
+
+#include "By5ResolverTest.inc"
