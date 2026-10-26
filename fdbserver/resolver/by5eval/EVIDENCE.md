@@ -8,7 +8,7 @@ label of `publication-validation/resolver1-standalone.txt`, describe the second 
 as one with blocks of 1 KiB, which it was not (see below); the archive is kept unchanged so that
 its checksum holds.
 
-## The 6 GiB comparison on Hetzner
+## The 6 GiB comparison on AMD Ryzen 7 7700
 
 `6gib-hetzner/` holds the runs of FDB's skip list (window 265 s) and of btree-v1 (98,300 pages)
 from the campaign of 2026-10-23, on the 7,200 s trace, segment [57,600, 230,400) from a cold start.

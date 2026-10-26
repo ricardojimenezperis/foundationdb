@@ -103,7 +103,7 @@ evaluated ones.
   2. **Native timing runs** (`nativemem`): three rounds, one run at a time on `TIMED_CPU`, with
      the order of the arms alternated: fdb265, v1; v1, fdb265; v1, fdb265.
   - Between runs the page cache is drained; `vm.nr_hugepages` is 3,300 during the campaign.
-- Measurement conditions of the evaluation (Hetzner, AMD Ryzen 7 7700, Linux 6.8): each run in
+- Measurement conditions of the evaluation (AMD Ryzen 7 7700, Linux 6.8): each run in
   `docker run --cpuset-cpus=CPU --cpuset-mems=0` with the toolchain image; timed runs on
   physical core 7 (CPU 7), its SMT sibling (CPU 15) idle, no other process, build or analysis
   on the machine; accounting runs on CPUs 1 to 4.
