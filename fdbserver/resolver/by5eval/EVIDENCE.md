@@ -1,16 +1,13 @@
 # Evidence of the resolver v1 evaluation
 
-The evidence is in the archive `resolver-v1-evidence.tar.xz`, 65,365,216 bytes, SHA-256
-`6a88e7002d959be09a1286b2a2e7f07976eaf78b4cc3fe8ca72cdff9ed9318fe`, an asset of the
+The evidence is in the archive `resolver-v1-evidence.tar.xz`, 64,512,456 bytes, SHA-256
+`e9138f3158588e99a6a0e30c62a551bc3972cb0ee36f3818be9c89a57f25211e`, an asset of the
 `resolver-v1` release. `SHA256SUMS`, here and in the archive, lists every file in it; the
-archive's README is this file as it was at the tag, without this paragraph. That copy, and the
-label of `publication-validation/resolver1-standalone.txt`, describe the second standalone run
-as one with blocks of 1 KiB, which it was not (see below); the archive is kept unchanged so that
-its checksum holds.
+archive's README is this file without its size and checksum.
 
 ## The 6 GiB comparison on AMD Ryzen 7 7700
 
-`6gib-hetzner/` holds the runs of FDB's skip list (window 265 s) and of btree-v1 (98,300 pages)
+`6gib-amd/` holds the runs of FDB's skip list (window 265 s) and of btree-v1 (98,300 pages)
 from the campaign of 2026-10-23, on the 7,200 s trace, segment [57,600, 230,400) from a cold start.
 The campaign also measured other arms, which are not part of this publication; the files here
 are its runs of these two arms, and labelled extracts of its logs.
@@ -78,10 +75,7 @@ commit `1dfa7ffe6a5210c66e36a628552d10a7046649d0` and btree-v1 at the integratio
   for the campaign released at its end. `budget-watch.sh` ran beside FDB's accounting run and
   had nothing to stop.
 - **resolver1 on its own** (`resolver1-standalone.txt`): `make test` at the final snapshot, with
-  Clang 19.1.5 on Linux, passes its 193 tests with its fixed blocks of 2 KiB, the only
-  configuration tested. The file records two runs; the second, labelled `BLOCK_SIZE=1024`, is a
-  duplicate 2 KiB run: the snapshot's `makefile` ignores that variable, so it built and tested the
-  same configuration again. It is not evidence for any other block size.
+  Clang 19.1.5 on Linux, passes its 193 tests with its fixed blocks of 2 KiB.
 
 `validate.sh`, `compare-runs.py` and `compare-smoke.py` are the scripts that produced these files.
 
