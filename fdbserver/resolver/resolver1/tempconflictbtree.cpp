@@ -587,6 +587,30 @@ void TempConflictBTree::removeEmptyChild(
 	}
 }
 
+void TempConflictBTree::removeIfEmpty(BNodeHeader* node) {
+	if (node->count > 0) {
+		return;
+	}
+	InternalBlock* parent = node->parent;
+	if (parent == nullptr) {
+		if (node->kind == BNodeKind::Internal) {
+			root_ = nullptr;
+			nodeStore_.releaseNode(node);
+		}
+		return;
+	}
+	removeEmptyChild(parent, node->parentRank());
+	while (parent->header.count == 0 && parent->parent() != nullptr) {
+		InternalBlock* tmp = parent;
+		parent = tmp->parent();
+		removeEmptyChild(parent, tmp->parentRank());
+	}
+	if (parent->header.count > 0) {
+		propagateUpdates(parent, 0, true, false);
+	}
+	normalizeRoot();
+}
+
 void TempConflictBTree::split(
 		BNodeHeader* node,
 		LeafBlock*& leaf,

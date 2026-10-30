@@ -37,11 +37,42 @@
 #include "bnodestore.h"
 #include "fdbcompat.h"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <tuple>
 #include <utility>
 #include <vector>
+
+namespace temp_conflict_btree_detail {
+// Breadth-first midpoint ranks of binary partitions over [0, count).
+// Row count contains count valid ranks; the remaining positions are unused.
+template<std::size_t Capacity>
+constexpr auto makePrefetchOrder() {
+	std::array<std::array<std::uint16_t, Capacity>, Capacity + 1> table{};
+	struct Interval {
+		std::size_t lo;
+		std::size_t hi;
+	};
+	for (std::size_t count = 1; count <= Capacity; ++count) {
+		std::array<Interval, Capacity> queue{};
+		std::size_t head = 0;
+		std::size_t tail = 0;
+		std::size_t position = 0;
+		queue[tail++] = {0, count};
+		while (head < tail) {
+			const auto [lo, hi] = queue[head++];
+			const std::size_t mid = lo + (hi - lo) / 2;
+			table[count][position++] = static_cast<std::uint16_t>(mid);
+			if (lo < mid) queue[tail++] = {lo, mid};
+			if (mid + 1 < hi) queue[tail++] = {mid + 1, hi};
+		}
+	}
+	return table;
+}
+} // namespace temp_conflict_btree_detail
 
 class TempConflictBTree {
 	friend struct TempConflictBTreeTestAccess;
@@ -77,6 +108,13 @@ private:
 	BNodeHeader* root_ = nullptr;
 	Version reclaimCV_ = 0;
 
+	// Covers both internal separators and leaf entries for the configured block size.
+	static constexpr std::size_t MaxSeparators =
+		std::max(InternalCapacity, LeafCapacity);
+	// Generated at compile time. Bounds are [lo, hi).
+	static constexpr auto prefetchOrder =
+		temp_conflict_btree_detail::makePrefetchOrder<MaxSeparators>();
+	
 	// Returns the insertion point, leaf & rank, and whether is found.
 	// If the tree is empty return nullptr as leaf.
 	bool findKey(
@@ -203,6 +241,9 @@ private:
 	// Repairs leaf links when the child is a leaf.
 	// Does not release parent, even if it becomes empty.
 	void removeEmptyChild(InternalBlock* parent, std::size_t rank);
+	// Removes an empty node and ancestors left empty; normalizes root.
+	// An empty root leaf may remain.
+	void removeIfEmpty(BNodeHeader* node);
 	// An internal node needs a split when every free slot may be taken by
 	// the split of a child that needs one.
 	static bool needsSplit(const InternalBlock* node) {

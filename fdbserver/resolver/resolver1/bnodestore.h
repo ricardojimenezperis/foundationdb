@@ -37,8 +37,14 @@ enum class BNodeKind : std::uint8_t {
 struct InternalBlock;
 
 struct BNodeHeader {
-	std::uint64_t generation;
 	Version maxCV = 0;
+	// Set when the node is allocated, from a counter that only grows, and
+	// cleared when it is released, so that a node recorded with its
+	// generation can be told apart from one released since. It must start
+	// at byte sizeof(FreeBlock), 8, or later: the pool keeps a released
+	// block in its free list by writing the link, a FreeBlock, over its
+	// first bytes, which would overwrite the cleared generation.
+	std::uint64_t generation;
 	BNodeHeader* agePrevious = nullptr;
 	BNodeHeader* ageNext = nullptr;
 	InternalBlock* parent = nullptr;
@@ -49,6 +55,9 @@ struct BNodeHeader {
 	// Rank of this node in its parent. Requires a parent.
 	inline std::size_t parentRank() const;
 };
+
+static_assert(offsetof(BNodeHeader, generation) >= sizeof(FreeBlock),
+			  "a released block's free-list link must not overwrite the generation");
 
 // The free slots of a node of capacity C: bit i is set when slot i is free.
 // Up to 64 slots it is a single word, and every operation is the one on a
@@ -266,7 +275,8 @@ public:
 	inline LeafBlock* allocateLeaf(Version cv);
 	inline InternalBlock* allocateInternal(Version cv);
 
-	// node should be previously unlinked from the tree
+	// Requires node to be detached from the tree; removes its age entry
+	// and clears its generation before returning the block to the pool.
 	inline void releaseNode(BNodeHeader* node);
 	void releaseNode(LeafBlock* node) {
 		releaseNode(&node->header);
@@ -379,6 +389,7 @@ inline void BNodeStore::unlinkNode(BNodeHeader* node) {
 inline void BNodeStore::releaseNode(BNodeHeader* node) {
 	assert(node!=nullptr);
 	unlinkNode(node);
+	node->generation = 0;
 	pool_.releaseBlock(node);
 }
 
