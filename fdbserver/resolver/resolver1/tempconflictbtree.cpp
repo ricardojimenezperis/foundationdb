@@ -524,8 +524,7 @@ bool TempConflictBTree::refreshSeparator(
 		} else {
 			const auto slot0 = child->order[0];
 			node->separatorsCV[slot] = child->cv[slot0];
-			node->separators[slot] =
-				keyStore_.beginKey(child->ranges[slot0]);
+			node->separators[slot] = child->ranges[slot0];
 		}
 	}
 	return true;
@@ -692,17 +691,17 @@ LeafBlock* TempConflictBTree::splitLeaf(
 	return newNode;
 }
 
-std::pair<KeyRef, Version> TempConflictBTree::minSeparator(
+std::pair<const RangeRef*, Version> TempConflictBTree::minSeparator(
 		const BNodeHeader* node) const {
 	assert(node->count > 0);
 	if (node->kind == BNodeKind::Leaf) {
 		const auto* leaf = reinterpret_cast<const LeafBlock*>(node);
 		const auto first = leaf->order[0];
-		return {keyStore_.beginKey(leaf->ranges[first]), leaf->cv[first]};
+		return {&leaf->ranges[first], leaf->cv[first]};
 	}
 	const auto* internal = reinterpret_cast<const InternalBlock*>(node);
 	const auto first = internal->order[0];
-	return {internal->separators[first], internal->separatorsCV[first]};
+	return {&internal->separators[first], internal->separatorsCV[first]};
 }
 
 void TempConflictBTree::insertSibling(
@@ -719,8 +718,8 @@ void TempConflictBTree::insertSibling(
 		assert(parent != nullptr);
 		const auto [oldKey, oldCV] = minSeparator(node);
 		const auto [newKey, newCV] = minSeparator(sibling);
-		nodeStore_.insertAt(0, oldKey, node, oldCV, parent);
-		nodeStore_.insertAt(1, newKey, sibling, newCV, parent);
+		nodeStore_.insertAt(0, *oldKey, node, oldCV, parent);
+		nodeStore_.insertAt(1, *newKey, sibling, newCV, parent);
 		root_ = &parent->header;
 		return;
 	}
@@ -731,7 +730,7 @@ void TempConflictBTree::insertSibling(
 	assert(parent->freeSlotCount() > 0);
 	assert(parent->header.childrenNeedingSplit > 0);
 	const auto [key, keyCV] = minSeparator(sibling);
-	nodeStore_.insertAt(node->parentRank() + 1, key, sibling, keyCV, parent);
+	nodeStore_.insertAt(node->parentRank() + 1, *key, sibling, keyCV, parent);
 	--parent->header.childrenNeedingSplit;
 	assert(needsSplit(parent) == parentSplitBefore);
 	(void)parentSplitBefore;
@@ -746,7 +745,7 @@ void TempConflictBTree::propagateUpdates(
 
 	// The separator is the node's first key with its CV. Up the chain the
 	// parent's first separator is that same key, so it is read only once.
-	KeyRef separator{};
+	const RangeRef* separator = nullptr;
 	Version separatorCV = 0;
 	if (updateSeparator) {
 		std::tie(separator, separatorCV) = minSeparator(node);
@@ -768,7 +767,7 @@ void TempConflictBTree::propagateUpdates(
 		}
 
 		if (updateSeparator) {
-			parent->separators[slot] = separator;
+			parent->separators[slot] = *separator;
 			parent->separatorsCV[slot] = separatorCV;
 			updateSeparator = parent->order[0] == slot;
 		}

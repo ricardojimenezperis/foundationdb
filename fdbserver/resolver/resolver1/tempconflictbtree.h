@@ -241,7 +241,7 @@ private:
 	}
 	// The first key of node, with its CV: the separator node should have in
 	// its parent. Requires node not to be empty.
-	std::pair<KeyRef, Version> minSeparator(const BNodeHeader* node) const;
+	std::pair<const RangeRef*, Version> minSeparator(const BNodeHeader* node) const;
 	// Moves the upper part of oldNode, cut by weight, to a new node and
 	// returns it. Moved children point to the new node and are counted there.
 	InternalBlock* splitInternal(InternalBlock* oldNode, Version cv);

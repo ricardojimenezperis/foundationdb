@@ -143,7 +143,7 @@ struct InternalBlockLayout {
 	BNodeHeader header;
 	Version maxSubtreesCV[C];
 	Version separatorsCV[C];
-	KeyRef separators[C];
+	RangeRef separators[C];
 	BNodeHeader* children[C];
 	FreeSlots<C> freeSlots;
 	// Physical slot of each logical rank.
@@ -297,7 +297,7 @@ public:
 
 	inline void insertAt(
 		std::size_t rank,
-		const KeyRef& key,
+		const RangeRef& key,
 		BNodeHeader* child,
 		Version cv,
 		InternalBlock* node);
@@ -408,7 +408,7 @@ inline BNodeHeader* BNodeStore::oldestNode() const {
 }
 
 inline void BNodeStore::insertAt(std::size_t rank, 
-							const KeyRef& key, 
+							const RangeRef& key, 
 							BNodeHeader* child,
 							Version cv,
 							InternalBlock* node) {

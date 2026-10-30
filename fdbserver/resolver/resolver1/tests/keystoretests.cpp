@@ -12,14 +12,14 @@ constexpr std::size_t FullBlockKeyLength = PageSize - sizeof(KeyBlockHeader);
 
 const std::byte ShortKey[] = {std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
 
-std::optional<KeyRef> appendFullBlockKey(KeyStore& store, Version cv) {
+std::optional<RangeRef> appendFullBlockKey(KeyStore& store, Version cv) {
 	const std::vector<std::byte> key(FullBlockKeyLength, std::byte{0x11});
 
 	return store.appendKey(
 		key.data(), static_cast<std::uint16_t>(key.size()), cv);
 }
 
-bool storedBytesEqual(const KeyRef& ref,
+bool storedBytesEqual(const RangeRef& ref,
 					  const std::byte* expected,
 					  std::size_t length) {
 	const std::byte* stored =
@@ -41,11 +41,11 @@ TEST_CASE("/resolver/KeyStore/AppendAfterReclaimingAllBlocks") {
 
 	ASSERT(store.reclaimOldest() == Version{10});
 
-	const std::optional<KeyRef> ref = store.appendKey(ShortKey, sizeof(ShortKey), 12);
+	const std::optional<RangeRef> ref = store.appendKey(ShortKey, sizeof(ShortKey), 12);
 
 	ASSERT(ref.has_value());
 	ASSERT_EQ(ref->keyOffset, sizeof(KeyBlockHeader));
-	ASSERT_EQ(ref->keyLength, sizeof(ShortKey));
+	ASSERT_EQ(ref->beginLength, sizeof(ShortKey));
 	ASSERT(storedBytesEqual(*ref, ShortKey, sizeof(ShortKey)));
 
 	const KeyBlockHeader* header = ref->firstBlock;
@@ -72,7 +72,7 @@ TEST_CASE("/resolver/KeyStore/AppendAfterReclaimingOldestBlock") {
 
 	ASSERT(store.reclaimOldest() == Version{10});
 
-	const std::optional<KeyRef> ref = store.appendKey(ShortKey, sizeof(ShortKey), 30);
+	const std::optional<RangeRef> ref = store.appendKey(ShortKey, sizeof(ShortKey), 30);
 
 	ASSERT(ref.has_value());
 	ASSERT_EQ(ref->keyOffset, sizeof(KeyBlockHeader));
@@ -101,7 +101,7 @@ std::vector<std::byte> makeKey(std::size_t length, unsigned seed) {
 	return key;
 }
 
-std::optional<KeyRef> append(KeyStore& store,
+std::optional<RangeRef> append(KeyStore& store,
 							 const std::vector<std::byte>& key,
 							 Version cv) {
 	return store.appendKey(
@@ -111,12 +111,12 @@ std::optional<KeyRef> append(KeyStore& store,
 // Reads a key through the public interface only, following the block chain.
 // Optionally reports how many blocks the key spans.
 std::vector<std::byte> readKey(const KeyStore& store,
-							   const KeyRef& ref,
+							   const RangeRef& ref,
 							   std::size_t* blocksSpanned = nullptr) {
 	std::vector<std::byte> bytes;
 
 	// The empty key has no storage.
-	if (ref.keyLength == 0) {
+	if (ref.beginLength == 0) {
 		if (blocksSpanned != nullptr) {
 			*blocksSpanned = 0;
 		}
@@ -127,7 +127,7 @@ std::vector<std::byte> readKey(const KeyStore& store,
 	ASSERT(block != nullptr);
 	const std::byte* data = store.keyStart(ref);
 	std::size_t available = store.blockSize() - ref.keyOffset;
-	std::size_t remaining = ref.keyLength;
+	std::size_t remaining = ref.beginLength;
 	std::size_t blocks = 1;
 
 	for (;;) {
@@ -210,21 +210,21 @@ TEST_CASE("/resolver/KeyStore/ReusedBlockDoesNotReviveOldReferences") {
 	KeyStore store(pool);
 
 	const auto oldKey = makeKey(10, 1);
-	const std::optional<KeyRef> oldRef = append(store, oldKey, 1);
+	const std::optional<RangeRef> oldRef = append(store, oldKey, 1);
 	ASSERT(oldRef.has_value());
 
 	ASSERT(store.reclaimOldest() == Version{1});
 
 	const auto newKey = makeKey(10, 2);
-	const std::optional<KeyRef> newRef = append(store, newKey, 2);
+	const std::optional<RangeRef> newRef = append(store, newKey, 2);
 	ASSERT(newRef.has_value());
 
 	ASSERT(newRef->firstBlock == oldRef->firstBlock);
 	ASSERT_EQ(newRef->keyOffset, oldRef->keyOffset);
 	ASSERT(newRef->blockGen > oldRef->blockGen);
 
-	ASSERT(!store.isValid(*oldRef));
-	ASSERT(store.isValid(*newRef));
+	ASSERT(!store.isKeyValid(*oldRef));
+	ASSERT(store.isKeyValid(*newRef));
 	ASSERT(readKey(store, *newRef) == newKey);
 }
 
@@ -235,7 +235,7 @@ TEST_CASE("/resolver/KeyStore/FailedAppendKeepsExistingKeys") {
 	KeyStore store(pool);
 
 	const auto existing = makeKey(10, 1);
-	const std::optional<KeyRef> ref = append(store, existing, 5);
+	const std::optional<RangeRef> ref = append(store, existing, 5);
 	ASSERT(ref.has_value());
 
 	const std::vector<std::byte*> taken = drainPool(pool, 1);
@@ -244,13 +244,13 @@ TEST_CASE("/resolver/KeyStore/FailedAppendKeepsExistingKeys") {
 	ASSERT(!append(store, makeKey(SmallPayload * 3, 2), 9).has_value());
 	ASSERT_EQ(freeBlockCount(pool), 1);
 
-	ASSERT(store.isValid(*ref));
+	ASSERT(store.isKeyValid(*ref));
 	ASSERT(readKey(store, *ref) == existing);
 	ASSERT_EQ(store.keyBlock(*ref)->maxCV, Version{5});
 	ASSERT(store.oldestCV() == Version{5});
 
 	const auto next = makeKey(4, 3);
-	const std::optional<KeyRef> nextRef = append(store, next, 6);
+	const std::optional<RangeRef> nextRef = append(store, next, 6);
 	ASSERT(nextRef.has_value());
 	ASSERT(nextRef->firstBlock == ref->firstBlock);
 	ASSERT_EQ(nextRef->keyOffset, sizeof(KeyBlockHeader) + existing.size());
@@ -266,8 +266,8 @@ TEST_CASE("/resolver/KeyStore/OutOfOrderCV") {
 	PagePool pool(PageSize, SmallBlock);
 	KeyStore store(pool);
 
-	const std::optional<KeyRef> a = append(store, makeKey(5, 1), 20);
-	const std::optional<KeyRef> b = append(store, makeKey(5, 2), 10);
+	const std::optional<RangeRef> a = append(store, makeKey(5, 1), 20);
+	const std::optional<RangeRef> b = append(store, makeKey(5, 2), 10);
 	ASSERT(a.has_value() && b.has_value());
 	ASSERT(a->firstBlock == b->firstBlock);
 
@@ -282,18 +282,18 @@ TEST_CASE("/resolver/KeyStore/EqualCVBlocksReclaimedIndividually") {
 	KeyStore store(pool);
 
 	// a fills the first block exactly; b goes to the second one.
-	const std::optional<KeyRef> a = append(store, makeKey(SmallPayload, 1), 7);
-	const std::optional<KeyRef> b = append(store, makeKey(10, 2), 7);
+	const std::optional<RangeRef> a = append(store, makeKey(SmallPayload, 1), 7);
+	const std::optional<RangeRef> b = append(store, makeKey(10, 2), 7);
 	ASSERT(a.has_value() && b.has_value());
 	ASSERT(!(a->firstBlock == b->firstBlock));
 
 	ASSERT(store.reclaimOldest() == Version{7});
-	ASSERT(!store.isValid(*a));
-	ASSERT(store.isValid(*b));
+	ASSERT(!store.isKeyValid(*a));
+	ASSERT(store.isKeyValid(*b));
 	ASSERT(store.oldestCV() == Version{7});
 
 	ASSERT(store.reclaimOldest() == Version{7});
-	ASSERT(!store.isValid(*b));
+	ASSERT(!store.isKeyValid(*b));
 }
 
 TEST_CASE("/resolver/KeyStore/EmptyPool") {
@@ -304,9 +304,9 @@ TEST_CASE("/resolver/KeyStore/EmptyPool") {
 	ASSERT(!store.reclaimOldest().has_value());
 	ASSERT(!append(store, makeKey(4, 1), 5).has_value());
 
-	const std::optional<KeyRef> empty = store.appendKey(nullptr, 0, 6);
+	const std::optional<RangeRef> empty = store.appendKey(nullptr, 0, 6);
 	ASSERT(empty.has_value());
-	ASSERT(store.isValid(*empty));
+	ASSERT(store.isKeyValid(*empty));
 }
 
 TEST_CASE("/resolver/KeyStore/BlockSize") {
@@ -321,20 +321,20 @@ TEST_CASE("/resolver/KeyStore/EmptyKey") {
 	PagePool pool(PageSize, SmallBlock);
 	KeyStore store(pool);
 
-	const std::optional<KeyRef> empty = store.appendKey(nullptr, 0, 5);
+	const std::optional<RangeRef> empty = store.appendKey(nullptr, 0, 5);
 
 	ASSERT(empty.has_value());
-	ASSERT_EQ(empty->keyLength, 0);
+	ASSERT_EQ(empty->beginLength, 0);
 	ASSERT(store.keyStart(*empty) == nullptr);
 	ASSERT(store.keyBlock(*empty) == nullptr);
-	ASSERT(store.isValid(*empty));
+	ASSERT(store.isKeyValid(*empty));
 	ASSERT(readKey(store, *empty).empty());
 
 	// No bytes consumed and no version recorded.
 	ASSERT(!store.oldestCV().has_value());
 
 	const auto next = makeKey(4, 1);
-	const std::optional<KeyRef> ref = append(store, next, 6);
+	const std::optional<RangeRef> ref = append(store, next, 6);
 	ASSERT(ref.has_value());
 	ASSERT_EQ(ref->keyOffset, sizeof(KeyBlockHeader));
 }
@@ -347,14 +347,14 @@ TEST_CASE("/resolver/KeyStore/EmptyKeyWithoutFreeBlocks") {
 	ASSERT(appendFullBlockKey(store, 1).has_value());
 	ASSERT(!store.appendKey(ShortKey, sizeof(ShortKey), 2).has_value());
 
-	const std::optional<KeyRef> empty = store.appendKey(nullptr, 0, 3);
+	const std::optional<RangeRef> empty = store.appendKey(nullptr, 0, 3);
 	ASSERT(empty.has_value());
-	ASSERT(store.isValid(*empty));
+	ASSERT(store.isKeyValid(*empty));
 
 	// Reclamation removes storage, not the empty key.
 	ASSERT(store.reclaimOldest() == Version{1});
 	ASSERT(!store.reclaimOldest().has_value());
-	ASSERT(store.isValid(*empty));
+	ASSERT(store.isKeyValid(*empty));
 	ASSERT(store.keyStart(*empty) == nullptr);
 }
 
@@ -365,8 +365,8 @@ TEST_CASE("/resolver/KeyStore/SingleBlockKeys") {
 	const auto first = makeKey(10, 1);
 	const auto second = makeKey(7, 2);
 
-	const std::optional<KeyRef> a = append(store, first, 5);
-	const std::optional<KeyRef> b = append(store, second, 6);
+	const std::optional<RangeRef> a = append(store, first, 5);
+	const std::optional<RangeRef> b = append(store, second, 6);
 
 	ASSERT(a.has_value() && b.has_value());
 
@@ -374,7 +374,7 @@ TEST_CASE("/resolver/KeyStore/SingleBlockKeys") {
 	ASSERT(a->firstBlock == b->firstBlock);
 	ASSERT_EQ(a->keyOffset, sizeof(KeyBlockHeader));
 	ASSERT_EQ(b->keyOffset, sizeof(KeyBlockHeader) + first.size());
-	ASSERT_EQ(a->keyLength, first.size());
+	ASSERT_EQ(a->beginLength, first.size());
 	ASSERT_EQ(a->blockGen, b->blockGen);
 
 	std::size_t spanned = 0;
@@ -400,7 +400,7 @@ TEST_CASE("/resolver/KeyStore/MultiBlockKey") {
 
 	ASSERT(append(store, prefix, 1).has_value());
 
-	const std::optional<KeyRef> ref = append(store, key, 9);
+	const std::optional<RangeRef> ref = append(store, key, 9);
 	ASSERT(ref.has_value());
 	ASSERT_EQ(ref->keyOffset, sizeof(KeyBlockHeader) + prefix.size());
 
@@ -420,7 +420,7 @@ TEST_CASE("/resolver/KeyStore/MultiBlockKey") {
 
 	// The next key continues in the last block of the previous one.
 	const auto after = makeKey(5, 5);
-	const std::optional<KeyRef> next = append(store, after, 10);
+	const std::optional<RangeRef> next = append(store, after, 10);
 	ASSERT(next.has_value());
 	ASSERT_EQ(next->keyOffset, sizeof(KeyBlockHeader) + 15);
 	ASSERT(readKey(store, *next) == after);
@@ -432,7 +432,7 @@ TEST_CASE("/resolver/KeyStore/KeyFillsBlockExactly") {
 
 	// The missing bytes are an exact multiple of the payload.
 	const auto key = makeKey(SmallPayload * 2, 6);
-	const std::optional<KeyRef> ref = append(store, key, 1);
+	const std::optional<RangeRef> ref = append(store, key, 1);
 	ASSERT(ref.has_value());
 
 	std::size_t spanned = 0;
@@ -441,7 +441,7 @@ TEST_CASE("/resolver/KeyStore/KeyFillsBlockExactly") {
 
 	// The full last block is followed by a fresh open block.
 	const auto next = makeKey(3, 7);
-	const std::optional<KeyRef> nextRef = append(store, next, 2);
+	const std::optional<RangeRef> nextRef = append(store, next, 2);
 	ASSERT(nextRef.has_value());
 	ASSERT_EQ(nextRef->keyOffset, sizeof(KeyBlockHeader));
 	ASSERT(nextRef->firstBlock != ref->firstBlock);
@@ -461,7 +461,7 @@ TEST_CASE("/resolver/KeyStore/ReservationFailsOnFirstExtraBlock") {
 
 	// No block was kept; the next key opens one.
 	const auto small = makeKey(4, 9);
-	const std::optional<KeyRef> ref = append(store, small, 2);
+	const std::optional<RangeRef> ref = append(store, small, 2);
 	ASSERT(ref.has_value());
 	ASSERT_EQ(ref->keyOffset, sizeof(KeyBlockHeader));
 	ASSERT(readKey(store, *ref) == small);
@@ -482,7 +482,7 @@ TEST_CASE("/resolver/KeyStore/ReservationFailsOnLaterExtraBlock") {
 	ASSERT_EQ(freeBlockCount(pool), 2);
 
 	const auto small = makeKey(4, 9);
-	const std::optional<KeyRef> ref = append(store, small, 2);
+	const std::optional<RangeRef> ref = append(store, small, 2);
 	ASSERT(ref.has_value());
 	ASSERT_EQ(ref->keyOffset, sizeof(KeyBlockHeader));
 	ASSERT(readKey(store, *ref) == small);
@@ -520,19 +520,19 @@ TEST_CASE("/resolver/KeyStore/IsValid") {
 	KeyStore store(pool);
 
 	// a fills the first block exactly; b starts in the second one.
-	const std::optional<KeyRef> a = append(store, makeKey(SmallPayload, 1), 1);
-	const std::optional<KeyRef> b = append(store, makeKey(10, 2), 2);
+	const std::optional<RangeRef> a = append(store, makeKey(SmallPayload, 1), 1);
+	const std::optional<RangeRef> b = append(store, makeKey(10, 2), 2);
 	ASSERT(a.has_value() && b.has_value());
 
-	ASSERT(store.isValid(*a));
-	ASSERT(store.isValid(*b));
+	ASSERT(store.isKeyValid(*a));
+	ASSERT(store.isKeyValid(*b));
 
 	ASSERT(store.reclaimOldest().has_value());
-	ASSERT(!store.isValid(*a));
-	ASSERT(store.isValid(*b));
+	ASSERT(!store.isKeyValid(*a));
+	ASSERT(store.isKeyValid(*b));
 
 	ASSERT(store.reclaimOldest().has_value());
-	ASSERT(!store.isValid(*b));
+	ASSERT(!store.isKeyValid(*b));
 }
 
 TEST_CASE("/resolver/KeyStore/IsValidMultiBlockKey") {
@@ -540,14 +540,14 @@ TEST_CASE("/resolver/KeyStore/IsValidMultiBlockKey") {
 	KeyStore store(pool);
 
 	// The key starts in the first block and continues into the next two.
-	const std::optional<KeyRef> ref =
+	const std::optional<RangeRef> ref =
 		append(store, makeKey(SmallPayload * 2 + 10, 1), 1);
 	ASSERT(ref.has_value());
-	ASSERT(store.isValid(*ref));
+	ASSERT(store.isKeyValid(*ref));
 
 	// Reclaiming the first block invalidates the whole key.
 	ASSERT(store.reclaimOldest().has_value());
-	ASSERT(!store.isValid(*ref));
+	ASSERT(!store.isKeyValid(*ref));
 }
 
 namespace {
@@ -582,7 +582,7 @@ StringRef asStringRef(const std::vector<std::byte>& bytes) {
 
 // Checks the order of a and b in both directions, comparing the stored keys
 // with each other and the contiguous bytes of each with the other stored key.
-void checkOrder(const KeyStore& store, const KeyRef& a, const KeyRef& b,
+void checkOrder(const KeyStore& store, const RangeRef& a, const RangeRef& b,
 				int expected) {
 	ASSERT_EQ(sign(store.compareKeys(a, b)), expected);
 	ASSERT_EQ(sign(store.compareKeys(b, a)), -expected);
@@ -600,8 +600,8 @@ TEST_CASE("/resolver/KeyStore/CompareKeysEqual") {
 	KeyStore store(pool);
 
 	const auto key = makeKey(10, 1);
-	const std::optional<KeyRef> a = append(store, key, 1);
-	const std::optional<KeyRef> b = append(store, key, 1);
+	const std::optional<RangeRef> a = append(store, key, 1);
+	const std::optional<RangeRef> b = append(store, key, 1);
 	ASSERT(a.has_value() && b.has_value());
 
 	ASSERT_EQ(store.compareKeys(*a, *a), 0);
@@ -612,9 +612,9 @@ TEST_CASE("/resolver/KeyStore/CompareKeysEmpty") {
 	PagePool pool(PageSize, SmallBlock);
 	KeyStore store(pool);
 
-	const std::optional<KeyRef> empty1 = store.appendKey(nullptr, 0, 1);
-	const std::optional<KeyRef> empty2 = store.appendKey(nullptr, 0, 1);
-	const std::optional<KeyRef> smallest = append(store, bytesOf({0x00}), 1);
+	const std::optional<RangeRef> empty1 = store.appendKey(nullptr, 0, 1);
+	const std::optional<RangeRef> empty2 = store.appendKey(nullptr, 0, 1);
+	const std::optional<RangeRef> smallest = append(store, bytesOf({0x00}), 1);
 	ASSERT(empty1.has_value() && empty2.has_value() && smallest.has_value());
 
 	checkOrder(store, *empty1, *empty2, 0);
@@ -627,9 +627,9 @@ TEST_CASE("/resolver/KeyStore/CompareKeysPrefix") {
 	PagePool pool(PageSize, SmallBlock);
 	KeyStore store(pool);
 
-	const std::optional<KeyRef> ab = append(store, bytesOf({'a', 'b'}), 1);
-	const std::optional<KeyRef> abc = append(store, bytesOf({'a', 'b', 'c'}), 1);
-	const std::optional<KeyRef> ab0 = append(store, bytesOf({'a', 'b', 0}), 1);
+	const std::optional<RangeRef> ab = append(store, bytesOf({'a', 'b'}), 1);
+	const std::optional<RangeRef> abc = append(store, bytesOf({'a', 'b', 'c'}), 1);
+	const std::optional<RangeRef> ab0 = append(store, bytesOf({'a', 'b', 0}), 1);
 	ASSERT(ab.has_value() && abc.has_value() && ab0.has_value());
 
 	// A proper prefix precedes the longer key, whatever the extra bytes.
@@ -655,8 +655,8 @@ TEST_CASE("/resolver/KeyStore/CompareKeysFirstDifferenceDecides") {
 			greater[i] = std::byte{0};
 		}
 
-		const std::optional<KeyRef> a = append(store, base, 1);
-		const std::optional<KeyRef> b = append(store, greater, 1);
+		const std::optional<RangeRef> a = append(store, base, 1);
+		const std::optional<RangeRef> b = append(store, greater, 1);
 		ASSERT(a.has_value() && b.has_value());
 
 		checkOrder(store, *a, *b, expectedOrder(base, greater));
@@ -668,10 +668,10 @@ TEST_CASE("/resolver/KeyStore/CompareKeysUnsignedBytes") {
 	PagePool pool(PageSize, SmallBlock);
 	KeyStore store(pool);
 
-	const std::optional<KeyRef> k00 = append(store, bytesOf({0x00}), 1);
-	const std::optional<KeyRef> k7f = append(store, bytesOf({0x7F}), 1);
-	const std::optional<KeyRef> k80 = append(store, bytesOf({0x80}), 1);
-	const std::optional<KeyRef> kff = append(store, bytesOf({0xFF}), 1);
+	const std::optional<RangeRef> k00 = append(store, bytesOf({0x00}), 1);
+	const std::optional<RangeRef> k7f = append(store, bytesOf({0x7F}), 1);
+	const std::optional<RangeRef> k80 = append(store, bytesOf({0x80}), 1);
+	const std::optional<RangeRef> kff = append(store, bytesOf({0xFF}), 1);
 	ASSERT(k00.has_value() && k7f.has_value() && k80.has_value() &&
 		   kff.has_value());
 
@@ -690,9 +690,9 @@ TEST_CASE("/resolver/KeyStore/CompareKeysMultiBlock") {
 
 	const auto base = makeKey(SmallPayload * 3 + 7, 5);
 
-	const std::optional<KeyRef> a = append(store, base, 1);
+	const std::optional<RangeRef> a = append(store, base, 1);
 	ASSERT(append(store, makeKey(13, 6), 1).has_value());
-	const std::optional<KeyRef> same = append(store, base, 1);
+	const std::optional<RangeRef> same = append(store, base, 1);
 	ASSERT(a.has_value() && same.has_value());
 	ASSERT(a->keyOffset != same->keyOffset);
 
@@ -720,7 +720,7 @@ TEST_CASE("/resolver/KeyStore/CompareKeysMultiBlock") {
 			other[position] = static_cast<std::byte>(
 				std::to_integer<int>(other[position]) + delta);
 
-			const std::optional<KeyRef> b = append(store, other, 1);
+			const std::optional<RangeRef> b = append(store, other, 1);
 			ASSERT(b.has_value());
 
 			checkOrder(store, *a, *b, expectedOrder(base, other));
@@ -730,7 +730,7 @@ TEST_CASE("/resolver/KeyStore/CompareKeysMultiBlock") {
 
 	// A multi-block prefix precedes the longer key.
 	const std::vector<std::byte> prefix(base.begin(), base.end() - 1);
-	const std::optional<KeyRef> p = append(store, prefix, 1);
+	const std::optional<RangeRef> p = append(store, prefix, 1);
 	ASSERT(p.has_value());
 	checkOrder(store, *p, *a, -1);
 }
@@ -755,7 +755,7 @@ TEST_CASE("/resolver/KeyStore/CompareKeysAgainstReference") {
 	};
 
 	std::vector<std::vector<std::byte>> keys;
-	std::vector<KeyRef> refs;
+	std::vector<RangeRef> refs;
 
 	for (int i = 0; i < 80; ++i) {
 		const std::size_t length = next() % (base.size() + 1);
@@ -765,7 +765,7 @@ TEST_CASE("/resolver/KeyStore/CompareKeysAgainstReference") {
 			key[next() % length] = values[next() % std::size(values)];
 		}
 
-		const std::optional<KeyRef> ref = append(store, key, 1);
+		const std::optional<RangeRef> ref = append(store, key, 1);
 		ASSERT(ref.has_value());
 		ASSERT(readKey(store, *ref) == key);
 
@@ -878,7 +878,7 @@ TEST_CASE("/resolver/KeyStore/AppendRangePointStoresKeyOnce") {
 	checkRangeBytes(store, *r, begin, end);
 
 	// The next record starts right after the four stored bytes.
-	const std::optional<KeyRef> next = append(store, bytesOf({'z'}), 7);
+	const std::optional<RangeRef> next = append(store, bytesOf({'z'}), 7);
 	ASSERT(next.has_value());
 	ASSERT_EQ(next->keyOffset, sizeof(KeyBlockHeader) + 4);
 }
@@ -938,17 +938,15 @@ TEST_CASE("/resolver/KeyStore/AppendRangeEmptyBegin") {
 	checkRangeBytes(store, *general, empty, bytesOf({'x'}));
 
 	// An empty begin does not make the range valid forever.
-	const KeyRef begin = store.beginKey(*general);
-	ASSERT_EQ(begin.keyLength, 0);
 	ASSERT(store.isValid(*general));
 
 	ASSERT(store.reclaimOldest() == Version{3});
 	ASSERT(!store.isValid(*point));
 	ASSERT(!store.isValid(*general));
-	ASSERT(store.isValid(begin));
+	ASSERT(store.isKeyValid(*general));
 }
 
-TEST_CASE("/resolver/KeyStore/BeginKeyViewsTheRecord") {
+TEST_CASE("/resolver/KeyStore/RangeReadsBackItsBegin") {
 	PagePool pool(PageSize, SmallBlock);
 	KeyStore store(pool);
 
@@ -958,12 +956,7 @@ TEST_CASE("/resolver/KeyStore/BeginKeyViewsTheRecord") {
 	const std::optional<RangeRef> r = appendRange(store, begin, end, 4);
 	ASSERT(r.has_value());
 
-	const KeyRef key = store.beginKey(*r);
-	ASSERT(key.firstBlock == r->firstBlock);
-	ASSERT_EQ(key.keyOffset, r->keyOffset);
-	ASSERT_EQ(key.keyLength, r->beginLength);
-	ASSERT_EQ(key.blockGen, r->blockGen);
-	ASSERT(readKey(store, key) == begin);
+	ASSERT(readKey(store, *r) == begin);
 }
 
 // Records whose end starts exactly at the first byte of the next block, one
@@ -1060,7 +1053,7 @@ TEST_CASE("/resolver/KeyStore/AppendRangeIsAllOrNothing") {
 }
 
 // Random points and general ranges, some spanning blocks, compared with
-// random external keys through both views and against beginKey.
+// random external keys through both views and as a key through compareKeys.
 TEST_CASE("/resolver/KeyStore/CompareRangeEndsAgainstReference") {
 	PagePool pool(8 * PageSize, SmallBlock);
 	KeyStore store(pool);
@@ -1126,8 +1119,7 @@ TEST_CASE("/resolver/KeyStore/CompareRangeEndsAgainstReference") {
 					  expectedOrder(key, s.begin));
 			ASSERT_EQ(sign(store.compareEnd(asStringRef(key), s.ref)),
 					  expectedOrder(key, s.end));
-			ASSERT_EQ(sign(store.compareKeys(asStringRef(key),
-											 store.beginKey(s.ref))),
+			ASSERT_EQ(sign(store.compareKeys(asStringRef(key), s.ref)),
 					  expectedOrder(key, s.begin));
 		}
 	}

@@ -27,13 +27,6 @@ struct KeyBlockHeader {
     Version maxCV;
 };
 
-struct KeyRef {
-    const KeyBlockHeader* firstBlock;
-    std::uint16_t keyOffset;
-    std::uint16_t keyLength;
-    std::uint64_t blockGen;
-};
-
 struct RangeRef {
 	const KeyBlockHeader* firstBlock;
 	std::uint16_t keyOffset;
@@ -53,17 +46,17 @@ class KeyStore {
 		KeyStore(const KeyStore&) = delete;
 		KeyStore& operator=(const KeyStore&) = delete;
 
-		std::optional<KeyRef> appendKey(const std::byte* key,
+		std::optional<RangeRef> appendKey(const std::byte* key,
                  std::uint16_t length,
                  Version cv);
 		std::optional<Version> oldestCV() const;
 		std::optional<Version> reclaimOldest();
-		const std::byte* keyStart(KeyRef ref) const;
-		bool isValid(KeyRef ref) const;
-		const KeyBlockHeader* keyBlock(KeyRef ref) const;
+		const std::byte* keyStart(RangeRef ref) const;
+		bool isKeyValid(RangeRef ref) const;
+		const KeyBlockHeader* keyBlock(RangeRef ref) const;
 		std::size_t blockSize() const;
-		int compareKeys(const KeyRef& kr1, const KeyRef& kr2) const;
-		int compareKeys(const StringRef& key, const KeyRef& stored) const;
+		int compareKeys(const RangeRef& kr1, const RangeRef& kr2) const;
+		int compareKeys(const StringRef& key, const RangeRef& stored) const;
 
 		// Precondition: begin < end. Neither key is longer than 65,535 bytes.
 		std::optional<RangeRef> appendRange(
@@ -82,7 +75,6 @@ class KeyStore {
 			const RangeRef& source,
 			Version cv);
 		bool isValid(const RangeRef& ref) const;
-		KeyRef beginKey(const RangeRef& ref) const;
 		int compareBegin(const StringRef& key, const RangeRef& stored) const;
 		int compareEnd(const StringRef& key, const RangeRef& stored) const;
 	private:
@@ -102,7 +94,7 @@ class KeyStore {
 		};
 
 		static RecordSource external(const StringRef& key);
-		static RecordSource stored(const KeyRef& key);
+		static RecordSource stored(const RangeRef& key);
 
 		std::optional<RecordStart> appendRecord(
 			const RecordSource& first,
@@ -114,14 +106,13 @@ class KeyStore {
 			bool point,
 			Version cv);
 		std::optional<RangeRef> appendWithStoredBegin(
-			const KeyRef& begin,
+			const RangeRef& begin,
 			const StringRef& end,
 			Version cv);
 		std::optional<RangeRef> appendWithStoredEnd(
 			const StringRef& begin,
-			const KeyRef& end,
+			const RangeRef& source,
 			Version cv);
-		KeyRef endKey(const RangeRef& ref) const;
 		void locate(
 			const KeyBlockHeader*& block,
 			std::size_t& offset,

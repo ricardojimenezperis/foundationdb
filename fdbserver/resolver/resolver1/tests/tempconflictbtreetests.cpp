@@ -255,7 +255,7 @@ public:
 				const std::size_t last = std::min(level.size(), i + fanout);
 				for (std::size_t j = last; j > i; --j) {
 					const Bytes& separator = level[j - 1].lowerBound;
-					const std::optional<KeyRef> key = keys().appendKey(
+					const std::optional<RangeRef> key = keys().appendKey(
 						reinterpret_cast<const std::byte*>(separator.data()),
 						static_cast<std::uint16_t>(separator.size()),
 						level[j - 1].cv);
@@ -716,9 +716,9 @@ void checkSubtree(TestTree& t, const BNodeHeader* node,
 		// Every begin in this child is at least its separator, and every
 		// begin before it is below it. Entries are checked to be in order,
 		// so the entries on either side of the separator are enough.
-		const KeyRef& separator = internal->separators[slot];
+		const RangeRef& separator = internal->separators[slot];
 		// A separator whose key was reclaimed has expired and is not read.
-		if (!t.keys().isValid(separator)) {
+		if (!t.keys().isKeyValid(separator)) {
 			ASSERT(internal->separatorsCV[slot] <= t.tree.reclaimCV());
 			continue;
 		}
@@ -828,7 +828,7 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorKeepsFreshSeparator") {
 	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {8, 2, 9}));
 	t.build(3);
 	InternalBlock* root = rootNode(t);
-	const KeyRef before = root->separators[root->order[1]];
+	const RangeRef before = root->separators[root->order[1]];
 
 	Access::setReclaimCV(t.tree, 7);
 	ASSERT(!Access::refreshSeparator(t.tree, root, 1));
@@ -854,7 +854,7 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorFromLeaf") {
 	ASSERT_EQ(root->header.count, 3);
 	ASSERT_EQ(root->separatorsCV[slot], 30);
 	ASSERT_EQ(t.keys().compareKeys(asRef(key(34)), root->separators[slot]), 0);
-	ASSERT(t.keys().isValid(root->separators[slot]));
+	ASSERT(t.keys().isKeyValid(root->separators[slot]));
 	ASSERT_EQ(leafEntries(t, t.leaves[1].leaf).size(), 1);
 	checkTree(t);
 }
@@ -1580,7 +1580,7 @@ void insertEntry(TestTree& t, std::size_t i, std::size_t rank,
 }
 
 // The separator of node in its parent.
-const KeyRef& separatorOf(const BNodeHeader* node) {
+const RangeRef& separatorOf(const BNodeHeader* node) {
 	return node->parent->separators[node->parentSlot];
 }
 
@@ -1705,7 +1705,7 @@ TEST_CASE("/resolver/TempConflictBTree/InsertAtUpdateCombinations") {
 		InternalBlock* root = rootNode(t);
 		LeafBlock* leaf = t.leaves[1].leaf;
 		const auto slot = leaf->header.parentSlot;
-		const KeyRef separator = separatorOf(&leaf->header);
+		const RangeRef separator = separatorOf(&leaf->header);
 		const Version separatorCV = separatorCVOf(&leaf->header);
 		const Version leafCV = leaf->header.maxCV;
 		const Version subtreeCV = root->maxSubtreesCV[slot];
@@ -1756,7 +1756,7 @@ TEST_CASE("/resolver/TempConflictBTree/InsertAtPropagatesSeparator") {
 		InternalBlock* root = rootNode(t);
 		LeafBlock* leaf = t.leaves[c.leaf].leaf;
 		InternalBlock* parent = leaf->header.parent;
-		const KeyRef parentSeparator = separatorOf(&parent->header);
+		const RangeRef parentSeparator = separatorOf(&parent->header);
 		const Version parentSeparatorCV = separatorCVOf(&parent->header);
 
 		// A key below the leaf's first entry, still within the leaf.
@@ -1857,7 +1857,7 @@ TEST_CASE("/resolver/TempConflictBTree/PropagateUpdatesSeparator") {
 		t.build(3);
 		LeafBlock* leaf = t.leaves[c.leaf].leaf;
 		InternalBlock* parent = leaf->parent();
-		const KeyRef parentSeparator = separatorOf(&parent->header);
+		const RangeRef parentSeparator = separatorOf(&parent->header);
 		const Version parentSeparatorCV = separatorCVOf(&parent->header);
 
 		t.nodes().eraseAt(0, leaf);
@@ -1892,7 +1892,7 @@ TEST_CASE("/resolver/TempConflictBTree/PropagateUpdatesSeparatorOfInternalNode")
 	// Make I1's first separator the key one above its lower bound, as if its
 	// first leaf had lost a first entry there.
 	const Bytes k = keyAfter(t.leaves[3].lowerBound);
-	const std::optional<KeyRef> key = t.keys().appendKey(
+	const std::optional<RangeRef> key = t.keys().appendKey(
 		reinterpret_cast<const std::byte*>(k.data()),
 		static_cast<std::uint16_t>(k.size()), 7);
 	ASSERT(key.has_value());
@@ -1904,7 +1904,7 @@ TEST_CASE("/resolver/TempConflictBTree/PropagateUpdatesSeparatorOfInternalNode")
 	ASSERT_EQ(t.keys().compareKeys(asRef(k), separatorOf(&i1->header)), 0);
 	ASSERT_EQ(separatorCVOf(&i1->header), 7);
 
-	const KeyRef rootFirst = root->separators[root->order[0]];
+	const RangeRef rootFirst = root->separators[root->order[0]];
 	Access::updateSeparator(t.tree, root);
 	ASSERT(root->separators[root->order[0]].firstBlock == rootFirst.firstBlock);
 
@@ -2167,7 +2167,7 @@ TEST_CASE("/resolver/TempConflictBTree/PreserveRightExteriorUpdatesSeparator") {
 	checkSameEntries(checkTree(t), modelEntries(t));
 
 	// Not the first entry: only the range changes.
-	const KeyRef separator = separatorOf(&leaf->header);
+	const RangeRef separator = separatorOf(&leaf->header);
 	Access::preserveRightExterior(t.tree, asRef(wideKey(305)), leaf, 1);
 	ASSERT(separatorOf(&leaf->header).keyOffset == separator.keyOffset);
 	t.leaves[3].entries[1].begin = wideKey(305);
@@ -2234,7 +2234,7 @@ TEST_CASE("/resolver/TempConflictBTree/EraseAtKeepsLeaf") {
 			const auto first = erasedFrom->order[0];
 			ASSERT_EQ(t.keys().compareBegin(
 						  [&] {
-							  const KeyRef k = separatorOf(&erasedFrom->header);
+							  const RangeRef k = separatorOf(&erasedFrom->header);
 							  (void)k;
 							  return asRef(model[3 * c.leaf].begin);
 						  }(),

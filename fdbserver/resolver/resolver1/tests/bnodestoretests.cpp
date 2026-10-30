@@ -540,14 +540,14 @@ TEST_CASE("/resolver/BNodeStore/AllocatedNodesHaveAllSlotsFree") {
 namespace {
 
 struct Entry {
-	KeyRef key;
+	RangeRef key;
 	BNodeHeader* child;
 	Version cv;
 };
 
-bool sameKeyRef(const KeyRef& a, const KeyRef& b) {
+bool sameKey(const RangeRef& a, const RangeRef& b) {
 	return a.firstBlock == b.firstBlock && a.keyOffset == b.keyOffset &&
-		   a.keyLength == b.keyLength && a.blockGen == b.blockGen;
+		   a.beginLength == b.beginLength && a.blockGen == b.blockGen;
 }
 
 bool sameRangeRef(const RangeRef& a, const RangeRef& b) {
@@ -595,7 +595,7 @@ void checkInternalNode(const InternalBlock* node,
 		free.unsetFree(slot);
 
 		const Entry& e = expected[i];
-		ASSERT(sameKeyRef(node->separators[slot], e.key));
+		ASSERT(sameKey(node->separators[slot], e.key));
 		ASSERT_EQ(node->separatorsCV[slot], e.cv);
 		ASSERT(node->children[slot] == e.child);
 		ASSERT_EQ(node->maxSubtreesCV[slot], e.child->maxCV);
@@ -626,7 +626,7 @@ void fillInternalNode(RankFor rankFor) {
 		const std::byte bytes[] = {
 			std::byte{'k'}, static_cast<std::byte>(n)
 		};
-		const std::optional<KeyRef> key = keys.appendKey(bytes, 2, 1);
+		const std::optional<RangeRef> key = keys.appendKey(bytes, 2, 1);
 		ASSERT(key.has_value());
 
 		// Children have distinct versions, different from the separator's.
@@ -779,9 +779,9 @@ constexpr std::size_t InsertionOrder[SearchKeyCount] = {
 	5, 2, 8, 0, 9, 3, 7, 1, 6, 4
 };
 
-KeyRef storeSearchKey(KeyStore& keys, unsigned value) {
+RangeRef storeSearchKey(KeyStore& keys, unsigned value) {
 	const std::byte bytes[] = {std::byte{'k'}, static_cast<std::byte>(value)};
-	const std::optional<KeyRef> key = keys.appendKey(bytes, 2, 1);
+	const std::optional<RangeRef> key = keys.appendKey(bytes, 2, 1);
 	ASSERT(key.has_value());
 	return *key;
 }
@@ -929,7 +929,7 @@ void insertInternalEntry(BNodeStore& store, KeyStore& keys,
 						 InternalBlock* node, std::vector<Entry>& expected,
 						 std::size_t rank, std::size_t n) {
 	const std::byte bytes[] = {std::byte{'k'}, static_cast<std::byte>(n)};
-	const std::optional<KeyRef> key = keys.appendKey(bytes, 2, 1);
+	const std::optional<RangeRef> key = keys.appendKey(bytes, 2, 1);
 	ASSERT(key.has_value());
 
 	LeafBlock* child = store.allocateLeaf(static_cast<Version>(10 + n));
@@ -1203,7 +1203,7 @@ TEST_CASE("/resolver/BNodeStore/ParentAndParentRank") {
 	ASSERT(leaf->parent() == nullptr);
 	ASSERT(internal->parent() == nullptr);
 
-	const std::optional<KeyRef> key = keys.appendKey(nullptr, 0, 1);
+	const std::optional<RangeRef> key = keys.appendKey(nullptr, 0, 1);
 	ASSERT(key.has_value());
 	store.insertAt(0, *key, &leaf->header, 1, node);
 	ASSERT(leaf->parent() == node);

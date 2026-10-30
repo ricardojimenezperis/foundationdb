@@ -24,7 +24,6 @@ void printLayout(const char* name) {
 int main() {
 	std::printf("BlockSize            %zu bytes\n", BlockSize);
 	std::printf("BNodeBlockHeader     %zu bytes\n", sizeof(BNodeHeader));
-	std::printf("KeyRef               %zu bytes\n", sizeof(KeyRef));
 	std::printf("Version              %zu bytes\n", sizeof(Version));
 	std::printf("pointer              %zu bytes\n", sizeof(void*));
 	std::printf("\n");

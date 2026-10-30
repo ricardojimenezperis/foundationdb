@@ -19,19 +19,19 @@ KeyStore::~KeyStore() {
 	}
 }
 
-std::optional<KeyRef> KeyStore::appendKey(
+std::optional<RangeRef> KeyStore::appendKey(
 	const std::byte* key,
 	std::uint16_t length,
 	Version cv) {
 	if (length == 0) {
-		return KeyRef{nullptr, 0, 0, 0};
+		return RangeRef{nullptr, 0, 0, 0, 0, 0};
 	}
 	const std::optional<RecordStart> start =
 		appendRecord(RecordSource{key, nullptr, 0, length}, RecordSource{}, cv);
 	if (!start) {
 		return std::nullopt;
 	}
-	return KeyRef{start->block, start->offset, length, start->generation};
+	return RangeRef{start->block, start->offset, length, 0, 0, start->generation};
 }
 
 KeyStore::RecordSource KeyStore::external(const StringRef& key) {
@@ -43,8 +43,8 @@ KeyStore::RecordSource KeyStore::external(const StringRef& key) {
 	};
 }
 
-KeyStore::RecordSource KeyStore::stored(const KeyRef& key) {
-	return RecordSource{nullptr, key.firstBlock, key.keyOffset, key.keyLength};
+KeyStore::RecordSource KeyStore::stored(const RangeRef& key) {
+	return RecordSource{nullptr, key.firstBlock, key.keyOffset, key.beginLength};
 }
 
 std::optional<KeyStore::RecordStart> KeyStore::appendRecord(
@@ -210,19 +210,19 @@ std::optional<Version> KeyStore::oldestCV() const {
 	return oldestKeyBlock_->maxCV;
 }
 
-const std::byte* KeyStore::keyStart(KeyRef ref) const {
-	if (ref.keyLength == 0) {
+const std::byte* KeyStore::keyStart(RangeRef ref) const {
+	if (ref.beginLength == 0) {
 		return nullptr;
 	}
 	return reinterpret_cast<const std::byte*>(ref.firstBlock)+ref.keyOffset;
 }
 
-bool KeyStore::isValid(KeyRef ref) const {
-	return ref.keyLength == 0 ||
+bool KeyStore::isKeyValid(RangeRef ref) const {
+	return ref.beginLength == 0 ||
 		ref.blockGen > lastReclaimedKeyGeneration_;
 }
 
-const KeyBlockHeader* KeyStore::keyBlock(KeyRef ref) const {
+const KeyBlockHeader* KeyStore::keyBlock(RangeRef ref) const {
 	return ref.firstBlock;
 }
 
@@ -230,14 +230,14 @@ std::size_t KeyStore::blockSize() const {
 	return blockSize_;
 }
 
-int KeyStore::compareKeys(const KeyRef& kr1, const KeyRef& kr2) const {
-	assert(isValid(kr1) && isValid(kr2));
+int KeyStore::compareKeys(const RangeRef& kr1, const RangeRef& kr2) const {
+	assert(isKeyValid(kr1) && isKeyValid(kr2));
 	const KeyBlockHeader* block1=kr1.firstBlock;
 	const KeyBlockHeader* block2=kr2.firstBlock;
-	std::size_t bytes1 = std::min<std::size_t>(kr1.keyLength, blockSize_ - kr1.keyOffset);
-	std::size_t bytes2 = std::min<std::size_t>(kr2.keyLength, blockSize_ - kr2.keyOffset);
-	std::size_t rem1 = kr1.keyLength;
-	std::size_t rem2 = kr2.keyLength;
+	std::size_t bytes1 = std::min<std::size_t>(kr1.beginLength, blockSize_ - kr1.keyOffset);
+	std::size_t bytes2 = std::min<std::size_t>(kr2.beginLength, blockSize_ - kr2.keyOffset);
+	std::size_t rem1 = kr1.beginLength;
+	std::size_t rem2 = kr2.beginLength;
 	std::size_t usable = blockSize_-sizeof(KeyBlockHeader);
 	const std::byte* start1=keyStart(kr1);
 	const std::byte* start2=keyStart(kr2);
@@ -265,19 +265,19 @@ int KeyStore::compareKeys(const KeyRef& kr1, const KeyRef& kr2) const {
 			bytes2 = std::min(rem2, usable);
 		}
 	}
-	if (kr1.keyLength==kr2.keyLength){
+	if (kr1.beginLength==kr2.beginLength){
 		return 0;
 	}
-	if (kr1.keyLength<kr2.keyLength){
+	if (kr1.beginLength<kr2.beginLength){
 		return -1;
 	} else {
 		return 1;
 	}		
 }
 
-int KeyStore::compareKeys(const StringRef& key, const KeyRef& stored) const {
-	assert(isValid(stored));
-	return compareFrom(key, stored.firstBlock, stored.keyOffset, stored.keyLength);
+int KeyStore::compareKeys(const StringRef& key, const RangeRef& stored) const {
+	assert(isKeyValid(stored));
+	return compareFrom(key, stored.firstBlock, stored.keyOffset, stored.beginLength);
 }
 
 int KeyStore::compareFrom(
@@ -345,7 +345,7 @@ std::optional<RangeRef> KeyStore::appendRange(
 	const StringRef& end,
 	Version cv) {
 	assert(isValid(source));
-	return appendWithStoredBegin(beginKey(source), end, cv);
+	return appendWithStoredBegin(source, end, cv);
 }
 
 std::optional<RangeRef> KeyStore::appendRange(
@@ -353,16 +353,16 @@ std::optional<RangeRef> KeyStore::appendRange(
 	const RangeRef& source,
 	Version cv) {
 	assert(isValid(source));
-	return appendWithStoredEnd(begin, endKey(source), cv);
+	return appendWithStoredEnd(begin, source, cv);
 }
 
 std::optional<RangeRef> KeyStore::appendWithStoredBegin(
-	const KeyRef& begin,
+	const RangeRef& begin,
 	const StringRef& end,
 	Version cv) {
 	assert(end.size() <= std::numeric_limits<std::uint16_t>::max());
 
-	const std::size_t beginLength = begin.keyLength;
+	const std::size_t beginLength = begin.beginLength;
 	const std::size_t endLength = static_cast<std::size_t>(end.size());
 
 	const bool point = endLength == beginLength + 1 &&
@@ -376,24 +376,31 @@ std::optional<RangeRef> KeyStore::appendWithStoredBegin(
 
 std::optional<RangeRef> KeyStore::appendWithStoredEnd(
 	const StringRef& begin,
-	const KeyRef& end,
+	const RangeRef& source,
 	Version cv) {
 	assert(begin.size() <= std::numeric_limits<std::uint16_t>::max());
 
 	const std::size_t beginLength = static_cast<std::size_t>(begin.size());
-	const std::size_t endLength = end.keyLength;
+	const std::size_t endLength = source.endLength;
+	const KeyBlockHeader* endBlock = source.firstBlock;
+	std::size_t endOffset = source.keyOffset;
+	locate(endBlock, endOffset, source.endStart);
 
 	bool point = false;
 	if (endLength == beginLength + 1) {
-		const KeyBlockHeader* block = end.firstBlock;
-		std::size_t offset = end.keyOffset;
+		const KeyBlockHeader* block = endBlock;
+		std::size_t offset = endOffset;
 		locate(block, offset, beginLength);
 		point = reinterpret_cast<const std::byte*>(block)[offset] == std::byte{0} &&
 			(beginLength == 0 ||
-			 compareFrom(begin, end.firstBlock, end.keyOffset, beginLength) == 0);
+			 compareFrom(begin, endBlock, endOffset, beginLength) == 0);
 	}
 
-	return appendRange(external(begin), stored(end), point, cv);
+	return appendRange(
+		external(begin),
+		RecordSource{nullptr, endBlock, endOffset, endLength},
+		point,
+		cv);
 }
 
 std::optional<RangeRef> KeyStore::appendRange(
@@ -420,27 +427,6 @@ std::optional<RangeRef> KeyStore::appendRange(
 
 bool KeyStore::isValid(const RangeRef& ref) const {
 	return ref.blockGen > lastReclaimedKeyGeneration_;
-}
-
-KeyRef KeyStore::endKey(const RangeRef& ref) const {
-	const KeyBlockHeader* block = ref.firstBlock;
-	std::size_t offset = ref.keyOffset;
-	locate(block, offset, ref.endStart);
-	return KeyRef{
-		block,
-		static_cast<std::uint16_t>(offset),
-		ref.endLength,
-		block->generation
-	};
-}
-
-KeyRef KeyStore::beginKey(const RangeRef& ref) const {
-	return KeyRef{
-		ref.firstBlock,
-		ref.keyOffset,
-		ref.beginLength,
-		ref.blockGen
-	};
 }
 
 int KeyStore::compareBegin(const StringRef& key, const RangeRef& stored) const {
