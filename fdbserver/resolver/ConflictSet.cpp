@@ -71,12 +71,15 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 
 // btree-v1, compiled in BTreeV1.cpp, resolves every batch of this binary. Its declarations come
 // from resolver1's headers in the same namespace; the standard headers they include go first.
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <new>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <tuple>
@@ -1016,39 +1019,27 @@ void ConflictBatch::checkReadConflictRanges() {
 	if (combinedReadConflictRanges.empty())
 		return;
 
-	// The boundary does not move while reads are checked: btree-v1 reclaims only while writing
-	btree_v1::TempConflictBTree& history = cs->btreeV1;
-	const Version boundary = history.reclaimCV();
-	for (const ReadConflictRange& r : combinedReadConflictRanges) {
-		TransactionInfo& info = *transactionInfo[r.transaction];
-		if (info.tooOld) {
-			continue;
-		}
-		if (r.version < boundary) {
-			// All of a transaction's ranges share its read version, so this is its first range
-			info.tooOld = true;
-			transactionConflictStatus[r.transaction] = true;
-			++cs->pagedTooOldWithinWindow;
-			continue;
-		}
-		// A transaction that reports its conflicting ranges has every range checked; any other
-		// stops at its first conflict, as the outcome is the same
-		if (transactionConflictStatus[r.transaction] && r.conflictingKeyRange == nullptr) {
-			continue;
-		}
-		if (!(r.begin < r.end)) {
-			continue;
-		}
-		// One read at a time, with its own status: checkReads skips the reads of a transaction
-		// already marked
-		const btree_v1::ReadConflictRange read(r.begin, r.end, r.version, 0, 0);
-		bool conflict = false;
-		history.checkReads(std::span<const btree_v1::ReadConflictRange>(&read, 1), &conflict);
-		if (conflict) {
-			transactionConflictStatus[r.transaction] = true;
-			if (r.conflictingKeyRange != nullptr) {
-				r.conflictingKeyRange->push_back(*r.cKRArena, r.indexInTx);
-			}
+	// The first read range of each transaction: its reads are consecutive, in their order
+	std::vector<int> offsets(transactionCount, 0);
+	for (int i = combinedReadConflictRanges.size(); i-- > 0;) {
+		offsets[combinedReadConflictRanges[i].transaction] = i;
+	}
+	// The whole batch in one call, over the sorted endpoints. The boundary does not move while
+	// reads are checked: btree-v1 reclaims only while writing
+	std::vector<uint8_t> conflicts;
+	int64_t tooOld = 0;
+	cs->btreeV1.checkReads<16>(points,
+	                           transactionInfo.begin(),
+	                           combinedReadConflictRanges,
+	                           offsets,
+	                           transactionConflictStatus,
+	                           conflicts,
+	                           tooOld);
+	cs->pagedTooOldWithinWindow += tooOld;
+	for (int i = 0; i < conflicts.size(); ++i) {
+		const ReadConflictRange& r = combinedReadConflictRanges[i];
+		if (conflicts[i] && r.conflictingKeyRange != nullptr) {
+			r.conflictingKeyRange->push_back(*r.cKRArena, r.indexInTx);
 		}
 	}
 }

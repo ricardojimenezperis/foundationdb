@@ -27,6 +27,7 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 // Every standard header resolver1 includes, first, so that its own includes, inside the
 // namespace below, find them already included.
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cstddef>
@@ -34,6 +35,7 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 #include <cstring>
 #include <limits>
 #include <new>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <string_view>

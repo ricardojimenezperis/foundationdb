@@ -7,7 +7,8 @@
 // storage. Both stores draw blocks from the same PagePool.
 //
 // Checks batches of read-conflict intervals and applies batches of accepted
-// write-conflict intervals. This version processes intervals individually.
+// write-conflict intervals. Reads share grouped traversal; writes are
+// applied individually.
 // Input key bytes are borrowed during each call; retained keys are copied
 // into KeyStore.
 //
@@ -41,6 +42,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -83,13 +85,23 @@ public:
 	TempConflictBTree(const TempConflictBTree&) = delete;
 	TempConflictBTree& operator=(const TempConflictBTree&) = delete;
 
-	// Reads must have passed the caller's admission check against reclaimCV.
-	// Marks conflicting transactions without clearing existing status flags.
-	// Does not modify history or reclaim storage.
-	void checkReads(
-		std::span<const ReadConflictRange> reads,
-		bool* transactionConflictStatus);
-
+	// Requires begin-sorted endpoints and input records/bytes valid for the
+	// call. No writes or key-block reclamation may interleave with traversal.
+	// Resets conflicts and sets conflicting transaction flags without clearing
+	// existing flags. Reads below reclaimCV_ mark the transaction too old and
+	// increment tooOldWithinWindow once per newly too-old transaction.
+	// A non-null reporting pointer keeps other reads of a conflicted
+	// transaction eligible; individual conflict bits identify their results.
+	// May refresh separators, clean expired entries and remove empty nodes.
+	// Does not add writes or reclaim key blocks.
+	template<uint8_t G>
+	void checkReads(const std::vector<KeyInfo>& points,
+					TransactionInfo* const* transactionInfo,
+					const std::vector<ReadConflictRange>& reads,
+					const std::vector<int>& offsets,
+					bool* transactionConflictStatus,
+					std::vector<uint8_t>& conflicts,
+					int64_t& tooOldWithinWindow);
 	// Writes are sorted, disjoint intervals from accepted transactions.
 	// All writes share cv, which must be nondecreasing between calls.
 	void addWrites(
@@ -107,6 +119,17 @@ private:
 
 	BNodeHeader* root_ = nullptr;
 	Version reclaimCV_ = 0;
+	uint64_t readBatch_ = 0;
+	std::vector<std::pair<BNodeHeader*,std::uint64_t>> 
+		pending_;	// Deferred leaf cleanup records; generations reject released nodes.
+	void cleanPending();
+
+	struct RangeEntry {
+		uint32_t rangeIndex;  // Global index in reads; local index in writeRanges.
+		uint32_t transaction; // Index in transactionInfo.
+	};
+	std::vector<RangeEntry> readBegins;
+	std::vector<RangeEntry> writeBegins;
 
 	// Covers both internal separators and leaf entries for the configured block size.
 	static constexpr std::size_t MaxSeparators =
@@ -115,18 +138,16 @@ private:
 	static constexpr auto prefetchOrder =
 		temp_conflict_btree_detail::makePrefetchOrder<MaxSeparators>();
 	
-	// Returns the insertion point, leaf & rank, and whether is found.
-	// If the tree is empty return nullptr as leaf.
+	// Returns whether key exists; leaf/rank identify its entry or insertion
+	// point. An empty tree returns leaf == nullptr. nodeNeedsSplit is the
+	// deepest node on the path still needing a split, or nullptr.
 	bool findKey(
 		const StringRef& key,
 		LeafBlock*& leaf,
 		std::size_t& rank,
 	    BNodeHeader*& nodeNeedsSplit
 	);
-	// The deepest node on the path of findKey that needs a split: leaf if it
-	// does, otherwise the deepest of candidates, the internal nodes that
-	// needed one on the way down, that still does after cleaning. Consumes
-	// candidates. Returns nullptr if there is none.
+	// Returns the deepest node still needing a split, or nullptr.
 	BNodeHeader* findSplitCandidate(
 		LeafBlock* leaf,
 		std::vector<InternalBlock*>& candidates);
@@ -134,17 +155,10 @@ private:
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);
 	bool hasConflict(const ReadConflictRange& read);
-	// Helpers of addWrite, in the order it calls them. leaf and rank are the
-	// write's position: from findKey, after any split.
-	//
-	// Inserts range with cv at that position, in that leaf, which needs room
-	// for two entries. Unless found, keeps the left exterior of the previous
-	// range, with its original CV, when it overlaps the start of the write;
-	// the previous range may be in the leaf before, and is trimmed in place.
-	// If the write lies inside it, also inserts its right exterior right
-	// after the write and returns true: the write is done. Otherwise returns
-	// false with the position at the write. An expired previous range is
-	// erased, unread, after the insertion.
+	// Inserts range at leaf/rank, preserving overlapping exteriors
+	// and their CVs. Requires two free slots. Returns true if the write
+	// is complete. Otherwise leaves leaf/rank at the inserted range.
+	// An expired previous range is erased without reading its keys.
 	bool insertWithLeftExterior(
 		const std::pair<StringRef, StringRef>& write,
 		const RangeRef& range,
@@ -152,10 +166,10 @@ private:
 		bool found,
 		LeafBlock*& leaf,
 		std::size_t& rank);
-	// Erases the entries from the position on whose end is not after end. The
-	// write is in the tree before the position, so the tree cannot become
-	// empty. Leaves the position at the first entry ending after end, or at
-	// the end position.
+	// Erases expired entries without reading their keys, and live entries
+	// ending at or before end. Stops at the first live entry ending after
+	// end, or tree end.
+	// The preceding write keeps the tree nonempty.
 	void eraseCoveredRanges(
 		const StringRef& end,
 		LeafBlock*& leaf,
@@ -168,27 +182,22 @@ private:
 		std::size_t rank);
 	// Requires an empty tree. Installs a new leaf, still empty, as the root.
 	LeafBlock* createRootLeaf(Version cv);
-	// Inserts range at the given logical rank, splitting nodes as needed.
-	// On return, leaf and rank identify the inserted entry, even if a split
-	// moved it to another leaf. rank is a position in order, not a physical slot.
+	// Inserts range at logical rank, splitting as needed.
+	// Updates leaf/rank to identify the inserted entry.
 	void insertAt(
 		std::size_t& rank,
 		const RangeRef& range,
 		Version cv,
 		LeafBlock*& leaf);
-	// Removes the entry at the given logical rank and repairs the tree.
-	// On return, leaf and rank identify the next entry, or the end position
-	// (rank == count) in the last leaf.
-	// If the tree becomes empty, leaf is nullptr and rank is zero.
+	// Removes the entry or child at logical rank and repairs the tree.
+	// Updates leaf/rank to the next entry or tree end (rank == count).
+	// If empty, sets leaf to nullptr and rank to zero.
 	void eraseAt(std::size_t& rank, LeafBlock*& leaf);
-	// Detaches the child at rank from node and repairs the tree as eraseAt
-	// does for an entry: split counts, separators, ancestors left empty and
-	// the root. The subtree is not released; it is returned without parent,
-	// its leaves taken out of the leaf chain. Requires a non-empty subtree.
+	// Returns the nonempty subtree, detached but not released.
+	// Clears its parent and unlinks its leaves from the leaf chain.
 	BNodeHeader* eraseAt(std::size_t rank, InternalBlock* node);
-	// Takes the run of leaves from first to last out of the leaf chain,
-	// linking its neighbours to each other. The run keeps its inner links;
-	// its ends are left without neighbours.
+	// Unlinks [first, last], joining its neighbours.
+	// Preserves inner links and clears outer links.
 	static void unlinkLeaves(LeafBlock* first, LeafBlock* last);
 	static void unlinkLeaf(LeafBlock* leaf) {
 		unlinkLeaves(leaf, leaf);
@@ -196,62 +205,58 @@ private:
 	// The first and last leaves of the subtree under node.
 	static LeafBlock* firstLeaf(BNodeHeader* node);
 	static LeafBlock* lastLeaf(BNodeHeader* node);
-	// Advances to the next entry. The leaf to the right, if any, is not empty:
-	// only the root leaf may be.
-	// Requires leaf != nullptr and rank <= leaf->header.count.
-	// Returns true if an entry is found, updating leaf, rank and its slot.
-	// Otherwise, returns false, keeps leaf unchanged, and sets rank to count.
+	// Moves to the next/previous entry, updating leaf/rank/slot.
+	// Requires leaf != nullptr and rank <= count.
+	// On failure, nextRank sets rank to count; prevRank changes nothing.
 	bool nextRank(LeafBlock*& leaf, std::size_t& rank, std::size_t& slot) const;
-	// Moves to the previous entry. The leaf to the left, if any, is not empty.
-	// Requires leaf != nullptr and rank <= leaf->header.count.
-	// rank == count is accepted as an insertion position after the last entry.
-	// Returns true if an entry is found, updating leaf, rank and its slot.
-	// Otherwise, returns false and leaves both parameters unchanged.
-	bool prevRank(LeafBlock*& leaf, std::size_t& rank, std::size_t& slot) const;	
-	// Reclamation must keep the tree invariant that only the root leaf may be
-	// empty: leaves it empties, and internal nodes left without children, are
-	// removed before it returns.
-	//
-	// Reclaims the oldest age: the smallest CV among the oldest node and the
-	// oldest key block. reclaimCV_ advances to it, and every node and key
-	// block with exactly that CV is reclaimed, a node with its subtree.
-	// Returns false, changing nothing, if there is nothing to reclaim.
+	bool prevRank(LeafBlock*& leaf, std::size_t& rank, std::size_t& slot) const;
+	// Reclaims the oldest node/key age, advancing reclaimCV_.
+	// Releases whole subtrees and removes empty nonroot nodes.
+	// Returns false without changes if nothing can be reclaimed.
 	bool reclaimOldest();
-	// Reclaims ages until the pool has at least n available blocks. Returns
-	// false if there is nothing left to reclaim before reaching n.
+	// Reclaims until n blocks are available; returns false if exhausted.
 	bool reclaimUntilAvail(std::size_t n);
-	// Removes expired entries without releasing the leaf itself.
-	// The leaf may be left empty, which only the root leaf may stay: the
-	// caller must then remove it before the operation returns.
-	// Returns true if any entry was removed.
+	// Removes expired entries; returns whether any were removed.
+	// Caller must remove the leaf if empty and nonroot.
 	bool cleanExpired(LeafBlock* leaf);
-	// Refreshes every expired separator of node with refreshSeparator.
-	// Returns true if any separator was refreshed or any child removed.
+	// Refreshes expired separators; returns whether anything changed.
 	bool refreshSeparators(InternalBlock* node);
-	// Refreshes the separator at rank if it has expired (its CV is not newer
-	// than reclaimCV_). Expired entries of the child are removed, and the
-	// separator becomes the child's first key with its CV. If the child
-	// becomes empty, it is removed: rank then refers to the next child, and
-	// node may become empty. Leaf cursors held by the caller may become
-	// invalid. Requires reclaimCV_ to have advanced at least to the maximum
-	// CV of every reclaimed key block, so that a separator whose bytes were
-	// reclaimed is always expired. Returns true if anything changed.
+	// Refreshes an expired separator, removing its child if empty.
+	// May invalidate cursors. Returns whether anything changed.
+	// Requires reclaimed key blocks to have CV <= reclaimCV_.
 	bool refreshSeparator(InternalBlock* node, std::size_t rank);
-	// Removes and releases an empty child.
-	// Repairs leaf links when the child is a leaf.
-	// Does not release parent, even if it becomes empty.
+	// Child has no live entries; removal is deferred.
+	static constexpr Version EmptyChildCV = -1;
+	// Requires reclaimed key blocks to have CV <= reclaimCV_. Refreshes
+	// rank without structural removal; queues leaf cleanup and preserves
+	// saved internal ranks. Returns whether that child has a live entry.
+	// Empty runs receive EmptyChildCV and may borrow a live reference,
+	// preferring the left. With no live child, all references remain unread.
+	// Empty markers must route conservatively left, without key comparison;
+	// a read can extend beyond an empty subtree into later live history.
+	bool refreshSeparatorDeferred(InternalBlock* node, std::size_t rank);
+	// Returns the first live range/CV, or nullopt; defers cleanup.
+	// Refreshes separators and marks leading empty children.
+	std::optional<std::pair<const RangeRef*, Version>> firstLiveKey(
+		BNodeHeader* node);
+	// Refreshes from the child's first live key, deferring cleanup.
+	// Returns false without replacing the separator if no live key exists.
+	bool refreshLiveSeparator(InternalBlock* node, std::size_t rank);
+	// Copies the separator at rank from into ranks [first, last) and
+	// marks those ranks EmptyChildCV. Requires a live source reference.
+	static void markEmptyChildren(InternalBlock* node, std::size_t first,
+								  std::size_t last, std::size_t from);
+	// Releases an empty child and repairs leaf links.
+	// Keeps parent even if empty.
 	void removeEmptyChild(InternalBlock* parent, std::size_t rank);
 	// Removes an empty node and ancestors left empty; normalizes root.
 	// An empty root leaf may remain.
 	void removeIfEmpty(BNodeHeader* node);
-	// An internal node needs a split when every free slot may be taken by
-	// the split of a child that needs one.
+	// All free slots are reserved for pending child splits.
 	static bool needsSplit(const InternalBlock* node) {
 		return node->header.childrenNeedingSplit == node->freeSlotCount();
 	}
-	// A leaf needs a split when it has at most one free slot, since a write
-	// can add two entries to a leaf: the written range and the right part of
-	// the range it splits.
+	// A write may need two slots: its range and a right exterior.
 	static bool needsSplit(const LeafBlock* node) {
 		return node->freeSlotCount() <= 1;
 	}
@@ -260,16 +265,10 @@ private:
 			? needsSplit(reinterpret_cast<const LeafBlock*>(node))
 			: needsSplit(reinterpret_cast<const InternalBlock*>(node));
 	}
-	// Propagates the changes of node to its ancestors in a single ascent,
-	// stopping when no change remains:
-	// - splitDelta is +1 when node has just started needing a split and -1
-	//   when it has just stopped. Each parent's count changes by splitDelta,
-	//   which carries on only while the parent changes state too.
-	// - updateSeparator sets the separator of node in its parent to the first
-	//   key of node, with its CV, and carries on while node is the first child
-	//   of its parent. Requires node not to be empty.
-	// - updateCV raises each parent's bound for node to node's maximum CV,
-	//   and carries on while the parent's maximum CV rises.
+	// Propagates split state, first key and maximum CV changes upward.
+	// splitDelta: +1 starts needing a split; -1 stops; 0 unchanged.
+	// Requires a nonempty node when updating its separator.
+	// Stops when no change remains.
 	void propagateUpdates(BNodeHeader* node, int splitDelta,
 						  bool updateSeparator, bool updateCV);
 	void propagateUpdates(LeafBlock* node, int splitDelta,
@@ -280,31 +279,25 @@ private:
 						  bool updateSeparator, bool updateCV) {
 		propagateUpdates(&node->header, splitDelta, updateSeparator, updateCV);
 	}
-	// The first key of node, with its CV: the separator node should have in
-	// its parent. Requires node not to be empty.
-	std::pair<const RangeRef*, Version> minSeparator(const BNodeHeader* node) const;
-	// Moves the upper part of oldNode, cut by weight, to a new node and
-	// returns it. Moved children point to the new node and are counted there.
+	// Returns the first range and CV. Requires a nonempty node.
+	std::pair<const RangeRef*, Version> minSeparator(
+		const BNodeHeader* node) const;
+	// Splits by weight; returns the upper part with child links repaired.
 	InternalBlock* splitInternal(InternalBlock* oldNode, Version cv);
-	// Moves the upper half of leaf to a new leaf linked after it and returns
-	// it. Adjusts leaf and rank as split does.
+	// Splits the upper half into a new right leaf.
+	// Adjusts leaf/rank as split does.
 	LeafBlock* splitLeaf(LeafBlock*& leaf, std::size_t& rank, bool found,
 						 Version cv);
-	// Puts sibling right after node in node's parent, creating a new root if
-	// node has none. Requires neither of them to need a split; the parent
-	// then keeps its own state.
+	// Inserts sibling after node, creating a root if needed.
+	// Neither node may need a split; preserves the parent's split state.
 	void insertSibling(BNodeHeader* node, BNodeHeader* sibling, Version cv);
-	// Splits node, updating the tree and split counters.
-	// If node is leaf, adjusts leaf and rank to preserve the position
-	// returned by findKey; found is the value findKey returned. A key not
-	// found at the cut rank stays at the end of the old leaf, since it is
-	// below the first key of the new one.
+	// Splits node and updates split counters.
+	// Preserves the findKey position in leaf/rank.
+	// An unfound key at the cut stays at the end of the left leaf.
 	void split(BNodeHeader* node, LeafBlock*& leaf, std::size_t& rank,
 			   bool found, Version cv);
 	void normalizeRoot();
-	// Detaches node from the tree, or empties the tree if node is the root,
-	// and releases node and every node below it.
+	// Detaches and releases the subtree; clears root_ if it is the root.
 	void removeSubtree(BNodeHeader* node);
-	// Releases node and every node below it, children first.
-	void removeSubtreeRec(BNodeHeader* node);
-};
+	// Releases the subtree, children first.
+	void removeSubtreeRec(BNodeHeader* node);};

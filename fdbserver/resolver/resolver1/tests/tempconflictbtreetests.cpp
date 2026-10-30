@@ -43,6 +43,21 @@ struct TempConflictBTreeTestAccess {
 	static bool refreshSeparators(TempConflictBTree& t, InternalBlock* node) {
 		return t.refreshSeparators(node);
 	}
+	static bool refreshSeparatorDeferred(TempConflictBTree& t,
+										 InternalBlock* node, std::size_t rank) {
+		return t.refreshSeparatorDeferred(node, rank);
+	}
+	static std::optional<std::pair<const RangeRef*, Version>> firstLiveKey(
+		TempConflictBTree& t, BNodeHeader* node) {
+		return t.firstLiveKey(node);
+	}
+	static constexpr Version EmptyChildCV = TempConflictBTree::EmptyChildCV;
+	static std::size_t pendingCount(TempConflictBTree& t) {
+		return t.pending_.size();
+	}
+	static void cleanPending(TempConflictBTree& t) {
+		t.cleanPending();
+	}
 	static bool cleanExpired(TempConflictBTree& t, LeafBlock* leaf) {
 		return t.cleanExpired(leaf);
 	}
@@ -1055,6 +1070,204 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorsCanEmptyNode") {
 	ASSERT(Access::refreshSeparators(t.tree, root));
 	ASSERT_EQ(root->header.count, 0);
 	ASSERT(sameMap(root->freeSlots, FreeSlots<InternalCapacity>()));
+}
+
+namespace {
+
+// Same record, ignoring the end of a range: a separator copied from another.
+bool sameKeyRecord(const RangeRef& a, const RangeRef& b) {
+	return a.firstBlock == b.firstBlock && a.keyOffset == b.keyOffset &&
+		   a.beginLength == b.beginLength && a.blockGen == b.blockGen;
+}
+
+Version separatorCV(const InternalBlock* node, std::size_t rank) {
+	return node->separatorsCV[node->order[rank]];
+}
+
+const RangeRef& separatorAt(const InternalBlock* node, std::size_t rank) {
+	return node->separators[node->order[rank]];
+}
+
+} // namespace
+
+// The expired separator becomes the first live entry of the leaf, which
+// keeps its expired entries until the queue is cleaned.
+TEST_CASE("/resolver/TempConflictBTree/DeferredRefreshKeepsExpiredEntries") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {20, 20, 20}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 4, 0), {5, 10, 30, 8}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {20, 20, 20}));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparatorDeferred(t.tree, root, 1));
+
+	ASSERT_EQ(separatorCV(root, 1), 30);
+	ASSERT_EQ(t.keys().compareKeys(asRef(key(34)), separatorAt(root, 1)), 0);
+	ASSERT_EQ(t.leaves[1].leaf->header.count, 4);
+	ASSERT_EQ(Access::pendingCount(t.tree), 1);
+	// Refreshed, it is not visited again.
+	ASSERT(Access::refreshSeparatorDeferred(t.tree, root, 1));
+	ASSERT_EQ(Access::pendingCount(t.tree), 1);
+
+	Access::cleanPending(t.tree);
+	ASSERT_EQ(Access::pendingCount(t.tree), 0);
+	ASSERT_EQ(leafEntries(t, t.leaves[1].leaf).size(), 1);
+	checkTree(t);
+}
+
+// A leaf without live entries stays in the tree, marked with the separator
+// of the child before it, until the queue is cleaned.
+TEST_CASE("/resolver/TempConflictBTree/DeferredRefreshMarksEmptyLeaf") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {20, 20, 20}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {5, 6, 7}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {20, 20, 20}));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(!Access::refreshSeparatorDeferred(t.tree, root, 1));
+
+	ASSERT_EQ(root->header.count, 3);
+	ASSERT_EQ(separatorCV(root, 1), Access::EmptyChildCV);
+	ASSERT(sameKeyRecord(separatorAt(root, 1), separatorAt(root, 0)));
+	ASSERT_EQ(t.leaves[1].leaf->header.count, 3);
+	ASSERT(t.leaves[0].leaf->right == t.leaves[1].leaf);
+
+	// Marked, it is not visited again.
+	ASSERT(!Access::refreshSeparatorDeferred(t.tree, root, 1));
+	ASSERT_EQ(Access::pendingCount(t.tree), 1);
+
+	Access::cleanPending(t.tree);
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT(t.leaves[0].leaf->right == t.leaves[2].leaf);
+	checkTree(t);
+}
+
+// Leading children without live entries take the separator of the first
+// live child after them.
+TEST_CASE("/resolver/TempConflictBTree/DeferredRefreshMarksLeadingChildren") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 2, 0), {1, 2}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 2, 0), {3, 4}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 2, 0), {5, 20}));
+	t.addLeaf(key(70), withCVs(entriesFrom(70, 2, 0), {20, 20}));
+	t.build(4);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(!Access::refreshSeparatorDeferred(t.tree, root, 0));
+
+	ASSERT_EQ(separatorCV(root, 2), 20);
+	ASSERT_EQ(t.keys().compareKeys(asRef(key(52)), separatorAt(root, 2)), 0);
+	for (std::size_t rank = 0; rank < 2; ++rank) {
+		ASSERT_EQ(separatorCV(root, rank), Access::EmptyChildCV);
+		ASSERT(sameKeyRecord(separatorAt(root, rank), separatorAt(root, 2)));
+	}
+	ASSERT_EQ(root->header.count, 4);
+	ASSERT_EQ(Access::pendingCount(t.tree), 3);
+
+	Access::cleanPending(t.tree);
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT_EQ(leafEntries(t, t.leaves[2].leaf).size(), 1);
+	checkTree(t);
+}
+
+// The separator is refreshed down through an internal child, whose own
+// leading children without live entries are marked.
+TEST_CASE("/resolver/TempConflictBTree/DeferredRefreshThroughInternalChild") {
+	TestTree t;
+	threeLevels(t, 5, 8, 40);
+	InternalBlock* root = rootNode(t);
+	auto* i1 = reinterpret_cast<InternalBlock*>(childAt(root, 1));
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(Access::refreshSeparatorDeferred(t.tree, root, 1));
+
+	ASSERT_EQ(separatorCV(root, 1), 40);
+	ASSERT_EQ(t.keys().compareKeys(asRef(key(110)), separatorAt(root, 1)), 0);
+	ASSERT_EQ(i1->header.count, 3);
+	ASSERT_EQ(separatorCV(i1, 2), 40);
+	for (std::size_t rank = 0; rank < 2; ++rank) {
+		ASSERT_EQ(separatorCV(i1, rank), Access::EmptyChildCV);
+		ASSERT(sameKeyRecord(separatorAt(i1, rank), separatorAt(i1, 2)));
+	}
+	ASSERT_EQ(Access::pendingCount(t.tree), 2);
+
+	Access::cleanPending(t.tree);
+	ASSERT_EQ(i1->header.count, 1);
+	ASSERT(childAt(i1, 0) == &t.leaves[5].leaf->header);
+	ASSERT(t.leaves[2].leaf->right == t.leaves[5].leaf);
+	checkTree(t);
+}
+
+// An internal child without live entries is marked; cleaning the queue
+// removes its leaves and then the child itself.
+TEST_CASE("/resolver/TempConflictBTree/DeferredRefreshMarksEmptyInternalChild") {
+	TestTree t;
+	threeLevels(t, 5, 8, 9);
+	InternalBlock* root = rootNode(t);
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(!Access::refreshSeparatorDeferred(t.tree, root, 1));
+
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT_EQ(separatorCV(root, 1), Access::EmptyChildCV);
+	ASSERT(sameKeyRecord(separatorAt(root, 1), separatorAt(root, 0)));
+	ASSERT_EQ(Access::pendingCount(t.tree), 3);
+
+	Access::cleanPending(t.tree);
+	ASSERT_EQ(root->header.count, 1);
+	ASSERT(t.leaves[2].leaf->right == nullptr);
+	checkTree(t);
+}
+
+// firstLiveKey gives the smallest live key under a node, and nothing when
+// every entry has expired, in which case cleaning empties the tree.
+TEST_CASE("/resolver/TempConflictBTree/FirstLiveKey") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 2, 0), {1, 2}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 2, 0), {3, 15}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 2, 0), {5, 6}));
+	t.build(3);
+	BNodeHeader* root = Access::root(t.tree);
+
+	Access::setReclaimCV(t.tree, 10);
+	const auto first = Access::firstLiveKey(t.tree, root);
+	ASSERT(first.has_value());
+	ASSERT_EQ(first->second, 15);
+	ASSERT_EQ(t.keys().compareKeys(asRef(key(32)), *first->first), 0);
+	Access::cleanPending(t.tree);
+	checkTree(t);
+
+	Access::setReclaimCV(t.tree, 20);
+	ASSERT(!Access::firstLiveKey(t.tree, Access::root(t.tree)).has_value());
+	Access::cleanPending(t.tree);
+	ASSERT(Access::root(t.tree) == nullptr);
+}
+
+// A leaf queued twice is cleaned once: once released, its cleared
+// generation tells the second entry apart.
+TEST_CASE("/resolver/TempConflictBTree/CleanPendingSkipsReleasedLeaf") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 2, 0), {20, 20}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 2, 0), {3, 4}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 2, 0), {20, 20}));
+	t.build(3);
+	InternalBlock* root = rootNode(t);
+	BNodeHeader* leaf = &t.leaves[1].leaf->header;
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT(!Access::firstLiveKey(t.tree, leaf).has_value());
+	ASSERT(!Access::firstLiveKey(t.tree, leaf).has_value());
+	ASSERT_EQ(Access::pendingCount(t.tree), 2);
+
+	Access::cleanPending(t.tree);
+	ASSERT_EQ(root->header.count, 2);
+	ASSERT(t.leaves[0].leaf->right == t.leaves[2].leaf);
+	checkTree(t);
 }
 
 namespace {

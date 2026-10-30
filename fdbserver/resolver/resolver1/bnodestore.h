@@ -194,6 +194,9 @@ struct LeafBlockLayout {
 	FreeSlots<C> freeSlots;
 	// Physical slot of each logical rank.
 	std::uint8_t order[C]{};
+	// Batch stamp: the readBatch_ of the checkReads call that last compacted
+	// this leaf. Zero from allocation; batch stamps start at one.
+	uint64_t lastCleanReadBatch;
 
 	InternalBlock* parent() const {
 		return header.parent;
@@ -263,6 +266,12 @@ static_assert(sizeof(LeafBlock) <= BlockSize);
 
 static_assert(std::is_standard_layout_v<InternalBlock>);
 static_assert(std::is_standard_layout_v<LeafBlock>);
+
+union NodeRef {
+	BNodeHeader* header;
+	InternalBlock* internal;
+	LeafBlock* leaf;
+};
 
 class BNodeStore {
 public:
