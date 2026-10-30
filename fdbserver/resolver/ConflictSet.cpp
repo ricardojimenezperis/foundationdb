@@ -41,24 +41,6 @@
 #include "fdbserver/core/Knobs.h"
 #include "ConflictSet.h"
 
-// btree-v1, compiled in BTreeV1.cpp, resolves every batch of this binary. Its declarations come
-// from resolver1's headers in the same namespace; the standard headers they include go first.
-#include <bit>
-#include <cassert>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <new>
-#include <span>
-#include <string_view>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#define RESOLVER1_IN_FDB 1
-namespace btree_v1 {
-#include "resolver1/tempconflictbtree.h"
-} // namespace btree_v1
-#undef RESOLVER1_IN_FDB
 #include "flow/UnitTest.h"
 
 static std::vector<PerfDoubleCounter*> skc;
@@ -84,37 +66,27 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 	return (aSize > bSize) - (aSize < bSize);
 }
 
-struct ReadConflictRange {
-	StringRef begin, end;
-	Version version;
-	int transaction;
-	int indexInTx;
-	VectorRef<int>* conflictingKeyRange;
-	Arena* cKRArena;
+// ReadConflictRange, KeyInfo and TransactionInfo, shared with resolver1
+#include "ResolverBatchTypes.h"
 
-	ReadConflictRange(StringRef begin,
-	                  StringRef end,
-	                  Version version,
-	                  int transaction,
-	                  int indexInTx,
-	                  VectorRef<int>* cKR = nullptr,
-	                  Arena* cKRArena = nullptr)
-	  : begin(begin), end(end), version(version), transaction(transaction), indexInTx(indexInTx),
-	    conflictingKeyRange(cKR), cKRArena(cKRArena) {}
-	bool operator<(const ReadConflictRange& rhs) const { return compare(begin, rhs.begin) < 0; }
-};
-
-struct KeyInfo {
-	StringRef key;
-	int* pIndex;
-	bool begin;
-	bool write;
-	int transaction;
-
-	KeyInfo() = default;
-	KeyInfo(StringRef key, bool begin, bool write, int transaction, int* pIndex)
-	  : key(key), pIndex(pIndex), begin(begin), write(write), transaction(transaction) {}
-};
+// btree-v1, compiled in BTreeV1.cpp, resolves every batch of this binary. Its declarations come
+// from resolver1's headers in the same namespace; the standard headers they include go first.
+#include <bit>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <span>
+#include <string_view>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#define RESOLVER1_IN_FDB 1
+namespace btree_v1 {
+#include "resolver1/tempconflictbtree.h"
+} // namespace btree_v1
+#undef RESOLVER1_IN_FDB
 
 force_inline int extra_ordering(const KeyInfo& ki) {
 	return ki.begin * 2 + (ki.write ^ ki.begin);
@@ -832,13 +804,6 @@ ConflictBatch::ConflictBatch(ConflictSet* cs,
     resolveBatchReplyArena(resolveBatchReplyArena) {}
 
 ConflictBatch::~ConflictBatch() = default;
-
-struct TransactionInfo {
-	VectorRef<std::pair<int, int>> readRanges;
-	VectorRef<std::pair<int, int>> writeRanges;
-	bool tooOld;
-	bool reportConflictingKeys;
-};
 
 bool ConflictBatch::ignoreTooOld() const {
 	return bugs && deterministicRandom()->random01() < bugs->ignoreTooOldProbability;

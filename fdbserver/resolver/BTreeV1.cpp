@@ -5,10 +5,24 @@
  * namespace btree_v1. ConflictSet.cpp declares the same types through resolver1's headers,
  * in the same namespace, and calls them directly. resolver1 is its own project with its own
  * tests. Its only change for FDB is a branch in fdbcompat.h, taken under RESOLVER1_IN_FDB,
- * that uses FDB's StringRef.
+ * that uses FDB's StringRef and the batch records of ResolverBatchTypes.h.
  */
 
 #include "flow/Arena.h"
+#include "fdbclient/FDBTypes.h"
+
+// The comparison ConflictSet.cpp declares before the batch records
+static force_inline int compare(const StringRef& a, const StringRef& b) {
+	const size_t aSize = a.size();
+	const size_t bSize = b.size();
+	const size_t minSize = std::min(aSize, bSize);
+	int c = memcmp(a.begin(), b.begin(), minSize);
+	if (c)
+		return (c > 0) - (c < 0); // normalize to +1/-1
+	return (aSize > bSize) - (aSize < bSize);
+}
+
+#include "ResolverBatchTypes.h"
 
 // Every standard header resolver1 includes, first, so that its own includes, inside the
 // namespace below, find them already included.

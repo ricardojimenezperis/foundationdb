@@ -7,9 +7,16 @@
 #include <cstring>
 
 #ifdef RESOLVER1_IN_FDB
-// Built inside FDB (fdbserver/resolver/BTreeV1.cpp): the resolver's own StringRef. Its
-// three-way comparison is the member compare, and a free one would be ambiguous with FDB's.
+// Built inside FDB: FDB's own StringRef, VectorRef and Arena, and its batch records from
+// ResolverBatchTypes.h. That header must be included before the namespace resolver1 is compiled
+// in, so that resolver1 uses the same types as ConflictSet.cpp.
+#ifndef FDBSERVER_RESOLVER_BATCH_TYPES_H
+#error "include ResolverBatchTypes.h before the namespace that resolver1 is compiled in"
+#endif
 using StringRef = ::StringRef;
+using ReadConflictRange = ::ReadConflictRange;
+using KeyInfo = ::KeyInfo;
+using TransactionInfo = ::TransactionInfo;
 #else
 class StringRef {
 public:
@@ -39,40 +46,27 @@ private:
 inline int compare(const StringRef& l, const StringRef& r) {
 	return l.compare(r);
 }
-#endif
 
 class Arena;
 
+// The members of FDB's VectorRef that the batch records and their readers use: a view of size
+// elements from data.
 template<class T>
-class VectorRef;
+class VectorRef {
+public:
+	VectorRef() = default;
+	VectorRef(T* data, int size) : data_(data), size_(size) {}
 
-struct ReadConflictRange {
-	StringRef begin;
-	StringRef end;
-	Version version;
-	int transaction;
-	int indexInTx;
-	VectorRef<int>* conflictingKeyRange;
-	Arena* cKRArena;
+	T* begin() const { return data_; }
+	T* end() const { return data_ + size_; }
+	int size() const { return size_; }
+	T& operator[](int i) const { return data_[i]; }
 
-	ReadConflictRange(
-		StringRef begin,
-		StringRef end,
-		Version version,
-		int transaction,
-		int indexInTx,
-		VectorRef<int>* conflictingKeyRange = nullptr,
-		Arena* cKRArena = nullptr)
-		: begin(begin),
-		  end(end),
-		  version(version),
-		  transaction(transaction),
-		  indexInTx(indexInTx),
-		  conflictingKeyRange(conflictingKeyRange),
-		  cKRArena(cKRArena) {
-	}
-
-	bool operator<(const ReadConflictRange& rhs) const {
-		return begin.compare(rhs.begin) < 0;
-	}
+private:
+	T* data_ = nullptr;
+	int size_ = 0;
 };
+
+// ReadConflictRange, KeyInfo and TransactionInfo, as FDB's ConflictSet.cpp defines its batch
+#include "../ResolverBatchTypes.h"
+#endif
