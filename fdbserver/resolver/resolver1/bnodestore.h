@@ -46,40 +46,108 @@ struct BNodeHeader {
 	std::uint8_t count = 0;
 	std::uint8_t parentSlot = 0;
 	std::uint8_t childrenNeedingSplit = 0;
-	// Bit i is set when slot i is free. Set by BNodeStore on allocation.
-	std::uint64_t freeSlots = 0;
-	// Physical slot of each logical rank, sized for the largest capacity.
-	std::uint8_t order[64]{};
-	inline void setFree (std::size_t slot) {
-		freeSlots |= std::uint64_t{1} << slot;
-	}
-	inline void unsetFree (std::size_t slot) {
-		freeSlots &= ~(std::uint64_t{1} << slot);
-	}
-	inline bool hasSpace() const {
-		return freeSlots != 0;
-	}
-	inline unsigned freeSlotCount() const {
-		return static_cast<unsigned>(std::popcount(freeSlots));
-	}
-	// Returns the lowest free slot. Requires a free slot.
-	inline unsigned firstFree() const {
-		assert(freeSlots != 0);
-		return static_cast<unsigned>(std::countr_zero(freeSlots));
-	}
 	// Rank of this node in its parent. Requires a parent.
 	inline std::size_t parentRank() const;
 };
 
+// The free slots of a node of capacity C: bit i is set when slot i is free.
+// Up to 64 slots it is a single word, and every operation is the one on a
+// plain uint64_t; larger nodes take one word per 64 slots. setFree and
+// unsetFree touch one word; any, count and first look at every word.
+template<std::size_t C>
+struct FreeSlots {
+	static constexpr std::size_t Words = (C + 63) / 64;
+
+	// Word w of a map with every slot free. Every shift is below 64, even in
+	// the branch not taken.
+	static constexpr std::uint64_t fullWord(std::size_t w) {
+		return w + 1 < Words || C % 64 == 0 ? UINT64_MAX : (std::uint64_t{1} << (C % 64)) - 1;
+	}
+
+	// Every slot starts free.
+	FreeSlots() {
+		for (std::size_t w = 0; w < Words; ++w) {
+			words[w] = fullWord(w);
+		}
+	}
+
+	bool isFree(std::size_t slot) const {
+		if constexpr (Words == 1) {
+			return (words[0] >> slot) & 1;
+		} else {
+			return (words[slot / 64] >> (slot % 64)) & 1;
+		}
+	}
+	void setFree(std::size_t slot) {
+		if constexpr (Words == 1) {
+			words[0] |= std::uint64_t{1} << slot;
+		} else {
+			words[slot / 64] |= std::uint64_t{1} << (slot % 64);
+		}
+	}
+	void unsetFree(std::size_t slot) {
+		if constexpr (Words == 1) {
+			words[0] &= ~(std::uint64_t{1} << slot);
+		} else {
+			words[slot / 64] &= ~(std::uint64_t{1} << (slot % 64));
+		}
+	}
+	bool any() const {
+		if constexpr (Words == 1) {
+			return words[0] != 0;
+		} else {
+			for (std::uint64_t w : words) {
+				if (w != 0) {
+					return true;
+				}
+			}
+			return false;
+		}
+	}
+	unsigned count() const {
+		if constexpr (Words == 1) {
+			return static_cast<unsigned>(std::popcount(words[0]));
+		} else {
+			unsigned n = 0;
+			for (std::uint64_t w : words) {
+				n += static_cast<unsigned>(std::popcount(w));
+			}
+			return n;
+		}
+	}
+	// The lowest free slot. Requires a free slot.
+	unsigned first() const {
+		assert(any());
+		if constexpr (Words == 1) {
+			return static_cast<unsigned>(std::countr_zero(words[0]));
+		} else {
+			std::size_t w = 0;
+			while (words[w] == 0) {
+				++w;
+			}
+			return static_cast<unsigned>(64 * w + std::countr_zero(words[w]));
+		}
+	}
+
+	std::uint64_t words[Words];
+};
+
+// count, parentSlot, childrenNeedingSplit and order hold slots and ranks in
+// a std::uint8_t, so a node has at most 255 slots.
+inline constexpr std::size_t MaxNodeCapacity = 255;
+
 template<std::size_t C>
 struct InternalBlockLayout {
-	static_assert(C > 0 && C <= 64);
+	static_assert(C > 0 && C <= MaxNodeCapacity);
 
 	BNodeHeader header;
 	Version maxSubtreesCV[C];
 	Version separatorsCV[C];
 	KeyRef separators[C];
 	BNodeHeader* children[C];
+	FreeSlots<C> freeSlots;
+	// Physical slot of each logical rank.
+	std::uint8_t order[C]{};
 
 	InternalBlock* parent() const {
 		return header.parent;
@@ -87,23 +155,58 @@ struct InternalBlockLayout {
 	std::size_t parentRank() const {
 		return header.parentRank();
 	}
+	bool hasSpace() const {
+		return freeSlots.any();
+	}
+	unsigned freeSlotCount() const {
+		return freeSlots.count();
+	}
+	// The lowest free slot. Requires a free slot.
+	unsigned firstFree() const {
+		return freeSlots.first();
+	}
+	void setFree(std::size_t slot) {
+		freeSlots.setFree(slot);
+	}
+	void unsetFree(std::size_t slot) {
+		freeSlots.unsetFree(slot);
+	}
 };
 
 template<std::size_t C>
 struct LeafBlockLayout {
-	static_assert(C > 0 && C <= 64);
+	static_assert(C > 0 && C <= MaxNodeCapacity);
 
 	BNodeHeader header;
 	Version cv[C];
 	RangeRef ranges[C];
 	LeafBlockLayout<C>* left = nullptr;
 	LeafBlockLayout<C>* right = nullptr;
+	FreeSlots<C> freeSlots;
+	// Physical slot of each logical rank.
+	std::uint8_t order[C]{};
 
 	InternalBlock* parent() const {
 		return header.parent;
 	}
 	std::size_t parentRank() const {
 		return header.parentRank();
+	}
+	bool hasSpace() const {
+		return freeSlots.any();
+	}
+	unsigned freeSlotCount() const {
+		return freeSlots.count();
+	}
+	// The lowest free slot. Requires a free slot.
+	unsigned firstFree() const {
+		return freeSlots.first();
+	}
+	void setFree(std::size_t slot) {
+		freeSlots.setFree(slot);
+	}
+	void unsetFree(std::size_t slot) {
+		freeSlots.unsetFree(slot);
 	}
 };
 
@@ -111,8 +214,8 @@ template<template<std::size_t> class Layout, std::size_t C = 1>
 constexpr std::size_t capacityForBlock() {
 	if constexpr (sizeof(Layout<C>) > BlockSize) {
 		return C - 1;
-	} else if constexpr (C >= 64) {
-		return 64;
+	} else if constexpr (C >= MaxNodeCapacity) {
+		return MaxNodeCapacity;
 	} else {
 		return capacityForBlock<Layout, C + 1>();
 	}
@@ -134,7 +237,7 @@ struct InternalBlock : InternalBlockLayout<InternalCapacity> {};
 inline std::size_t BNodeHeader::parentRank() const {
 	assert(parent != nullptr);
 	std::size_t rank = 0;
-	while (parent->header.order[rank] != parentSlot) {
+	while (parent->order[rank] != parentSlot) {
 		++rank;
 		assert(rank < parent->header.count);
 	}
@@ -142,11 +245,9 @@ inline std::size_t BNodeHeader::parentRank() const {
 }
 using LeafBlock = LeafBlockLayout<LeafCapacity>;
 
-inline constexpr std::uint64_t InternalSlotMask =
-	UINT64_MAX >> (64 - InternalCapacity);
-
-inline constexpr std::uint64_t LeafSlotMask =
-	UINT64_MAX >> (64 - LeafCapacity);
+// The first word of a map with every slot free.
+inline constexpr std::uint64_t InternalSlotMask = FreeSlots<InternalCapacity>::fullWord(0);
+inline constexpr std::uint64_t LeafSlotMask = FreeSlots<LeafCapacity>::fullWord(0);
 
 static_assert(sizeof(InternalBlock) <= BlockSize);
 static_assert(sizeof(LeafBlock) <= BlockSize);
@@ -234,7 +335,6 @@ inline LeafBlock* BNodeStore::allocateLeaf(Version cv) {
 	LeafBlock* leaf = ::new(block) LeafBlock{};
 	leaf->header.generation= nextGeneration_++;
 	leaf->header.kind= BNodeKind::Leaf;
-	leaf->header.freeSlots = LeafSlotMask;
 	leaf->header.maxCV=cv;
 	insertLast(&leaf->header);
 	return leaf;
@@ -247,7 +347,6 @@ inline InternalBlock* BNodeStore::allocateInternal(Version cv) {
 	InternalBlock* internal = ::new(block) InternalBlock{};
 	internal->header.generation= nextGeneration_++;
 	internal->header.kind= BNodeKind::Internal;
-	internal->header.freeSlots = InternalSlotMask;
 	internal->header.maxCV=cv;
 	insertLast(&internal->header);
 	return internal;
@@ -315,19 +414,19 @@ inline void BNodeStore::insertAt(std::size_t rank,
 							InternalBlock* node) {
 	assert(node != nullptr);
 	assert(child != nullptr);	
-	assert(node->header.freeSlots != 0);
+	assert(node->hasSpace());
 	assert(rank <= node->header.count);
 
-	const unsigned slot = node->header.firstFree();
-	std::memmove(&node->header.order[rank+1], &node->header.order[rank], 
-		(node->header.count - rank) * sizeof(node->header.order[0]));
+	const unsigned slot = node->firstFree();
+	std::memmove(&node->order[rank+1], &node->order[rank], 
+		(node->header.count - rank) * sizeof(node->order[0]));
 	++node->header.count;
-	node->header.order[rank]=static_cast<std::uint8_t>(slot);
+	node->order[rank]=static_cast<std::uint8_t>(slot);
 	node->maxSubtreesCV[slot] = child->maxCV;
 	node->separatorsCV[slot] = cv;
 	node->separators[slot]=key;
 	node->children[slot]=child;
-	node->header.freeSlots&=~(std::uint64_t{1}<<slot);
+	node->unsetFree(slot);
 	child->parent = node;
 	child->parentSlot = static_cast<std::uint8_t>(slot);
 }
@@ -337,15 +436,15 @@ inline void BNodeStore::insertAt(std::size_t rank,
 							Version cv,
 							LeafBlock* node) {
 	assert(node != nullptr);
-	assert(node->header.freeSlots != 0);
+	assert(node->hasSpace());
 	assert(rank <= node->header.count);
 
-	const unsigned slot = node->header.firstFree();
-	std::memmove(&node->header.order[rank+1], &node->header.order[rank], 
-		(node->header.count - rank) * sizeof(node->header.order[0]));
+	const unsigned slot = node->firstFree();
+	std::memmove(&node->order[rank+1], &node->order[rank], 
+		(node->header.count - rank) * sizeof(node->order[0]));
 	++node->header.count;
-	node->header.order[rank]=static_cast<std::uint8_t>(slot);
-	node->header.freeSlots&=~(std::uint64_t{1}<<slot);
+	node->order[rank]=static_cast<std::uint8_t>(slot);
+	node->unsetFree(slot);
 	node->cv[slot] = cv;
 	node->ranges[slot] = range;
 	if (cv > node->header.maxCV) {
@@ -361,7 +460,7 @@ inline bool BNodeStore::findKey(const StringRef& key,
 	std::size_t mid= lo+(hi-lo)/2;
 	int comp;
 	while (lo < hi){
-		comp= keyStore_.compareKeys(key,node->separators[node->header.order[mid]]);
+		comp= keyStore_.compareKeys(key,node->separators[node->order[mid]]);
 		if (comp==0) {
 			rank=mid;
 			return true;
@@ -387,7 +486,7 @@ inline bool BNodeStore::findKey(const StringRef& key,
 	std::size_t mid= lo+(hi-lo)/2;
 	int comp;
 	while (lo < hi){
-		comp= keyStore_.compareBegin(key,node->ranges[node->header.order[mid]]);
+		comp= keyStore_.compareBegin(key,node->ranges[node->order[mid]]);
 		if (comp==0) {
 			rank=mid;
 			return true;
@@ -409,11 +508,11 @@ inline void BNodeStore::eraseAt(
 	assert(node != nullptr);
 	assert(rank < node->header.count);
 
-	const unsigned slot = node->header.order[rank];
-	std::memmove(&node->header.order[rank], &node->header.order[rank+1], 
-		(node->header.count - rank - 1) * sizeof(node->header.order[0]));
+	const unsigned slot = node->order[rank];
+	std::memmove(&node->order[rank], &node->order[rank+1], 
+		(node->header.count - rank - 1) * sizeof(node->order[0]));
 	--node->header.count;
-	node->header.freeSlots|= std::uint64_t{1}<<slot;
+	node->setFree(slot);
 }
 
 inline void BNodeStore::eraseAt(
@@ -422,9 +521,9 @@ inline void BNodeStore::eraseAt(
 	assert(node != nullptr);
 	assert(rank < node->header.count);
 
-	const unsigned slot = node->header.order[rank];
-	std::memmove(&node->header.order[rank], &node->header.order[rank+1], 
-		(node->header.count - rank - 1) * sizeof(node->header.order[0]));
+	const unsigned slot = node->order[rank];
+	std::memmove(&node->order[rank], &node->order[rank+1], 
+		(node->header.count - rank - 1) * sizeof(node->order[0]));
 	--node->header.count;
-	node->header.freeSlots|= std::uint64_t{1}<<slot;
+	node->setFree(slot);
 }

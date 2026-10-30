@@ -6,6 +6,9 @@
 
 namespace {
 
+// At 2 KiB blocks every free map is one word, which some tests read directly.
+static_assert(FreeSlots<LeafCapacity>::Words == 1 && FreeSlots<InternalCapacity>::Words == 1);
+
 // Walks the age list from its oldest node, starting at any linked node.
 std::vector<const BNodeHeader*> ageList(const BNodeHeader* node) {
 	while (node->agePrevious != nullptr) {
@@ -62,11 +65,11 @@ TEST_CASE("/resolver/BNodeStore/CapacityForBlock") {
 	ASSERT(sizeof(LeafBlockLayout<LeafCapacity>) <= BlockSize);
 	ASSERT(sizeof(LeafBlockLayout<LeafCapacity + 1>) > BlockSize);
 
-	// Capped at 64 slots, and 0 when not even one entry fits.
+	// Capped at MaxNodeCapacity slots, and 0 when not even one entry fits.
 	std::size_t small = capacityForBlock<SmallLayout>();
 	std::size_t oversized = capacityForBlock<OversizedLayout>();
 
-	ASSERT_EQ(small, 64);
+	ASSERT_EQ(small, MaxNodeCapacity);
 	ASSERT_EQ(oversized, 0);
 }
 
@@ -87,12 +90,12 @@ TEST_CASE("/resolver/BNodeStore/AllocateLeafInitializesNode") {
 	ASSERT(leaf->header.agePrevious == nullptr);
 	ASSERT(leaf->header.ageNext == nullptr);
 
-	ASSERT_EQ(leaf->header.freeSlots, LeafSlotMask);
+	ASSERT_EQ(leaf->freeSlots.words[0], LeafSlotMask);
 	ASSERT(leaf->left == nullptr);
 	ASSERT(leaf->right == nullptr);
 
 	for (std::size_t i = 0; i < LeafCapacity; ++i) {
-		ASSERT_EQ(leaf->header.order[i], 0);
+		ASSERT_EQ(leaf->order[i], 0);
 	}
 }
 
@@ -113,10 +116,10 @@ TEST_CASE("/resolver/BNodeStore/AllocateInternalInitializesNode") {
 	ASSERT(internal->header.agePrevious == nullptr);
 	ASSERT(internal->header.ageNext == nullptr);
 
-	ASSERT_EQ(internal->header.freeSlots, InternalSlotMask);
+	ASSERT_EQ(internal->freeSlots.words[0], InternalSlotMask);
 
 	for (std::size_t i = 0; i < InternalCapacity; ++i) {
-		ASSERT_EQ(internal->header.order[i], 0);
+		ASSERT_EQ(internal->order[i], 0);
 	}
 }
 
@@ -199,7 +202,7 @@ TEST_CASE("/resolver/BNodeStore/ReleaseReturnsBlockToPool") {
 		   reinterpret_cast<std::byte*>(leaf));
 	ASSERT(internal->header.kind == BNodeKind::Internal);
 	ASSERT(internal->header.generation > oldGeneration);
-	ASSERT_EQ(internal->header.freeSlots, InternalSlotMask);
+	ASSERT_EQ(internal->freeSlots.words[0], InternalSlotMask);
 
 	store.releaseNode(&internal->header);
 	ASSERT_EQ(freeBlockCount(pool), freeBefore);
@@ -397,59 +400,93 @@ TEST_CASE("/resolver/BNodeStore/HasSpace") {
 	LeafBlock* leaf = store.allocateLeaf(1);
 	InternalBlock* internal = store.allocateInternal(1);
 
-	ASSERT(leaf->header.hasSpace());
-	ASSERT(internal->header.hasSpace());
+	ASSERT(leaf->hasSpace());
+	ASSERT(internal->hasSpace());
 
 	// One free slot is still space.
-	leaf->header.freeSlots = 1;
-	internal->header.freeSlots = std::uint64_t{1} << (InternalCapacity - 1);
-	ASSERT(leaf->header.hasSpace());
-	ASSERT(internal->header.hasSpace());
+	leaf->freeSlots.words[0] = 1;
+	internal->freeSlots.words[0] = std::uint64_t{1} << (InternalCapacity - 1);
+	ASSERT(leaf->hasSpace());
+	ASSERT(internal->hasSpace());
 
-	leaf->header.freeSlots = 0;
-	internal->header.freeSlots = 0;
-	ASSERT(!leaf->header.hasSpace());
-	ASSERT(!internal->header.hasSpace());
+	leaf->freeSlots.words[0] = 0;
+	internal->freeSlots.words[0] = 0;
+	ASSERT(!leaf->hasSpace());
+	ASSERT(!internal->hasSpace());
 }
 
-// setFree and unsetFree change only their own bit, on all 64 slots;
-// freeSlotCount counts free slots and firstFree returns the lowest one.
-TEST_CASE("/resolver/BNodeStore/HeaderFreeSlots") {
-	BNodeHeader header;
-	ASSERT_EQ(header.freeSlots, 0);
-	ASSERT_EQ(header.freeSlotCount(), 0);
+namespace {
 
-	for (std::size_t slot = 0; slot < 64; ++slot) {
-		header.setFree(slot);
-		ASSERT_EQ(header.freeSlots, UINT64_MAX >> (63 - slot));
-		ASSERT_EQ(header.freeSlotCount(), slot + 1);
-		ASSERT_EQ(header.firstFree(), 0);
+// A map of C slots starts with every slot free and only those bits set.
+// Taking the slots in order, first() returns each in turn and count() goes
+// down by one; setting a free slot or unsetting a used one changes nothing;
+// first() returns the lowest free slot whichever word it is in.
+template<std::size_t C>
+void checkFreeSlots() {
+	FreeSlots<C> map;
+	ASSERT_EQ(FreeSlots<C>::Words, (C + 63) / 64);
+	for (std::size_t w = 0; w < FreeSlots<C>::Words; ++w) {
+		const std::size_t bits = std::min<std::size_t>(64, C - 64 * w);
+		ASSERT_EQ(map.words[w], bits == 64 ? UINT64_MAX : (std::uint64_t{1} << bits) - 1);
+		ASSERT_EQ(FreeSlots<C>::fullWord(w), map.words[w]);
+	}
+	ASSERT(map.any());
+	ASSERT_EQ(map.count(), C);
+
+	for (std::size_t slot = 0; slot < C; ++slot) {
+		ASSERT_EQ(map.first(), slot);
+		ASSERT(map.isFree(slot));
+		map.unsetFree(slot);
+		ASSERT(!map.isFree(slot));
+		ASSERT_EQ(map.count(), C - slot - 1);
+	}
+	ASSERT(!map.any());
+	for (std::uint64_t w : map.words) {
+		ASSERT_EQ(w, 0);
 	}
 
-	// Setting a free slot again changes nothing.
-	header.setFree(63);
-	ASSERT_EQ(header.freeSlots, UINT64_MAX);
+	// Unsetting a used slot changes nothing; setting a free one again neither.
+	map.unsetFree(C / 2);
+	ASSERT(!map.any());
+	map.setFree(C - 1);
+	map.setFree(C - 1);
+	ASSERT_EQ(map.count(), 1);
+	ASSERT_EQ(map.first(), C - 1);
 
-	for (std::size_t slot = 0; slot < 64; ++slot) {
-		ASSERT_EQ(header.firstFree(), slot);
-		header.unsetFree(slot);
-		ASSERT_EQ(header.freeSlots, slot == 63 ? 0 : UINT64_MAX << (slot + 1));
-		ASSERT_EQ(header.freeSlotCount(), 63 - slot);
+	if constexpr (C == 1) {
+		return;
 	}
-	ASSERT(!header.hasSpace());
+	// The lowest free slot, also when lower words are empty.
+	map.setFree(C / 2);
+	ASSERT_EQ(map.first(), C / 2);
+	map.setFree(0);
+	ASSERT_EQ(map.first(), 0);
+	map.unsetFree(0);
+	ASSERT_EQ(map.first(), C / 2);
+	ASSERT_EQ(map.count(), C / 2 == C - 1 ? 1 : 2);
+}
 
-	// Unsetting a used slot changes nothing.
-	header.unsetFree(5);
-	ASSERT_EQ(header.freeSlots, 0);
+} // namespace
 
-	// firstFree ignores higher free slots.
-	header.setFree(40);
-	header.setFree(7);
-	header.setFree(63);
-	ASSERT_EQ(header.firstFree(), 7);
-	ASSERT_EQ(header.freeSlotCount(), 3);
-	header.unsetFree(7);
-	ASSERT_EQ(header.firstFree(), 40);
+// One word up to 64 slots, as many as needed beyond, up to 255.
+TEST_CASE("/resolver/BNodeStore/FreeSlots") {
+	checkFreeSlots<1>();
+	checkFreeSlots<40>();
+	checkFreeSlots<59>();
+	checkFreeSlots<64>();
+	checkFreeSlots<65>();
+	checkFreeSlots<121>();
+	checkFreeSlots<128>();
+	checkFreeSlots<165>();
+	checkFreeSlots<245>();
+	checkFreeSlots<255>();
+}
+
+// A single-word map is a single uint64_t: no space is added for larger nodes.
+TEST_CASE("/resolver/BNodeStore/FreeSlotsSize") {
+	ASSERT_EQ(sizeof(FreeSlots<64>), sizeof(std::uint64_t));
+	ASSERT_EQ(sizeof(FreeSlots<65>), 2 * sizeof(std::uint64_t));
+	ASSERT_EQ(sizeof(FreeSlots<255>), 4 * sizeof(std::uint64_t));
 }
 
 // Allocated nodes start with all their slots free.
@@ -460,10 +497,10 @@ TEST_CASE("/resolver/BNodeStore/AllocatedNodesHaveAllSlotsFree") {
 
 	LeafBlock* leaf = store.allocateLeaf(1);
 	InternalBlock* internal = store.allocateInternal(1);
-	ASSERT_EQ(leaf->header.freeSlotCount(), LeafCapacity);
-	ASSERT_EQ(internal->header.freeSlotCount(), InternalCapacity);
-	ASSERT_EQ(leaf->header.firstFree(), 0);
-	ASSERT_EQ(internal->header.firstFree(), 0);
+	ASSERT_EQ(leaf->freeSlotCount(), LeafCapacity);
+	ASSERT_EQ(internal->freeSlotCount(), InternalCapacity);
+	ASSERT_EQ(leaf->firstFree(), 0);
+	ASSERT_EQ(internal->firstFree(), 0);
 }
 
 namespace {
@@ -516,7 +553,7 @@ void checkInternalNode(const InternalBlock* node,
 	std::uint64_t used = 0;
 
 	for (std::size_t i = 0; i < expected.size(); ++i) {
-		const std::size_t slot = node->header.order[i];
+		const std::size_t slot = node->order[i];
 		ASSERT(slot < InternalCapacity);
 
 		// Each slot appears once in the order.
@@ -533,8 +570,8 @@ void checkInternalNode(const InternalBlock* node,
 		ASSERT_EQ(e.child->parentRank(), i);
 	}
 
-	ASSERT_EQ(node->header.freeSlots, InternalSlotMask & ~used);
-	ASSERT_EQ(node->header.hasSpace(), expected.size() < InternalCapacity);
+	ASSERT_EQ(node->freeSlots.words[0], InternalSlotMask & ~used);
+	ASSERT_EQ(node->hasSpace(), expected.size() < InternalCapacity);
 }
 
 // Fills an empty internal node, inserting entry n at rankFor(n), and checks
@@ -572,7 +609,7 @@ void fillInternalNode(RankFor rankFor) {
 		checkInternalNode(node, expected);
 	}
 
-	ASSERT(!node->header.hasSpace());
+	ASSERT(!node->hasSpace());
 }
 
 } // namespace
@@ -621,7 +658,7 @@ void checkLeafNode(const LeafBlock* node,
 	std::uint64_t used = 0;
 
 	for (std::size_t i = 0; i < expected.size(); ++i) {
-		const std::size_t slot = node->header.order[i];
+		const std::size_t slot = node->order[i];
 		ASSERT(slot < LeafCapacity);
 
 		ASSERT((used & (std::uint64_t{1} << slot)) == 0);
@@ -631,8 +668,8 @@ void checkLeafNode(const LeafBlock* node,
 		ASSERT_EQ(node->cv[slot], expected[i].cv);
 	}
 
-	ASSERT_EQ(node->header.freeSlots, LeafSlotMask & ~used);
-	ASSERT_EQ(node->header.hasSpace(), expected.size() < LeafCapacity);
+	ASSERT_EQ(node->freeSlots.words[0], LeafSlotMask & ~used);
+	ASSERT_EQ(node->hasSpace(), expected.size() < LeafCapacity);
 }
 
 // Fills an empty leaf, inserting entry n at rankFor(n), and checks the
@@ -662,7 +699,7 @@ void fillLeafNode(RankFor rankFor) {
 		checkLeafNode(node, expected);
 	}
 
-	ASSERT(!node->header.hasSpace());
+	ASSERT(!node->hasSpace());
 }
 
 std::size_t mixedRank(std::size_t count) {
@@ -807,7 +844,7 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInLeaf") {
 	});
 
 	ASSERT_EQ(leaf->header.count, SearchKeyCount);
-	ASSERT(!orderIsIdentity(leaf->header.order, SearchKeyCount));
+	ASSERT(!orderIsIdentity(leaf->order, SearchKeyCount));
 
 	checkSearch(store, static_cast<const LeafBlock*>(leaf));
 }
@@ -825,7 +862,7 @@ TEST_CASE("/resolver/BNodeStore/FindKeyInInternalNode") {
 	});
 
 	ASSERT_EQ(internal->header.count, SearchKeyCount);
-	ASSERT(!orderIsIdentity(internal->header.order, SearchKeyCount));
+	ASSERT(!orderIsIdentity(internal->order, SearchKeyCount));
 
 	checkSearch(store, static_cast<const InternalBlock*>(internal));
 }
@@ -905,7 +942,7 @@ void emptyInternalNode(RankFor rankFor) {
 		checkInternalNode(node, expected);
 	}
 
-	ASSERT_EQ(node->header.freeSlots, InternalSlotMask);
+	ASSERT_EQ(node->freeSlots.words[0], InternalSlotMask);
 }
 
 template<typename RankFor>
@@ -932,7 +969,7 @@ void emptyLeafNode(RankFor rankFor) {
 		checkLeafNode(node, expected);
 	}
 
-	ASSERT_EQ(node->header.freeSlots, LeafSlotMask);
+	ASSERT_EQ(node->freeSlots.words[0], LeafSlotMask);
 }
 
 } // namespace
@@ -986,11 +1023,11 @@ TEST_CASE("/resolver/BNodeStore/InsertAndEraseInterleaved") {
 			(count < InternalCapacity && nextRandom(state) % 3 != 0);
 
 		if (insert) {
-			const unsigned lowestFree = std::countr_zero(node->header.freeSlots);
+			const unsigned lowestFree = std::countr_zero(node->freeSlots.words[0]);
 			const std::size_t rank = nextRandom(state) % (count + 1);
 
 			insertInternalEntry(store, keys, node, expected, rank, n);
-			ASSERT_EQ(node->header.order[rank], lowestFree);
+			ASSERT_EQ(node->order[rank], lowestFree);
 		} else {
 			const std::size_t rank = nextRandom(state) % count;
 
@@ -1017,11 +1054,11 @@ TEST_CASE("/resolver/BNodeStore/InsertAndEraseInterleavedInLeaf") {
 			(count < LeafCapacity && nextRandom(state) % 3 != 0);
 
 		if (insert) {
-			const unsigned lowestFree = std::countr_zero(node->header.freeSlots);
+			const unsigned lowestFree = std::countr_zero(node->freeSlots.words[0]);
 			const std::size_t rank = nextRandom(state) % (count + 1);
 
 			insertLeafEntry(keys, store, node, expected, rank, n);
-			ASSERT_EQ(node->header.order[rank], lowestFree);
+			ASSERT_EQ(node->order[rank], lowestFree);
 		} else {
 			const std::size_t rank = nextRandom(state) % count;
 
@@ -1046,20 +1083,20 @@ TEST_CASE("/resolver/BNodeStore/EraseThenInsertReusesSlot") {
 	for (std::size_t n = 0; n < InternalCapacity; ++n) {
 		insertInternalEntry(store, keys, node, expected, 0, n);
 	}
-	ASSERT(!node->header.hasSpace());
+	ASSERT(!node->hasSpace());
 
 	const std::size_t erased = InternalCapacity / 2;
-	const unsigned slot = node->header.order[erased];
+	const unsigned slot = node->order[erased];
 
 	store.eraseAt(erased, node);
 	expected.erase(expected.begin() + erased);
 	checkInternalNode(node, expected);
-	ASSERT_EQ(node->header.freeSlots, std::uint64_t{1} << slot);
+	ASSERT_EQ(node->freeSlots.words[0], std::uint64_t{1} << slot);
 
 	insertInternalEntry(store, keys, node, expected, 3, InternalCapacity);
-	ASSERT_EQ(node->header.order[3], slot);
+	ASSERT_EQ(node->order[3], slot);
 	checkInternalNode(node, expected);
-	ASSERT(!node->header.hasSpace());
+	ASSERT(!node->hasSpace());
 }
 
 TEST_CASE("/resolver/BNodeStore/EraseThenInsertReusesSlotInLeaf") {
@@ -1073,20 +1110,20 @@ TEST_CASE("/resolver/BNodeStore/EraseThenInsertReusesSlotInLeaf") {
 	for (std::size_t n = 0; n < LeafCapacity; ++n) {
 		insertLeafEntry(keys, store, node, expected, 0, n);
 	}
-	ASSERT(!node->header.hasSpace());
+	ASSERT(!node->hasSpace());
 
 	const std::size_t erased = LeafCapacity / 2;
-	const unsigned slot = node->header.order[erased];
+	const unsigned slot = node->order[erased];
 
 	store.eraseAt(erased, node);
 	expected.erase(expected.begin() + erased);
 	checkLeafNode(node, expected);
-	ASSERT_EQ(node->header.freeSlots, std::uint64_t{1} << slot);
+	ASSERT_EQ(node->freeSlots.words[0], std::uint64_t{1} << slot);
 
 	insertLeafEntry(keys, store, node, expected, 3, LeafCapacity);
-	ASSERT_EQ(node->header.order[3], slot);
+	ASSERT_EQ(node->order[3], slot);
 	checkLeafNode(node, expected);
-	ASSERT(!node->header.hasSpace());
+	ASSERT(!node->hasSpace());
 }
 
 // Inserting an entry newer than a leaf raises the leaf's maximum CV and

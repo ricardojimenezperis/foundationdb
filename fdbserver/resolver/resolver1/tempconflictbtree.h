@@ -206,13 +206,13 @@ private:
 	// An internal node needs a split when every free slot may be taken by
 	// the split of a child that needs one.
 	static bool needsSplit(const InternalBlock* node) {
-		return node->header.childrenNeedingSplit == node->header.freeSlotCount();
+		return node->header.childrenNeedingSplit == node->freeSlotCount();
 	}
 	// A leaf needs a split when it has at most one free slot, since a write
 	// can add two entries to a leaf: the written range and the right part of
 	// the range it splits.
 	static bool needsSplit(const LeafBlock* node) {
-		return node->header.freeSlotCount() <= 1;
+		return node->freeSlotCount() <= 1;
 	}
 	static bool needsSplit(const BNodeHeader* node) {
 		return node->kind == BNodeKind::Leaf
