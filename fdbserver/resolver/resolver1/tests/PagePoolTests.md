@@ -5,8 +5,8 @@
 Validation of fixed-size block allocation and release within a
 budget-limited pool of aligned 64 KiB pages: page and block layout, the requested budget and the bytes
 actually allocated in whole pages, free-list allocation and release
-order, exhaustion and recovery. Blocks are handed out and returned as
-direct addresses.
+order, the count of free blocks, exhaustion and recovery. Blocks are
+handed out and returned as direct addresses.
 
 History reclamation and key-storage lifetime management are outside
 the scope of this component. Their use of the pool is validated in
@@ -14,18 +14,18 @@ the scope of this component. Their use of the pool is validated in
 
 ## Source and environment
 
-- Source commit: not under version control; tested files identified by
-  SHA-256 (first 16 hex digits):
+- Source commit: the tested files are identified by content; this report
+  is committed together with them. SHA-256 (first 16 hex digits):
 
   | File | SHA-256 |
   |---|---|
-  | `pagepool.cpp` | `7506a3e1f65b263a` |
-  | `pagepool.h` | `b6549ed8ffe91ea8` |
-  | `common.h` | `0a0b864acb86c330` |
+  | `pagepool.cpp` | `1b463f87266e646f` |
+  | `pagepool.h` | `54456873974dbb8f` |
+  | `common.h` | `a815af89662b3a73` |
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
-  | `makefile` | `246b6c0baf2b6a99` |
-  | `tests/pagepooltests.cpp` | `924bc131b8ce98f3` |
+  | `makefile` | `2a8173902bc33339` |
+  | `tests/pagepooltests.cpp` | `059580ab0c6dff71` |
 
 - Working tree: the files listed above
 - Platform: macOS 27.0.1 (build 26A434), arm64 (Apple M3 Pro)
@@ -59,7 +59,7 @@ Coverage collection with gcov, for `pagepool.cpp`:
 ```bash
 rm -rf build/coverage && mkdir -p build/coverage
 FLAGS="-I. -std=c++20 -Wall -Wextra -Wpedantic -O0 --coverage"
-for f in pagepool keystore bnodestore testmain tests/pagepooltests tests/keystoretests tests/bnodestoretests; do
+for f in pagepool keystore bnodestore tempconflictbtree testmain tests/pagepooltests tests/keystoretests tests/bnodestoretests tests/tempconflictbtreetests; do
 	g++ $FLAGS -c $f.cpp -o build/coverage/$(basename $f).o
 done
 g++ --coverage build/coverage/*.o -o build/coverage/tests.exe
@@ -72,20 +72,21 @@ Coverage collection with llvm-cov, for `pagepool.cpp` and `pagepool.h`:
 
 ```bash
 rm -rf build/coverage-llvm && mkdir -p build/coverage-llvm
-g++ -I. -std=c++20 -Wall -Wextra -Wpedantic -O0 -fprofile-instr-generate -fcoverage-mapping -fcoverage-compilation-dir=. pagepool.cpp keystore.cpp bnodestore.cpp testmain.cpp tests/*.cpp -o build/coverage-llvm/tests.exe
+g++ -I. -std=c++20 -Wall -Wextra -Wpedantic -O0 -fprofile-instr-generate -fcoverage-mapping -fcoverage-compilation-dir=. pagepool.cpp keystore.cpp bnodestore.cpp tempconflictbtree.cpp testmain.cpp tests/*.cpp -o build/coverage-llvm/tests.exe
 LLVM_PROFILE_FILE=build/coverage-llvm/pagepool.profraw build/coverage-llvm/tests.exe /resolver/PagePool
 xcrun llvm-profdata merge -o build/coverage-llvm/pagepool.profdata build/coverage-llvm/pagepool.profraw
-xcrun llvm-cov report build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/pagepool.profdata '-ignore-filename-regex=(keystore|bnodestore|fdbcompat|test)' > build/coverage-llvm/pagepool-llvm-report.txt
-xcrun llvm-cov show build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/pagepool.profdata -show-branches=count '-ignore-filename-regex=(keystore|bnodestore|fdbcompat|test)' > build/coverage-llvm/pagepool-llvm-show.txt
+xcrun llvm-cov report build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/pagepool.profdata '-ignore-filename-regex=(keystore|bnodestore|tempconflictbtree|fdbcompat|ResolverBatchTypes|test)' > build/coverage-llvm/pagepool-llvm-report.txt
+xcrun llvm-cov show build/coverage-llvm/tests.exe -instr-profile=build/coverage-llvm/pagepool.profdata -show-branches=count '-ignore-filename-regex=(keystore|bnodestore|tempconflictbtree|fdbcompat|ResolverBatchTypes|test)' > build/coverage-llvm/pagepool-llvm-show.txt
 ```
 
-Only the PagePool tests are run, so the KeyStore and BNodeStore tests,
-which also use the pool, do not contribute to these figures. Each collection starts
+Only the PagePool tests are run, so the KeyStore, BNodeStore and
+TempConflictBTree tests, which also use the pool, do not contribute to
+these figures. Each collection starts
 from an empty directory, so counters from earlier runs are not merged
 in. The `-ignore-filename-regex` option leaves only `pagepool.cpp` and
 `pagepool.h` in the llvm-cov output.
 
-`tests/coverage.sh` runs these commands for the three components, after
+`tests/coverage.sh` runs these commands for the four components, after
 the full suite whose output is the test evidence. Run it from the
 project root:
 
@@ -110,10 +111,12 @@ bash tests/coverage.sh
 | `/resolver/PagePool/ReleaseAfterExhaustion` | Releasing a block into an exhausted pool makes it allocatable again at the same address, and only that block. | PASS |
 | `/resolver/PagePool/ReleaseIsLifo` | Released blocks are reallocated in last-in, first-out order, compared by address. | PASS |
 | `/resolver/PagePool/ReleaseBlockFromAnotherPage` | Blocks from different pages, one page apart, can be released and are reused in last-in, first-out order. | PASS |
+| `/resolver/PagePool/AvailableBlocks` | With a budget of two pages and 100 bytes and 1000-byte blocks, `availableBlocks()` starts at the number of blocks in the two whole pages, goes down by one with each allocation, stays at 0 when allocation fails, and goes up by one with each release. | PASS |
+| `/resolver/PagePool/AvailableBlocksOfEmptyPool` | A pool with a budget of `PageSize - 1` reports 0 available blocks, before and after a failed allocation. | PASS |
 
-13 PagePool tests passed, 0 failed. The full run, including the 35
-KeyStore tests and the 41 BNodeStore tests, reports 89 passed and 0
-failed.
+15 PagePool tests passed, 0 failed. The full run, including the 41
+KeyStore tests, the 47 BNodeStore tests and the 124 TempConflictBTree
+tests, reports 228 passed and 0 failed.
 
 The constructor requires a block size of at least `sizeof(FreeBlock)`,
 at most `PageSize`, and a multiple of `alignof(FreeBlock)`. It checks
@@ -135,7 +138,7 @@ gcov, `pagepool.cpp`:
 
 | Metric | Result |
 |---|---|
-| Lines executed | 100.00% of 29 |
+| Lines executed | 100.00% of 32 |
 | Branches executed | 100.00% of 14 |
 | Taken at least once | 71.43% of 14 |
 
@@ -143,8 +146,8 @@ llvm-cov source-based coverage:
 
 | File | Regions | Functions | Lines | Branches |
 |---|---|---|---|---|
-| `pagepool.cpp` | 100.00% of 12 | 100.00% of 4 | 100.00% of 30 | 100.00% of 6 |
-| `pagepool.h` | 100.00% of 3 | 100.00% of 3 | 100.00% of 3 | no branches |
+| `pagepool.cpp` | 100.00% of 12 | 100.00% of 4 | 100.00% of 32 | 100.00% of 6 |
+| `pagepool.h` | 100.00% of 4 | 100.00% of 4 | 100.00% of 4 | no branches |
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
@@ -161,22 +164,23 @@ directions. llvm-cov reports no branch for the `assert` in the
 constructor, whose condition comes from a macro in a system header;
 gcov does report it.
 
-The functions defined in `pagepool.h` (`blockSize`, `budget` and
-`allocatedBytes`) are inline. They
+The functions defined in `pagepool.h` (`blockSize`, `budget`,
+`allocatedBytes` and `availableBlocks`) are inline. They
 are measured with llvm-cov only. With `--coverage`, each translation
 unit keeps its own counters for an inline function, and the linker
 keeps one copy. Reading `pagepool.h` through one object file can
 therefore report a function as not executed although the tests call
 it. llvm-cov merges the counters of all copies. Its execution counts
-are `blockSize` 7, `budget` 5 and `allocatedBytes` 10.
+are `blockSize` 7, `budget` 5, `allocatedBytes` 10 and
+`availableBlocks` 264.
 
 ### Decisions
 
 The decisions in `pagepool.cpp` outside the `assert` have a single
 condition: the two constructor loops and the empty free list in
 `allocateBlock`. llvm-cov reports both outcomes covered for each of
-them: `pagepool.cpp:19` (true 27, false 19), `pagepool.cpp:21` (true
-9.13k, false 27) and `pagepool.cpp:33` (true 21, false 9.04k).
+them: `pagepool.cpp:19` (true 29, false 21), `pagepool.cpp:21` (true
+9.26k, false 29) and `pagepool.cpp:33` (true 23, false 9.17k).
 
 `releaseBlock` has the precondition that the address must be the start
 of a block allocated by this pool and not already released. The tests
@@ -222,8 +226,9 @@ source.
 ## Evidence
 
 - [Test output](evidence/pagepool-tests.txt): output of `make -B test`
-  for the full suite (89 tests, PagePool, KeyStore and BNodeStore). It
-  is the same run as `keystore-tests.txt` and `bnodestore-tests.txt`.
+  for the full suite (228 tests, PagePool, KeyStore, BNodeStore and
+  TempConflictBTree). It is the same run as `keystore-tests.txt`,
+  `bnodestore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/pagepool-coverage.txt): gcov output after
   running only `./tests.exe /resolver/PagePool`. The filter does not
   appear in the gcov output; it is recorded in
@@ -238,5 +243,5 @@ source.
   same llvm-cov run.
 
 The two annotated reports are generated by `tests/coverage.sh` and are not
-tracked. The ones this report describes are in the evidence bundle of the
-`resolver-v1` release.
+tracked; running it on the source identified above regenerates the ones
+this report describes.

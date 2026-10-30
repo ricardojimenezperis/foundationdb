@@ -1,0 +1,20 @@
+# sources: tempconflictbtree.cpp 879b0d901a776403, tempconflictbtree.h 5973f13897edf55a (SHA-256 prefixes, as in TempConflictBTreeTests.md); Apple clang version 15.0.0 (clang-1500.3.9.4)
+# build: clang++ -std=c++20 -O2 -DRESOLVER1_BLOCK_SIZE=<b> longkeyreserve.cpp pagepool.cpp keystore.cpp bnodestore.cpp tempconflictbtree.cpp
+block=1024 length=10001 pages=12 poolBlocks=768 reserve=65 writes=20000 reclaimCV plain=11897 afterLong=12235 retained plain=8104 afterLong=7766
+block=1024 length=10001 pages=64 poolBlocks=4096 reserve=65 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001
+block=1024 length=30001 pages=12 poolBlocks=768 reserve=185 writes=20000 reclaimCV plain=11897 afterLong=13574 retained plain=8104 afterLong=6427
+block=1024 length=30001 pages=64 poolBlocks=4096 reserve=185 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001
+block=2048 length=10001 pages=12 poolBlocks=384 reserve=35 writes=20000 reclaimCV plain=10905 afterLong=10905 retained plain=9096 afterLong=9096
+block=2048 length=10001 pages=64 poolBlocks=2048 reserve=35 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001
+block=2048 length=30001 pages=12 poolBlocks=384 reserve=92 writes=20000 reclaimCV plain=10905 afterLong=12413 retained plain=9096 afterLong=7588
+block=2048 length=30001 pages=64 poolBlocks=2048 reserve=92 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001
+block=4096 length=10001 pages=12 poolBlocks=192 reserve=35 writes=20000 reclaimCV plain=11401 afterLong=11401 retained plain=8600 afterLong=8600
+block=4096 length=10001 pages=64 poolBlocks=1024 reserve=35 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001
+block=4096 length=30001 pages=12 poolBlocks=192 reserve=47 writes=20000 reclaimCV plain=11401 afterLong=12181 retained plain=8600 afterLong=7820
+block=4096 length=30001 pages=64 poolBlocks=1024 reserve=47 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001
+block=8192 length=10001 pages=24 poolBlocks=192 reserve=35 writes=20000 reclaimCV plain=2043 afterLong=2196 retained plain=17958 afterLong=17805
+block=8192 length=10001 pages=64 poolBlocks=512 reserve=35 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001
+block=8192 length=30001 pages=24 poolBlocks=192 reserve=35 writes=20000 reclaimCV plain=2043 afterLong=2196 retained plain=17958 afterLong=17805
+block=8192 length=30001 pages=64 poolBlocks=512 reserve=35 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001
+block=8192 length=60000 pages=24 poolBlocks=192 reserve=47 writes=20000 reclaimCV plain=2043 afterLong=3538 retained plain=17958 afterLong=16463
+block=8192 length=60000 pages=64 poolBlocks=512 reserve=47 writes=20000 reclaimCV plain=0 afterLong=0 retained plain=20001 afterLong=20001

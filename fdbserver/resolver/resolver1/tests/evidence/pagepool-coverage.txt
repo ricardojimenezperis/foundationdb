@@ -1,5 +1,5 @@
 File 'pagepool.cpp'
-Lines executed:100.00% of 29
+Lines executed:100.00% of 32
 Branches executed:100.00% of 14
 Taken at least once:71.43% of 14
 No calls
