@@ -3419,3 +3419,857 @@ TEST_CASE("/resolver/TempConflictBTree/ScatteredPointsRegression") {
 	}
 	checkSameEntries(checkStructure(t), model);
 }
+
+namespace {
+
+// One transaction of a read batch: its read ranges, its read version,
+// whether it reports every conflicting range, and whether an earlier check
+// of the batch already marked it conflicting.
+struct BatchTransaction {
+	std::vector<std::pair<Bytes, Bytes>> reads;
+	Version version = 0;
+	bool report = false;
+	bool alreadyConflicting = false;
+};
+
+struct BatchResult {
+	std::vector<uint8_t> status;     // per transaction
+	std::vector<uint8_t> conflicts;  // per read, in transaction order
+	std::vector<bool> tooOld;        // per transaction
+	int64_t tooOldWithinWindow = 0;
+};
+
+// Calls checkReads<G> on a batch laid out as FDB's ConflictBatch lays it
+// out: the reads of each transaction consecutive, and the begin and end of
+// every read range, plus those of optional write ranges, in points sorted
+// by key.
+template<uint8_t G>
+BatchResult checkBatch(TestTree& t, const std::vector<BatchTransaction>& batch,
+					   const std::vector<std::pair<Bytes, Bytes>>& writes = {}) {
+	const std::size_t T = batch.size();
+	std::vector<std::vector<std::pair<int, int>>> readSlots(T);
+	std::vector<std::pair<int, int>> writeSlots(writes.size());
+	std::vector<TransactionInfo> infos(T);
+	std::vector<TransactionInfo*> infoPointers(T);
+	std::vector<VectorRef<int>> reported(T);
+	std::vector<ReadConflictRange> reads;
+	std::vector<int> offsets(T);
+	for (std::size_t tx = 0; tx < T; ++tx) {
+		offsets[tx] = static_cast<int>(reads.size());
+		readSlots[tx].resize(batch[tx].reads.size());
+		for (std::size_t r = 0; r < batch[tx].reads.size(); ++r) {
+			reads.emplace_back(asRef(batch[tx].reads[r].first),
+							   asRef(batch[tx].reads[r].second),
+							   batch[tx].version, static_cast<int>(tx),
+							   static_cast<int>(r),
+							   batch[tx].report ? &reported[tx] : nullptr);
+		}
+		infos[tx].readRanges = VectorRef<std::pair<int, int>>(
+			readSlots[tx].data(), static_cast<int>(readSlots[tx].size()));
+		infos[tx].tooOld = false;
+		infos[tx].reportConflictingKeys = batch[tx].report;
+		infoPointers[tx] = &infos[tx];
+	}
+	// The write ranges belong to the first transaction.
+	if (!writes.empty()) {
+		ASSERT(T > 0);
+		infos[0].writeRanges = VectorRef<std::pair<int, int>>(
+			writeSlots.data(), static_cast<int>(writeSlots.size()));
+	}
+
+	std::vector<KeyInfo> points;
+	for (std::size_t tx = 0; tx < T; ++tx) {
+		for (std::size_t r = 0; r < batch[tx].reads.size(); ++r) {
+			const ReadConflictRange& read = reads[offsets[tx] + r];
+			points.emplace_back(read.begin, true, false, static_cast<int>(tx),
+								&readSlots[tx][r].first);
+			points.emplace_back(read.end, false, false, static_cast<int>(tx),
+								&readSlots[tx][r].second);
+		}
+	}
+	for (std::size_t w = 0; w < writes.size(); ++w) {
+		points.emplace_back(asRef(writes[w].first), true, true, 0, &writeSlots[w].first);
+		points.emplace_back(asRef(writes[w].second), false, true, 0, &writeSlots[w].second);
+	}
+	std::stable_sort(points.begin(), points.end(),
+					 [](const KeyInfo& a, const KeyInfo& b) {
+						 return a.key.compare(b.key) < 0;
+					 });
+
+	BatchResult result;
+	result.status.resize(T);
+	for (std::size_t tx = 0; tx < T; ++tx) {
+		result.status[tx] = batch[tx].alreadyConflicting;
+	}
+	t.tree.checkReads<G>(points, infoPointers.data(), reads, offsets,
+						 reinterpret_cast<bool*>(result.status.data()),
+						 result.conflicts, result.tooOldWithinWindow);
+	for (const TransactionInfo& info : infos) {
+		result.tooOld.push_back(info.tooOld);
+	}
+	return result;
+}
+
+// Checks a batch's result against a brute-force scan of the tree's entries:
+// a transaction is marked when it was already, or when one of its non-empty
+// reads conflicts; a reporting transaction has each conflicting read marked;
+// no read is marked without a conflict. The batch must hold no too-old read.
+void checkBatchAgainstReference(const TestTree& t,
+								const std::vector<BatchTransaction>& batch,
+								const BatchResult& result) {
+	std::size_t i = 0;
+	for (std::size_t tx = 0; tx < batch.size(); ++tx) {
+		ASSERT(!result.tooOld[tx]);
+		bool any = false;
+		for (const auto& [begin, end] : batch[tx].reads) {
+			const bool expected =
+				begin < end && t.expectedConflict(begin, end, batch[tx].version);
+			any |= expected;
+			if (result.conflicts[i]) {
+				ASSERT(expected);
+			}
+			if (batch[tx].report && !batch[tx].alreadyConflicting) {
+				ASSERT_EQ(bool(result.conflicts[i]), expected);
+			}
+			++i;
+		}
+		ASSERT_EQ(bool(result.status[tx]), batch[tx].alreadyConflicting || any);
+	}
+	ASSERT_EQ(result.conflicts.size(), i);
+	ASSERT_EQ(result.tooOldWithinWindow, 0);
+}
+
+// Random reads over keys from k(0) to k(lastValue): points, short ranges,
+// long ranges and empty ones, some repeated, in transactions of one to four
+// reads at versions below maxVersion, a third of them reporting.
+template<typename Next>
+std::vector<BatchTransaction> randomBatch(Next& next, std::size_t transactions,
+										  unsigned lastValue, Version maxVersion,
+										  Bytes (*makeKey)(unsigned)) {
+	std::vector<BatchTransaction> batch(transactions);
+	std::vector<std::pair<Bytes, Bytes>> seen;
+	for (BatchTransaction& tx : batch) {
+		tx.version = static_cast<Version>(next() % maxVersion);
+		tx.report = next() % 3 == 0;
+		for (unsigned n = 1 + next() % 4; n > 0; --n) {
+			const unsigned b = next() % (lastValue + 1);
+			const unsigned kind = next() % 10;
+			if (kind == 0 && !seen.empty()) {
+				tx.reads.push_back(seen[next() % seen.size()]);
+			} else if (kind < 4) {
+				tx.reads.emplace_back(makeKey(b), keyAfter(makeKey(b)));
+			} else if (kind < 7) {
+				tx.reads.emplace_back(makeKey(b), makeKey(b + 1 + next() % 6));
+			} else if (kind < 9) {
+				tx.reads.emplace_back(makeKey(b), makeKey(b + 1 + next() % (lastValue + 1)));
+			} else {
+				tx.reads.emplace_back(makeKey(b + 1), makeKey(b));
+			}
+			seen.push_back(tx.reads.back());
+		}
+	}
+	return batch;
+}
+
+} // namespace
+
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsInEmptyTree") {
+	TestTree t;
+	const std::vector<BatchTransaction> batch = {
+		{{{key(1), key(9)}}, 0},
+		{{{key(3), keyAfter(key(3))}, {key(5), key(6)}}, 4, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 0}));
+}
+
+// A batch with no read, only write ranges, leaves every status unchanged.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWithoutReads") {
+	TestTree t;
+	t.addLeaf({}, entriesFrom(10, 5, 20));
+	t.build(3);
+	const std::vector<BatchTransaction> batch = {{{}, 0}, {{}, 0, false, true}};
+	const BatchResult result =
+		checkBatch<16>(t, batch, {{key(10), key(30)}, {key(40), key(50)}});
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 1}));
+	ASSERT(result.conflicts.empty());
+}
+
+// Reads around a single stored range [k(20), k(30)) with CV 10, in a root
+// leaf: overlap and a newer CV conflict; ranges are half-open.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsAroundOneRange") {
+	TestTree t;
+	t.addLeaf({}, {{key(20), key(30), 10}});
+	t.build(3);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(20), key(21)}}, 9},
+		{{{key(15), key(21)}}, 9},
+		{{{key(25), key(26)}}, 9},
+		{{{key(29), key(40)}}, 9},
+		{{{key(25), key(26)}}, 10},
+		{{{key(25), key(26)}}, 11},
+		{{{key(10), key(20)}}, 0},
+		{{{key(30), key(40)}}, 0},
+		{{{key(10), key(15)}}, 0},
+		{{{key(35), key(40)}}, 0},
+	};
+	for (bool report : {false, true}) {
+		std::vector<BatchTransaction> b = batch;
+		for (BatchTransaction& tx : b) {
+			tx.report = report;
+		}
+		const BatchResult result = checkBatch<16>(t, b);
+		checkBatchAgainstReference(t, b, result);
+		ASSERT_EQ(result.status,
+				  (std::vector<uint8_t>{1, 1, 1, 1, 0, 0, 0, 0, 0, 0}));
+	}
+}
+
+// A stored point [k, k\0) conflicts only with reads containing k.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWithPoint") {
+	TestTree t;
+	t.addLeaf({}, {{key(20), keyAfter(key(20)), 10}});
+	t.build(3);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(20), keyAfter(key(20))}}, 0},
+		{{{key(10), key(21)}}, 0},
+		{{{keyAfter(key(20)), key(30)}}, 0},
+		{{{key(10), key(20)}}, 0},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 1, 0, 0}));
+}
+
+// Empty reads, with begin at or after end, check nothing, even where a
+// newer range is stored.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsSkipsEmptyReads") {
+	TestTree t;
+	t.addLeaf({}, {{key(20), key(30), 10}});
+	t.build(3);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(25), key(25)}}, 0, true},
+		{{{key(28), key(22)}}, 0, true},
+		{{{key(25), key(25)}, {key(26), key(27)}}, 0, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 0, 1}));
+	ASSERT_EQ(result.conflicts, (std::vector<uint8_t>{0, 0, 0, 1}));
+}
+
+// A transaction already marked by an earlier check of the batch is not
+// checked again unless it reports its conflicting ranges, and its flag is
+// never cleared.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsSkipsConflictingTransactions") {
+	TestTree t;
+	t.addLeaf({}, {{key(20), key(30), 10}, {key(40), key(50), 10}});
+	t.build(3);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(21), key(22)}, {key(41), key(42)}}, 0, false, true},
+		{{{key(21), key(22)}, {key(41), key(42)}, {key(32), key(38)}}, 0, true, true},
+		{{{key(32), key(38)}}, 0, false, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 1, 1}));
+	ASSERT_EQ(result.conflicts, (std::vector<uint8_t>{0, 0, 1, 1, 0, 0}));
+}
+
+// A transaction that reports its conflicting ranges has each of them
+// marked; any other is marked as conflicting, with at least one of them.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsReportsEveryConflictingRead") {
+	TestTree t;
+	t.addLeaf({}, entriesFrom(10, 8, 20));
+	t.addLeaf(key(40), entriesFrom(40, 8, 30));
+	t.build(2);
+	const std::vector<std::pair<Bytes, Bytes>> reads = {
+		{key(10), key(12)}, {key(13), key(14)}, {key(42), key(43)},
+		{key(54), keyAfter(key(54))}, {key(60), key(70)},
+	};
+	const std::vector<BatchTransaction> batch = {
+		{reads, 0, true},
+		{reads, 0, false},
+		{reads, 25, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(std::vector<uint8_t>(result.conflicts.begin(), result.conflicts.begin() + 5),
+			  (std::vector<uint8_t>{1, 0, 1, 1, 0}));
+	ASSERT(std::count(result.conflicts.begin() + 5, result.conflicts.begin() + 10, 1) >= 1);
+	ASSERT_EQ(std::vector<uint8_t>(result.conflicts.begin() + 10, result.conflicts.end()),
+			  (std::vector<uint8_t>{0, 0, 1, 1, 0}));
+}
+
+// The same read in several transactions, and twice in one, with the same
+// outcome everywhere.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsDuplicateReads") {
+	TestTree t;
+	t.addLeaf({}, entriesFrom(10, 6, 20));
+	t.addLeaf(key(30), entriesFrom(30, 6, 20));
+	t.build(2);
+	const std::pair<Bytes, Bytes> hit{key(31), key(33)};
+	const std::pair<Bytes, Bytes> miss{key(23), key(29)};
+	std::vector<BatchTransaction> batch;
+	for (int i = 0; i < 6; ++i) {
+		batch.push_back({{hit, miss, hit}, 0, i % 2 == 0});
+		batch.push_back({{miss, miss}, 0, i % 2 == 1});
+	}
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	for (std::size_t tx = 0; tx < batch.size(); ++tx) {
+		ASSERT_EQ(result.status[tx], tx % 2 == 0 ? 1 : 0);
+	}
+}
+
+// A long read spanning every leaf conflicts only through the last range of
+// the last leaf; with an older version nothing conflicts.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsLongReadAcrossLeaves") {
+	TestTree t;
+	for (unsigned i = 0; i < 8; ++i) {
+		std::vector<Entry> entries = entriesFrom(10 + 20 * i, 5, 5);
+		for (Entry& e : entries) {
+			e.cv = 5;
+		}
+		if (i == 7) {
+			entries.back().cv = 50;
+		}
+		t.addLeaf(i == 0 ? Bytes{} : key(10 + 20 * i), std::move(entries));
+	}
+	t.build(3);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(0), key(250)}}, 10, true},
+		{{{key(0), key(158)}}, 10, true},
+		{{{key(11), key(200)}}, 49, true},
+		{{{key(11), key(200)}}, 50, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 0, 1, 0}));
+}
+
+// A transaction whose read version is below reclaimCV is too old: it is
+// marked, counted once, and none of its reads is checked.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsMarksTooOldTransactions") {
+	TestTree t;
+	t.addLeaf({}, {{key(20), key(30), 40}});
+	t.build(3);
+	Access::setReclaimCV(t.tree, 20);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(21), key(22)}, {key(23), key(24)}}, 19, true},
+		{{{key(21), key(22)}}, 20},
+		{{{key(1), key(2)}}, 5},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	ASSERT_EQ(result.tooOld, (std::vector<bool>{true, false, true}));
+	ASSERT_EQ(result.tooOldWithinWindow, 2);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 1, 1}));
+	ASSERT_EQ(result.conflicts, (std::vector<uint8_t>{0, 0, 1, 0}));
+}
+
+// Reads against random trees of several levels, in one batch of many
+// transactions: with two children per node the partition of the reads
+// creates more tasks than G and suspends some.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsAgainstReference") {
+	for (std::size_t fanout : {std::size_t{2}, std::size_t{3}, InternalCapacity}) {
+		TestTree t(2048 * BlockSize);
+		std::uint32_t state = 9876 + static_cast<std::uint32_t>(fanout);
+		auto next = [&state]() {
+			state = state * 1103515245u + 12345u;
+			return state >> 8;
+		};
+		// 300 leaves over wideKey(10)..wideKey(6009), with gaps between them,
+		// random CVs and some single-entry leaves.
+		for (unsigned i = 0; i < 300; ++i) {
+			const unsigned first = 10 + 20 * i;
+			std::vector<Entry> entries;
+			const unsigned count = i % 4 == 2 ? 1 : 1 + next() % 6;
+			for (unsigned e = 0; e < count; ++e) {
+				const unsigned v = first + 2 * e;
+				entries.push_back({wideKey(v), v % 4 == 0 ? keyAfter(wideKey(v)) : wideKey(v + 1),
+								   static_cast<Version>(next() % 50)});
+			}
+			t.addLeaf(i == 0 ? Bytes{} : wideKey(first), std::move(entries));
+		}
+		t.build(fanout);
+
+		for (int round = 0; round < 4; ++round) {
+			const std::vector<BatchTransaction> batch =
+				randomBatch(next, 1500, 6020, 50, wideKey);
+			const BatchResult a = checkBatch<16>(t, batch);
+			checkBatchAgainstReference(t, batch, a);
+			const BatchResult b = checkBatch<32>(t, batch);
+			checkBatchAgainstReference(t, batch, b);
+			ASSERT(a.status == b.status);
+			const auto conflicting = std::count(a.status.begin(), a.status.end(), 1);
+			ASSERT(conflicting > 0 && conflicting < static_cast<long>(batch.size()));
+		}
+		checkStructure(t);
+	}
+}
+
+// Expired entries are not read and are removed from the leaves the batch
+// visits. A read whose leaf holds only expired entries before its position
+// looks for the previous live entry in the leaves to its left, up to the
+// first leaf.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsSkipsExpiredEntriesAcrossLeaves") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 4, 0), {30, 30, 5, 5}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 4, 0), {5, 5, 5, 30}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 4, 0), {5, 30, 30, 30}));
+	t.build(2);
+	Access::setReclaimCV(t.tree, 10);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(37), key(38)}}, 20, true},
+		{{{key(31), key(32)}}, 20, true},
+		{{{key(36), key(37)}}, 20, true},
+		{{{key(51), key(53)}}, 20, true},
+		{{{key(0), key(5)}}, 20, true},
+		{{{key(15), key(36)}}, 20, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	// expectedConflict ignores expiry: expired entries have CVs at or below
+	// reclaimCV, so no read admitted at or above it conflicts with them.
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 0, 1, 1, 0, 0}));
+	for (const Entry& e : checkStructure(t)) {
+		ASSERT(e.cv > 10);
+	}
+}
+
+// A leaf whose entries have all expired is emptied by the batch and
+// removed from the tree after it, without changing any outcome.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsRemovesLeavesLeftEmpty") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {30, 30, 30}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {5, 5, 5}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {30, 30, 30}));
+	t.addLeaf(key(70), withCVs(entriesFrom(70, 3, 0), {30, 30, 30}));
+	t.build(2);
+	Access::setReclaimCV(t.tree, 10);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(31), key(36)}}, 20, true},
+		{{{key(29), key(51)}}, 20, true},
+		{{{key(33), key(34)}}, 20, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 1, 0}));
+	ASSERT_EQ(Access::pendingCount(t.tree), 0u);
+	const std::vector<Entry> left = checkStructure(t);
+	ASSERT_EQ(left.size(), 9u);
+	for (const Entry& e : left) {
+		ASSERT(!(e.begin >= key(30) && e.begin < key(50)));
+	}
+}
+
+// A separator marked as copying a neighbour's, because its child has no
+// live entry, sends reads to the left; the leaf chain still reaches the
+// entries to the right, and outcomes do not change.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsRoutesPastEmptyChildMarks") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {30, 30, 30}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {5, 5, 5}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {30, 30, 30}));
+	t.build(3);
+	Access::setReclaimCV(t.tree, 10);
+	InternalBlock* root = rootNode(t);
+	ASSERT(!Access::refreshSeparatorDeferred(t.tree, root, 1));
+	ASSERT_EQ(root->separatorsCV[root->order[1]], Access::EmptyChildCV);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(31), key(32)}}, 20, true},
+		{{{key(36), key(51)}}, 20, true},
+		{{{key(54), key(55)}}, 20, true},
+		{{{key(12), key(13)}}, 20, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 1, 1, 1}));
+	Access::cleanPending(t.tree);
+	checkStructure(t);
+}
+
+// Batches checked against hasConflict, read by read, on a tree grown by
+// writes: random reads, then the batch's sorted, disjoint writes.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsMatchesHasConflictOnWrittenTree") {
+	TestTree t(std::size_t{16} << 20);
+	std::uint32_t state = 2468;
+	auto next = [&state]() {
+		state = state * 1103515245u + 12345u;
+		return state >> 8;
+	};
+	Version now = 100;
+	for (int b = 0; b < 120; ++b, now += 10) {
+		std::vector<BatchTransaction> batch =
+			randomBatch(next, 1 + next() % 300, 3000, 60, wideKey);
+		std::vector<std::vector<uint8_t>> expected(batch.size());
+		for (std::size_t tx = 0; tx < batch.size(); ++tx) {
+			batch[tx].version += now - 61;
+			for (const auto& [begin, end] : batch[tx].reads) {
+				expected[tx].push_back(begin < end && t.hasConflict(begin, end, batch[tx].version));
+			}
+		}
+		const BatchResult result =
+			b % 2 == 0 ? checkBatch<16>(t, batch) : checkBatch<32>(t, batch);
+		std::size_t i = 0;
+		for (std::size_t tx = 0; tx < batch.size(); ++tx) {
+			bool any = false;
+			for (const uint8_t e : expected[tx]) {
+				any |= e;
+				if (result.conflicts[i]) {
+					ASSERT(e);
+				}
+				if (batch[tx].report) {
+					ASSERT_EQ(result.conflicts[i], e);
+				}
+				++i;
+			}
+			ASSERT_EQ(bool(result.status[tx]), any);
+		}
+
+		std::vector<unsigned> starts;
+		for (int w = next() % 40; w > 0; --w) {
+			starts.push_back(next() % 3000);
+		}
+		std::sort(starts.begin(), starts.end());
+		unsigned floor = 0;
+		for (unsigned s : starts) {
+			if (s < floor) {
+				continue;
+			}
+			const unsigned end = s + 1 + (next() % 5 == 0 ? next() % 100 : next() % 4);
+			Access::addWrite(t.tree, asRef(wideKey(s)), asRef(wideKey(end)), now);
+			floor = end;
+		}
+	}
+	checkStructure(t);
+}
+
+namespace {
+
+// A key of 'k', 150 filler bytes and a two-byte value: longer than a cache
+// line, so that its prefetch covers two lines, and stored records span
+// key blocks.
+Bytes readsLongKey(unsigned value) {
+	Bytes k(1, 'k');
+	k.insert(k.end(), 150, static_cast<uint8_t>('a' + value % 7));
+	k.push_back(static_cast<uint8_t>(value >> 8));
+	k.push_back(static_cast<uint8_t>(value));
+	return k;
+}
+
+} // namespace
+
+// Reads and stored ranges with keys longer than a cache line, against
+// a brute-force scan.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWithLongKeys") {
+	TestTree t(std::size_t{4} << 20);
+	std::uint32_t state = 1357;
+	auto next = [&state]() {
+		state = state * 1103515245u + 12345u;
+		return state >> 8;
+	};
+	// Keys sort by their filler first: build the leaves in key order.
+	std::vector<unsigned> values;
+	for (unsigned v = 0; v < 400; v += 2) {
+		values.push_back(v);
+	}
+	std::sort(values.begin(), values.end(), [](unsigned a, unsigned b) {
+		return readsLongKey(a) < readsLongKey(b);
+	});
+	std::vector<Entry> entries;
+	for (unsigned v : values) {
+		entries.push_back({readsLongKey(v), keyAfter(readsLongKey(v)), static_cast<Version>(next() % 50)});
+	}
+	for (std::size_t i = 0; i < entries.size(); i += 8) {
+		std::vector<Entry> leaf(entries.begin() + i,
+								entries.begin() + std::min(entries.size(), i + 8));
+		const Bytes lowerBound = i == 0 ? Bytes{} : leaf.front().begin;
+		t.addLeaf(lowerBound, std::move(leaf));
+	}
+	t.build(3);
+	const std::vector<BatchTransaction> batch = randomBatch(next, 400, 400, 50, readsLongKey);
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	const auto conflicting = std::count(result.status.begin(), result.status.end(), 1);
+	ASSERT(conflicting > 0 && conflicting < static_cast<long>(batch.size()));
+	// Among the non-empty reads, some conflict and some do not.
+	std::size_t withConflict = 0, withoutConflict = 0;
+	for (const BatchTransaction& tx : batch) {
+		for (const auto& [begin, end] : tx.reads) {
+			if (begin < end) {
+				(t.expectedConflict(begin, end, tx.version) ? withConflict : withoutConflict) += 1;
+			}
+		}
+	}
+	ASSERT(withConflict > 0 && withoutConflict > 0);
+}
+
+// Every entry has expired: below an internal root, and in a root leaf.
+// Reads find no conflict, and the leaves left empty are removed afterwards.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWithEveryEntryExpired") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {5, 5, 5}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {5, 5, 5}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {5, 5, 5}));
+	t.build(3);
+	Access::setReclaimCV(t.tree, 10);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(31), key(36)}}, 20, true}, {{{key(55), key(58)}}, 20, true}};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 0}));
+	ASSERT_EQ(Access::pendingCount(t.tree), 0u);
+	checkStructure(t);
+}
+
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWithEveryEntryExpiredInRootLeaf") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {5, 5, 5}));
+	t.build(3);
+	Access::setReclaimCV(t.tree, 10);
+	const std::vector<BatchTransaction> batch = {{{{key(11), key(16)}}, 20, true}};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0}));
+	checkStructure(t);
+}
+
+// The previous live entry of a read lies leaves to its left, past leaves
+// whose entries have all expired; a long read crosses them into live history.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWalksLeftPastExpiredLeaves") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {30, 30, 30}));
+	t.addLeaf(key(30), withCVs(entriesFrom(30, 3, 0), {5, 5, 5}));
+	t.addLeaf(key(50), withCVs(entriesFrom(50, 3, 0), {5, 5, 5}));
+	t.addLeaf(key(70), withCVs(entriesFrom(70, 3, 0), {30, 30, 30}));
+	t.build(4);
+	Access::setReclaimCV(t.tree, 10);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(31), key(36)}}, 20, true}, {{{key(55), key(72)}}, 20, true}, {{{key(12), key(13)}}, 20, true}};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 1, 1}));
+	checkStructure(t);
+}
+
+// As above, where the walk to the left leaves the read's subtree and enters
+// the subtree before it.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWalksLeftIntoPreviousSubtree") {
+	TestTree t;
+	for (unsigned i = 0; i < 8; ++i) {
+		const unsigned first = 10 + 20 * i;
+		const Version cv = i < 4 ? 50 : i < 7 ? 5 : 40;
+		t.addLeaf(i == 0 ? Bytes{} : key(first), withCVs(entriesFrom(first, 2, 0), {cv, cv}));
+	}
+	t.build(4);
+	Access::setReclaimCV(t.tree, 10);
+	const std::vector<BatchTransaction> batch = {
+		{{{key(151), key(152)}}, 20, true}, {{{key(71), key(155)}}, 20, true}, {{{key(150), key(151)}}, 45, true}};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{0, 1, 0}));
+	checkStructure(t);
+}
+
+// The empty key as the begin of a stored range and of reads.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWithEmptyKeys") {
+	TestTree t;
+	t.addLeaf({}, {{Bytes{}, key(5), 30}, {key(8), key(9), 30}, {key(10), key(11), 30}});
+	t.addLeaf(key(30), entriesFrom(30, 3, 30));
+	t.build(3);
+	const std::vector<BatchTransaction> batch = {
+		{{{Bytes{}, key(3)}}, 20, true}, {{{Bytes{}, key(40)}}, 40, true}, {{{key(6), key(7)}}, 20, true}};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 0, 0}));
+	checkStructure(t);
+}
+
+// A stored general range whose begin fills more than a key block, so that
+// its end starts in a later block, and reads that begin inside it or past it.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWithRangeEndInLaterKeyBlock") {
+	TestTree t(2048 * BlockSize);
+	Bytes begin = key(20);
+	begin.resize(2100, 'x');
+	Bytes end = key(21);
+	end.resize(140, 'y');
+	t.addLeaf({}, {{key(10), key(11), 30}, {begin, end, 30}, {key(40), key(41), 30}});
+	t.build(3);
+	Bytes readBegin = key(20);
+	readBegin.resize(2100, 'z');
+	const std::vector<BatchTransaction> batch = {
+		{{{readBegin, key(30)}}, 20, true}, {{{key(22), key(30)}}, 20, true}};
+	const BatchResult result = checkBatch<16>(t, batch);
+	checkBatchAgainstReference(t, batch, result);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 0}));
+}
+
+// addWrites with several intervals per call, against a model of every write:
+// a read conflicts when it overlaps a write with a CV above its version.
+// Results are read back through checkReads only.
+TEST_CASE("/resolver/TempConflictBTree/AddWritesAgainstReference") {
+	TestTree t(2048 * BlockSize);
+	std::uint32_t state = 4242;
+	auto next = [&state]() {
+		state = state * 1103515245u + 12345u;
+		return state >> 8;
+	};
+	struct Write {
+		unsigned begin, end;
+		Version cv;
+	};
+	std::vector<Write> model;
+	Version cv = 10;
+	for (int call = 0; call < 60; ++call, cv += 3) {
+		// Sorted, disjoint intervals over keys 0 to 239; some adjacent.
+		std::vector<std::pair<Bytes, Bytes>> owned;
+		unsigned position = next() % 8;
+		while (position < 236 && owned.size() < 12) {
+			const unsigned length = 1 + next() % (next() % 5 == 0 ? 40 : 4);
+			const unsigned last = std::min(position + length, 239u);
+			owned.emplace_back(key(position), key(last));
+			model.push_back({position, last, cv});
+			position = last + next() % 12;
+		}
+		std::vector<std::pair<StringRef, StringRef>> writes;
+		for (const auto& [b, e] : owned) {
+			writes.emplace_back(asRef(b), asRef(e));
+		}
+		t.tree.addWrites(std::span<const std::pair<StringRef, StringRef>>(writes.data(), writes.size()), cv);
+		ASSERT_EQ(t.tree.reclaimCV(), 0);
+
+		std::vector<BatchTransaction> batch(40);
+		for (BatchTransaction& tx : batch) {
+			const unsigned b = next() % 240;
+			const unsigned e = std::min(b + 1 + next() % (next() % 4 == 0 ? 60 : 3), 240u);
+			tx.reads.emplace_back(key(b), key(e));
+			tx.version = 10 + static_cast<Version>(next() % (cv - 7));
+			tx.report = true;
+		}
+		const BatchResult result = checkBatch<16>(t, batch);
+		std::size_t conflicting = 0;
+		for (std::size_t i = 0; i < batch.size(); ++i) {
+			const Bytes& b = batch[i].reads[0].first;
+			const Bytes& e = batch[i].reads[0].second;
+			bool expected = false;
+			for (const Write& w : model) {
+				expected |= key(w.begin) < e && b < key(w.end) && w.cv > batch[i].version;
+			}
+			ASSERT_EQ(bool(result.status[i]), expected);
+			ASSERT_EQ(bool(result.conflicts[i]), expected);
+			conflicting += expected;
+		}
+		if (call >= 5) {
+			ASSERT(conflicting > 0 && conflicting < batch.size());
+		}
+	}
+}
+
+namespace {
+
+// Builds nine leaves of three entries, three per internal node, where the
+// leaves of subtree `expired` (0 or 1) hold entries at CV 5 and the others at
+// CV 30. The expired ranges and the keys of the separators that will lead to
+// them are stored first, at CV 5, with filler at CV 5 up to the end of their
+// key block, so that this oldest block holds nothing else. After build, the
+// separators of the expired subtree, in its parent and in itself, are those
+// keys. Then the reclaim cut moves to 10, the oldest key block is reclaimed,
+// and keys are appended until the pool hands that block out again: those
+// separators now point at other bytes.
+void buildWithSeparatorsInReusedKeyBlock(TestTree& t, unsigned expired) {
+	auto appendKey = [&t](const Bytes& k, Version keyCV) {
+		const std::optional<RangeRef> ref = t.keys().appendKey(
+			reinterpret_cast<const std::byte*>(k.data()), static_cast<std::uint16_t>(k.size()), keyCV);
+		ASSERT(ref.has_value());
+		return *ref;
+	};
+	auto lowerBound = [](unsigned leaf) { return leaf == 0 ? Bytes{} : key(10 + 20 * leaf); };
+	const unsigned firstExpired = 3 * expired;
+	std::vector<std::vector<Entry>> expiredEntries;
+	std::vector<std::vector<RangeRef>> expiredRanges;
+	std::vector<RangeRef> childSeparators;
+	for (unsigned i = firstExpired; i < firstExpired + 3; ++i) {
+		expiredEntries.push_back(entriesFrom(10 + 20 * i, 3, 5));
+		expiredRanges.emplace_back();
+		for (const Entry& e : expiredEntries.back()) {
+			const std::optional<RangeRef> range = t.keys().appendRange(asRef(e.begin), asRef(e.end), e.cv);
+			ASSERT(range.has_value());
+			expiredRanges.back().push_back(*range);
+		}
+		childSeparators.push_back(appendKey(lowerBound(i), 5));
+	}
+	const RangeRef parentSeparator = appendKey(lowerBound(firstExpired), 5);
+	const KeyBlockHeader* oldestBlock = t.keys().keyBlock(expiredRanges[0][0]);
+	for (unsigned n = 0; t.keys().keyBlock(appendKey(key(200 + n % 50), 5)) == oldestBlock; ++n) {
+	}
+
+	for (unsigned i = 0; i < 9; ++i) {
+		if (i >= firstExpired && i < firstExpired + 3) {
+			t.addLeaf(lowerBound(i), expiredEntries[i - firstExpired], expiredRanges[i - firstExpired]);
+		} else {
+			t.addLeaf(lowerBound(i), entriesFrom(10 + 20 * i, 3, 30));
+		}
+	}
+	t.build(3);
+	auto* root = reinterpret_cast<InternalBlock*>(Access::root(t.tree));
+	ASSERT_EQ(root->header.count, 3u);
+	auto* subtree = reinterpret_cast<InternalBlock*>(root->children[root->order[expired]]);
+	ASSERT_EQ(subtree->header.count, 3u);
+	root->separators[root->order[expired]] = parentSeparator;
+	for (std::size_t r = 0; r < 3; ++r) {
+		subtree->separators[subtree->order[r]] = childSeparators[r];
+		ASSERT_EQ(subtree->separatorsCV[subtree->order[r]], 5);
+	}
+
+	Access::setReclaimCV(t.tree, 10);
+	ASSERT_EQ(t.keys().reclaimOldest(), std::optional<Version>(7));
+	ASSERT(!t.keys().isValid(childSeparators[1]));
+	bool reused = false;
+	for (std::size_t n = 0; n < BlockSize && !reused; ++n) {
+		reused = t.keys().keyBlock(appendKey(key(n % 250), 40)) == oldestBlock;
+	}
+	ASSERT(reused);
+}
+
+} // namespace
+
+// Regression: an expired separator may point into a key block that was
+// reclaimed and reused, so its key must not be read. A long read that
+// starts in a subtree whose entries have all expired must still reach the
+// live history after it. As a middle child, the expired subtree is routed
+// past through its parent's separator; as the first child, reads enter it
+// and meet its own expired separators, none of them with a live child.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsPastSeparatorsInReusedKeyBlock") {
+	{
+		TestTree t;
+		buildWithSeparatorsInReusedKeyBlock(t, 1);
+		const std::vector<BatchTransaction> batch = {
+			{{{key(75), key(135)}}, 20, true},  // from the expired subtree into leaf 6
+			{{{key(91), key(95)}}, 20, true},   // inside the expired subtree
+			{{{key(60), key(80)}}, 20, true},   // from leaf 2 into the expired subtree
+			{{{key(12), key(13)}}, 20, true},   // leaf 0
+			{{{key(111), key(200)}}, 40, true}, // newer than every entry
+		};
+		const BatchResult result = checkBatch<16>(t, batch);
+		checkBatchAgainstReference(t, batch, result);
+		ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 0, 0, 1, 0}));
+		ASSERT_EQ(Access::pendingCount(t.tree), 0u);
+	}
+	{
+		TestTree t;
+		buildWithSeparatorsInReusedKeyBlock(t, 0);
+		const std::vector<BatchTransaction> batch = {
+			{{{key(35), key(75)}}, 20, true},   // from the expired subtree into leaf 3
+			{{{key(31), key(36)}}, 20, true},   // inside the expired subtree
+			{{{key(12), key(13)}}, 20, true},   // its first leaf
+			{{{key(72), key(73)}}, 20, true},   // leaf 3
+			{{{key(51), key(200)}}, 40, true},  // newer than every entry
+		};
+		const BatchResult result = checkBatch<16>(t, batch);
+		checkBatchAgainstReference(t, batch, result);
+		ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 0, 0, 1, 0}));
+		ASSERT_EQ(Access::pendingCount(t.tree), 0u);
+	}
+}
