@@ -17,3 +17,7 @@ target_include_directories(fdbserver_resolver
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fdbserver_resolver PRIVATE fdbserver_core fdbserver_logsystem)
+
+# Tasks that btree-v2's checkReads interleaves while it checks a batch's reads.
+set(BTREE_V2_TASKS 16 CACHE STRING "Task capacity of btree-v2's checkReads (1 to 255)")
+target_compile_definitions(fdbserver_resolver PRIVATE BTREE_V2_TASKS=${BTREE_V2_TASKS})

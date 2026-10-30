@@ -1,7 +1,7 @@
 /*
  * SmokeReplay.inc
  *
- * The btree-v1 smoke test's batch replayer. It is included at the end of ConflictSet.cpp, in
+ * The btree-v2 smoke test's batch replayer. It is included at the end of ConflictSet.cpp, in
  * the same form in every binary compared, and runs only as a unit test: it is outside the
  * resolver's normal path. It resolves deterministic batches, made from fixed seeds, through
  * newConflictSet(), so through whichever history this binary and its knobs select, and writes

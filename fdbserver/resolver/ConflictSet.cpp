@@ -69,7 +69,11 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 // ReadConflictRange, KeyInfo and TransactionInfo, shared with resolver1
 #include "ResolverBatchTypes.h"
 
-// btree-v1, compiled in BTreeV1.cpp, resolves every batch of this binary. Its declarations come
+#ifndef BTREE_V2_TASKS
+#error "BTREE_V2_TASKS, the task capacity of checkReads, is set by fdbserver/resolver/CMakeLists.txt"
+#endif
+
+// btree-v2, compiled in BTreeV2.cpp, resolves every batch of this binary. Its declarations come
 // from resolver1's headers in the same namespace; the standard headers they include go first.
 #include <algorithm>
 #include <array>
@@ -86,9 +90,9 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 #include <type_traits>
 #include <utility>
 #define RESOLVER1_IN_FDB 1
-namespace btree_v1 {
+namespace btree_v2 {
 #include "resolver1/tempconflictbtree.h"
-} // namespace btree_v1
+} // namespace btree_v2
 #undef RESOLVER1_IN_FDB
 
 force_inline int extra_ordering(const KeyInfo& ki) {
@@ -753,31 +757,31 @@ private:
 
 struct ConflictSet {
 	explicit ConflictSet(uint64_t poolPages)
-	  : removalKey(makeString(0)), oldestVersion(0), btreeV1(static_cast<std::size_t>(poolPages) * 65536) {}
+	  : removalKey(makeString(0)), oldestVersion(0), btreeV2(static_cast<std::size_t>(poolPages) * 65536) {}
 	~ConflictSet() = default;
 
 	// FDB's skip list stays for clearConflictSet; the batch path does not use it
 	SkipList versionHistory;
 	Key removalKey;
 	Version oldestVersion;
-	// Transactions the window admitted and btree-v1's boundary rejected, and the largest distance
+	// Transactions the window admitted and btree-v2's boundary rejected, and the largest distance
 	// by which that boundary has passed the window
 	int64_t pagedTooOldWithinWindow = 0;
 	int64_t pagedBoundaryPastWindow = 0;
 
-	// btree-v1: the history this binary resolves with, in a pool of PAGED_RESOLVER_POOL_PAGES pages
+	// btree-v2: the history this binary resolves with, in a pool of PAGED_RESOLVER_POOL_PAGES pages
 	// of 64 KiB
-	btree_v1::TempConflictBTree btreeV1;
+	btree_v2::TempConflictBTree btreeV2;
 };
 
 ConflictSet* newConflictSet() {
 	TraceEvent("ResolverConflictHistory")
-	    .detail("Index", "btree-v1")
+	    .detail("Index", "btree-v2")
 	    .detail("PoolPages", SERVER_KNOBS->PAGED_RESOLVER_POOL_PAGES);
 	return new ConflictSet(SERVER_KNOBS->PAGED_RESOLVER_POOL_PAGES);
 }
 const char* conflictSetIndexName(const ConflictSet*) {
-	return "btree-v1";
+	return "btree-v2";
 }
 ConflictSetStats getConflictSetStats(const ConflictSet* cs) {
 	ConflictSetStats stats;
@@ -786,9 +790,9 @@ ConflictSetStats getConflictSetStats(const ConflictSet* cs) {
 	stats.combineSeconds = g_combine.getValue();
 	stats.mergeSeconds = g_merge.getValue();
 	stats.cleanupSeconds = g_removeBefore.getValue();
-	// btree-v1 keeps history by capacity: its boundary and counters
+	// btree-v2 keeps history by capacity: its boundary and counters
 	stats.paged = true;
-	stats.validationMinRV = cs->btreeV1.reclaimCV();
+	stats.validationMinRV = cs->btreeV2.reclaimCV();
 	stats.tooOldWithinWindow = cs->pagedTooOldWithinWindow;
 	stats.boundaryPastWindow = cs->pagedBoundaryPastWindow;
 	return stats;
@@ -1007,11 +1011,11 @@ void ConflictBatch::detectConflicts(Version now,
 	delete[] transactionConflictStatus;
 
 	t = timer();
-	// btree-v1 keeps history by capacity: it reclaims, oldest first, only when a write needs room,
+	// btree-v2 keeps history by capacity: it reclaims, oldest first, only when a write needs room,
 	// so there is nothing to clean at the end of the batch
 	cs->oldestVersion = std::max(cs->oldestVersion, newOldestVersion);
 	cs->pagedBoundaryPastWindow = std::max<int64_t>(
-	    cs->pagedBoundaryPastWindow, cs->btreeV1.reclaimCV() - std::max<Version>(newOldestVersion, 0));
+	    cs->pagedBoundaryPastWindow, cs->btreeV2.reclaimCV() - std::max<Version>(newOldestVersion, 0));
 	g_removeBefore += timer() - t;
 }
 
@@ -1024,17 +1028,17 @@ void ConflictBatch::checkReadConflictRanges() {
 	for (int i = combinedReadConflictRanges.size(); i-- > 0;) {
 		offsets[combinedReadConflictRanges[i].transaction] = i;
 	}
-	// The whole batch in one call, over the sorted endpoints. The boundary does not move while
-	// reads are checked: btree-v1 reclaims only while writing
+	// The whole batch in one call, over the sorted endpoints, with BTREE_V2_TASKS interleaved tasks.
+	// The boundary does not move while reads are checked: btree-v2 reclaims only while writing
 	std::vector<uint8_t> conflicts;
 	int64_t tooOld = 0;
-	cs->btreeV1.checkReads<16>(points,
-	                           transactionInfo.begin(),
-	                           combinedReadConflictRanges,
-	                           offsets,
-	                           transactionConflictStatus,
-	                           conflicts,
-	                           tooOld);
+	cs->btreeV2.checkReads<BTREE_V2_TASKS>(points,
+	                                       transactionInfo.begin(),
+	                                       combinedReadConflictRanges,
+	                                       offsets,
+	                                       transactionConflictStatus,
+	                                       conflicts,
+	                                       tooOld);
 	cs->pagedTooOldWithinWindow += tooOld;
 	for (int i = 0; i < conflicts.size(); ++i) {
 		const ReadConflictRange& r = combinedReadConflictRanges[i];
@@ -1079,7 +1083,7 @@ void ConflictBatch::mergeWriteConflictRanges(Version now) {
 			writes.emplace_back(begin, end);
 		}
 	}
-	cs->btreeV1.addWrites(std::span<const std::pair<StringRef, StringRef>>(writes.data(), writes.size()), now);
+	cs->btreeV2.addWrites(std::span<const std::pair<StringRef, StringRef>>(writes.data(), writes.size()), now);
 }
 
 void ConflictBatch::combineWriteConflictRanges() {

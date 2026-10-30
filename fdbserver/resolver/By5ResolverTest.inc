@@ -31,7 +31,7 @@ void by5ResolverTest(){
  if(segStart)trace.seekg(std::streamoff(trace.tellg())+std::streamoff(segStart*cfg.batchSize*32));
  by5::require(bool(trace),"cannot seek to segment");
  bool validate=by5Env("BY5_VALIDATE",0)!=0;auto cpu=by5Env("BY5_CPU",6);by5::require(cpu<=65535,"CPU overflow");setAffinity(int(cpu));
- // A history kept by capacity (btree-v1) has no window: reads are limited only by its boundary,
+ // A history kept by capacity (btree-v2) has no window: reads are limited only by its boundary,
  // validationMinRV, and a read below it is rejected for memory. FDB's skip list keeps the window
  std::unique_ptr<ConflictSet> cs(newConflictSet());const bool capacity=getConflictSetStats(cs.get()).paged;
  auto window=by5Env("BY5_WINDOW_US",capacity?0:5000000);by5::require(window<=uint64_t(INT64_MAX),"window overflow");
