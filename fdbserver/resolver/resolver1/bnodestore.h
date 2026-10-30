@@ -60,39 +60,39 @@ struct FreeSlots {
 
 	// Word w of a map with every slot free. Every shift is below 64, even in
 	// the branch not taken.
-	static constexpr std::uint64_t fullWord(std::size_t w) {
+	inline static constexpr std::uint64_t fullWord(std::size_t w) {
 		return w + 1 < Words || C % 64 == 0 ? UINT64_MAX : (std::uint64_t{1} << (C % 64)) - 1;
 	}
 
 	// Every slot starts free.
-	FreeSlots() {
+	inline FreeSlots() {
 		for (std::size_t w = 0; w < Words; ++w) {
 			words[w] = fullWord(w);
 		}
 	}
 
-	bool isFree(std::size_t slot) const {
+	inline bool isFree(std::size_t slot) const {
 		if constexpr (Words == 1) {
 			return (words[0] >> slot) & 1;
 		} else {
 			return (words[slot / 64] >> (slot % 64)) & 1;
 		}
 	}
-	void setFree(std::size_t slot) {
+	inline void setFree(std::size_t slot) {
 		if constexpr (Words == 1) {
 			words[0] |= std::uint64_t{1} << slot;
 		} else {
 			words[slot / 64] |= std::uint64_t{1} << (slot % 64);
 		}
 	}
-	void unsetFree(std::size_t slot) {
+	inline void unsetFree(std::size_t slot) {
 		if constexpr (Words == 1) {
 			words[0] &= ~(std::uint64_t{1} << slot);
 		} else {
 			words[slot / 64] &= ~(std::uint64_t{1} << (slot % 64));
 		}
 	}
-	bool any() const {
+	inline bool any() const {
 		if constexpr (Words == 1) {
 			return words[0] != 0;
 		} else {
@@ -104,7 +104,7 @@ struct FreeSlots {
 			return false;
 		}
 	}
-	unsigned count() const {
+	inline unsigned count() const {
 		if constexpr (Words == 1) {
 			return static_cast<unsigned>(std::popcount(words[0]));
 		} else {
@@ -116,7 +116,7 @@ struct FreeSlots {
 		}
 	}
 	// The lowest free slot. Requires a free slot.
-	unsigned first() const {
+	inline unsigned first() const {
 		assert(any());
 		if constexpr (Words == 1) {
 			return static_cast<unsigned>(std::countr_zero(words[0]));

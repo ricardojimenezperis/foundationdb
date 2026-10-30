@@ -99,8 +99,50 @@ struct TempConflictBTreeTestAccess {
 
 namespace {
 
-// At 2 KiB blocks every free map is one word, which some tests read directly.
-static_assert(FreeSlots<LeafCapacity>::Words == 1 && FreeSlots<InternalCapacity>::Words == 1);
+// Whether two free-slot maps are equal, whatever their number of words.
+template<std::size_t C>
+bool sameMap(const FreeSlots<C>& a, const FreeSlots<C>& b) {
+	return std::equal(std::begin(a.words), std::end(a.words), std::begin(b.words));
+}
+
+// A map with exactly the given slots free.
+template<std::size_t C>
+FreeSlots<C> mapWithFree(std::initializer_list<std::size_t> free) {
+	FreeSlots<C> map;
+	for (std::uint64_t& w : map.words) {
+		w = 0;
+	}
+	for (std::size_t slot : free) {
+		map.setFree(slot);
+	}
+	return map;
+}
+
+// A map with every slot free but the first used ones.
+template<std::size_t C>
+FreeSlots<C> mapWithFirstUsed(std::size_t used) {
+	FreeSlots<C> map;
+	for (std::size_t slot = 0; slot < used; ++slot) {
+		map.unsetFree(slot);
+	}
+	return map;
+}
+
+// A two-level layout whose first internal node needs a split: it has
+// CriticalChildren leaves, the last CriticalFull of them full, so that
+// children plus children needing a split fill InternalCapacity. Five more
+// leaves follow, under a second internal node. At 2 KiB: 25 leaves, 15 full.
+constexpr std::size_t CriticalChildren = InternalCapacity * 5 / 8;
+constexpr std::size_t CriticalFull = InternalCapacity - CriticalChildren;
+static_assert(CriticalFull <= CriticalChildren);
+
+std::vector<bool> criticalLayout() {
+	std::vector<bool> full(CriticalChildren + 5, false);
+	for (std::size_t i = CriticalChildren - CriticalFull; i < CriticalChildren; ++i) {
+		full[i] = true;
+	}
+	return full;
+}
 
 using Access = TempConflictBTreeTestAccess;
 using Bytes = std::vector<uint8_t>;
@@ -143,7 +185,9 @@ std::uint8_t childrenNeedingSplit(const InternalBlock* node) {
 // always at rank 0, so that order is never the identity.
 class TestTree {
 public:
-	explicit TestTree(std::size_t budget = 16 * PageSize) : tree(budget) {}
+	// The default budget is 16 pages, or 512 blocks if that is more.
+	explicit TestTree(std::size_t budget = std::max<std::size_t>(16 * PageSize, 512 * BlockSize))
+	  : tree(budget) {}
 
 	TempConflictBTree tree;
 	std::vector<LeafModel> leaves;
@@ -769,8 +813,10 @@ TEST_CASE("/resolver/TempConflictBTree/CleanExpiredRemovesOnlyExpiredEntries") {
 	ASSERT_EQ(left.size(), 2);
 	ASSERT(left[0].begin == key(12) && left[0].cv == 15);
 	ASSERT(left[1].begin == key(16) && left[1].cv == 20);
-	ASSERT_EQ(leaf->freeSlots.words[0], LeafSlotMask & ~((std::uint64_t{1} << leaf->order[0]) |
-											   (std::uint64_t{1} << leaf->order[1])));
+	FreeSlots<LeafCapacity> expectedFree;
+	expectedFree.unsetFree(leaf->order[0]);
+	expectedFree.unsetFree(leaf->order[1]);
+	ASSERT(sameMap(leaf->freeSlots, expectedFree));
 
 	ASSERT(!Access::cleanExpired(t.tree, leaf));
 	checkTree(t);
@@ -838,20 +884,22 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyLeaf") {
 
 namespace {
 
+Bytes wideKey(unsigned value);
+std::vector<Entry> wideEntriesFrom(unsigned first, unsigned count, Version cv);
+
 // root -> [I0, I1]. I0 has a single free slot and its second child is a leaf
 // with entries CVs 1..entries, full by default, so I0 needs a split and the
 // root counts it when that leaf needs one. The other leaves hold one entry
-// each, with CV 100.
+// each, with CV 100. Keys are wide, so that any capacity fits.
 InternalBlock* fullLeafUnderCriticalNode(TestTree& t,
 										 unsigned entries = LeafCapacity) {
 	constexpr std::size_t children = InternalCapacity - 1;
-	t.addLeaf({}, entriesFrom(10, 1, 100));
-	t.addLeaf(key(12), entriesFrom(12, entries, 1));
+	t.addLeaf({}, wideEntriesFrom(10, 1, 100));
+	t.addLeaf(wideKey(12), wideEntriesFrom(12, entries, 1));
 	unsigned first = 12 + 2 * entries;
 	for (std::size_t i = 2; i <= children; ++i, first += 2) {
-		t.addLeaf(key(first), entriesFrom(first, 1, 100));
+		t.addLeaf(wideKey(first), wideEntriesFrom(first, 1, 100));
 	}
-	ASSERT(first <= 231);
 	t.build(children);
 
 	InternalBlock* root = rootNode(t);
@@ -1006,7 +1054,7 @@ TEST_CASE("/resolver/TempConflictBTree/RefreshSeparatorsCanEmptyNode") {
 	Access::setReclaimCV(t.tree, 10);
 	ASSERT(Access::refreshSeparators(t.tree, root));
 	ASSERT_EQ(root->header.count, 0);
-	ASSERT_EQ(root->freeSlots.words[0], InternalSlotMask);
+	ASSERT(sameMap(root->freeSlots, FreeSlots<InternalCapacity>()));
 }
 
 namespace {
@@ -1140,21 +1188,21 @@ TEST_CASE("/resolver/TempConflictBTree/NeedsSplitOfHeaderMatchesNodeKind") {
 	LeafBlock* leaf = t.nodes().allocateLeaf(0);
 	InternalBlock* internal = t.nodes().allocateInternal(0);
 
-	std::vector<std::uint64_t> leafPatterns{
-		std::uint64_t{1}, std::uint64_t{1} << (LeafCapacity - 1),
-		std::uint64_t{1} | std::uint64_t{1} << (LeafCapacity - 1)};
+	std::vector<FreeSlots<LeafCapacity>> leafPatterns{
+		mapWithFree<LeafCapacity>({0}), mapWithFree<LeafCapacity>({LeafCapacity - 1}),
+		mapWithFree<LeafCapacity>({0, LeafCapacity - 1})};
 	for (std::size_t used = 0; used <= LeafCapacity; ++used) {
-		leafPatterns.push_back(LeafSlotMask >> used << used);
+		leafPatterns.push_back(mapWithFirstUsed<LeafCapacity>(used));
 	}
-	for (std::uint64_t freeSlots : leafPatterns) {
-		leaf->freeSlots.words[0] = freeSlots;
-		const bool expected = std::popcount(freeSlots) <= 1;
+	for (const FreeSlots<LeafCapacity>& freeSlots : leafPatterns) {
+		leaf->freeSlots = freeSlots;
+		const bool expected = freeSlots.count() <= 1;
 		ASSERT_EQ(Access::needsSplit(leaf), expected);
 		ASSERT_EQ(Access::needsSplit(&leaf->header), expected);
 	}
 
 	for (std::size_t used = 0; used <= InternalCapacity; ++used) {
-		internal->freeSlots.words[0] = InternalSlotMask >> used << used;
+		internal->freeSlots = mapWithFirstUsed<InternalCapacity>(used);
 		const std::size_t free = InternalCapacity - used;
 		for (std::size_t counted = 0; counted <= std::min(used, free); ++counted) {
 			internal->header.childrenNeedingSplit =
@@ -1169,16 +1217,12 @@ TEST_CASE("/resolver/TempConflictBTree/NeedsSplitOfHeaderMatchesNodeKind") {
 // findKey returns the deepest node on the path that needs a split: the leaf
 // when it is full, otherwise the deepest internal node, or nullptr.
 TEST_CASE("/resolver/TempConflictBTree/FindKeyReturnsDeepestNodeNeedingSplit") {
-	// root -> [I0, I1]; I0 has 25 leaves, the last 15 full, so it needs a
-	// split (25 + 15 == InternalCapacity); I1 has 5 leaves and does not.
-	static_assert(InternalCapacity == 40);
-	std::vector<bool> full(30, false);
-	for (std::size_t i = 10; i < 25; ++i) {
-		full[i] = true;
-	}
+	// root -> [I0, I1]; I0 has CriticalChildren leaves, the last CriticalFull
+	// full, so it needs a split; I1 has 5 leaves and does not.
+	const std::vector<bool> full = criticalLayout();
 	TestTree t;
 	addWideLeaves(t, full);
-	t.build(25);
+	t.build(CriticalChildren);
 	InternalBlock* root = rootNode(t);
 	BNodeHeader* i0 = childAt(root, 0);
 	ASSERT(Access::needsSplit(i0));
@@ -1190,7 +1234,7 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyReturnsDeepestNodeNeedingSplit") {
 		const Position p = find(t, k);
 		ASSERT(p.leaf == t.leaves[i].leaf);
 		BNodeHeader* expected = full[i] ? &t.leaves[i].leaf->header
-							  : i < 25  ? i0
+							  : i < CriticalChildren ? i0
 										: nullptr;
 		ASSERT(p.nodeNeedsSplit == expected);
 	}
@@ -1303,20 +1347,27 @@ TEST_CASE("/resolver/TempConflictBTree/SplitLeafUnderParentNeedingSplit") {
 // split counts twice. Both halves stop needing a split, every moved child
 // points to the new node, and leaf and rank are left unchanged.
 TEST_CASE("/resolver/TempConflictBTree/SplitRootInternal") {
-	static_assert(InternalCapacity == 40);
+	// Every layout has children plus children needing a split equal to
+	// InternalCapacity. At 2 KiB: 40 children; 30 with 10 counted; 20, all.
+	const std::size_t n = InternalCapacity, c = n * 3 / 4, k = n - c;
 	std::vector<std::vector<bool>> layouts;
-	layouts.push_back(std::vector<bool>(40, false));     // full, no child counted
-	std::vector<bool> layout(30, false);
-	std::fill(layout.begin(), layout.begin() + 10, true);
+	layouts.push_back(std::vector<bool>(n, false));       // full, no child counted
+	std::vector<bool> layout(c, false);
+	std::fill(layout.begin(), layout.begin() + k, true);
 	layouts.push_back(layout);                            // counted children first
 	std::reverse(layout.begin(), layout.end());
 	layouts.push_back(layout);                            // counted children last
-	layout.assign(30, false);
-	for (std::size_t i = 0; i < 30; i += 3) {
-		layout[i] = true;
+	layout.assign(c, false);
+	for (std::size_t i = 0; i < k; ++i) {
+		layout[i * (c / k)] = true;
 	}
 	layouts.push_back(layout);                            // spread
-	layouts.push_back(std::vector<bool>(20, true));       // all counted
+	// All counted when the capacity is even; all but one otherwise.
+	layout.assign((n + 1) / 2, true);
+	if (n % 2 != 0) {
+		layout.back() = false;
+	}
+	layouts.push_back(layout);
 
 	for (const std::vector<bool>& full : layouts) {
 		TestTree t;
@@ -1356,8 +1407,7 @@ TEST_CASE("/resolver/TempConflictBTree/SplitRootInternal") {
 		for (std::size_t r = 0; r < sibling->header.count; ++r) {
 			ASSERT_EQ(sibling->order[r], r);
 		}
-		ASSERT_EQ(sibling->freeSlots.words[0],
-				  InternalSlotMask >> sibling->header.count << sibling->header.count);
+		ASSERT(sameMap(sibling->freeSlots, mapWithFirstUsed<InternalCapacity>(sibling->header.count)));
 		checkSameEntries(checkTree(t), modelEntries(t));
 	}
 }
@@ -1366,14 +1416,10 @@ TEST_CASE("/resolver/TempConflictBTree/SplitRootInternal") {
 // parent, the parent stops counting it, and the sibling's CV reaches the
 // root.
 TEST_CASE("/resolver/TempConflictBTree/SplitInternalUnderParent") {
-	static_assert(InternalCapacity == 40);
-	std::vector<bool> full(30, false);
-	for (std::size_t i = 10; i < 25; ++i) {
-		full[i] = true;
-	}
+	const std::vector<bool> full = criticalLayout();
 	TestTree t;
 	addWideLeaves(t, full);
-	t.build(25);
+	t.build(CriticalChildren);
 	InternalBlock* root = rootNode(t);
 	auto* old = reinterpret_cast<InternalBlock*>(childAt(root, 0));
 	BNodeHeader* right = childAt(root, 1);
@@ -1391,8 +1437,8 @@ TEST_CASE("/resolver/TempConflictBTree/SplitInternalUnderParent") {
 	ASSERT(childAt(root, 2) == right);
 	auto* sibling = reinterpret_cast<InternalBlock*>(childAt(root, 1));
 	ASSERT_EQ(old->header.count, cut);
-	ASSERT_EQ(sibling->header.count, 25 - cut);
-	ASSERT_EQ(old->header.childrenNeedingSplit + sibling->header.childrenNeedingSplit, 15);
+	ASSERT_EQ(sibling->header.count, CriticalChildren - cut);
+	ASSERT_EQ(old->header.childrenNeedingSplit + sibling->header.childrenNeedingSplit, CriticalFull);
 	ASSERT_EQ(root->maxSubtreesCV[sibling->header.parentSlot], SplitCV);
 	ASSERT_EQ(root->header.maxCV, SplitCV);
 	ASSERT(t.nodes().oldestNode() != &root->header);
@@ -1612,7 +1658,8 @@ TEST_CASE("/resolver/TempConflictBTree/InsertAtFillsLeafUnderParent") {
 	t.addLeaf({}, wideEntriesFrom(2, 2, 1));
 	t.addLeaf(wideKey(10 + 2 * k0),
 			  {{wideKey(10 + 2 * k0), keyAfter(wideKey(10 + 2 * k0)), 1}});
-	t.addLeaf(wideKey(200), wideEntriesFrom(200, 2, 1));
+	const unsigned last = 10 + 2 * LeafCapacity + 10;
+	t.addLeaf(wideKey(last), wideEntriesFrom(last, 2, 1));
 	t.build(3);
 	InternalBlock* root = rootNode(t);
 	LeafBlock* leaf = t.leaves[1].leaf;
@@ -2030,10 +2077,12 @@ TEST_CASE("/resolver/TempConflictBTree/AddWriteAgainstModel") {
 		}
 	}
 	checkSameEntries(checkTree(t), model);
+	// The writes reach two levels at any block size, and three at 2 KiB;
+	// larger nodes need far more writes for a third.
 	BNodeHeader* root = Access::root(t.tree);
 	ASSERT(root->kind == BNodeKind::Internal);
-	ASSERT(childAt(reinterpret_cast<InternalBlock*>(root), 0)->kind ==
-		   BNodeKind::Internal);
+	ASSERT(BlockSize > 2048 ||
+		   childAt(reinterpret_cast<InternalBlock*>(root), 0)->kind == BNodeKind::Internal);
 }
 
 // The two writes that showed the need for the invariant, now over a valid
@@ -2328,17 +2377,20 @@ TEST_CASE("/resolver/TempConflictBTree/FindKeyDropsCandidateClearedBelow") {
 	leaf->cv[leaf->order[0]] = 100;
 	i0->separatorsCV[leaf->header.parentSlot] = 100;
 	t.leaves[1].entries.front().cv = 100;
-	Access::setReclaimCV(t.tree, 50);
+	// The entries with CVs 2..cut expire, at least two, so the leaf has room
+	// again; the cut stays below the CV 100 of the other leaves.
+	const Version cut = std::min<Version>(50, LeafCapacity / 2);
+	Access::setReclaimCV(t.tree, cut);
 
 	const Position p = find(t, t.leaves[1].lowerBound);
 	ASSERT(p.leaf == leaf);
 	ASSERT(p.nodeNeedsSplit == nullptr);
-	ASSERT_EQ(leaf->header.count, LeafCapacity - 49);
+	ASSERT_EQ(leaf->header.count, LeafCapacity - (cut - 1));
 	ASSERT_EQ(i0->header.childrenNeedingSplit, 0);
 	ASSERT_EQ(root->header.childrenNeedingSplit, 0);
 	std::vector<Entry>& entries = t.leaves[1].entries;
 	entries.erase(std::remove_if(entries.begin(), entries.end(),
-								 [](const Entry& e) { return e.cv <= 50; }),
+								 [&](const Entry& e) { return e.cv <= cut; }),
 				  entries.end());
 	checkSameEntries(checkTree(t), modelEntries(t));
 }
@@ -2488,7 +2540,7 @@ namespace {
 // record of 2024 bytes, which fills a key block on its own.
 Bytes longKey(unsigned value) {
 	Bytes k = key(value);
-	k.resize(2023, 'x');
+	k.resize(BlockSize - sizeof(KeyBlockHeader) - 1, 'x');
 	return k;
 }
 
