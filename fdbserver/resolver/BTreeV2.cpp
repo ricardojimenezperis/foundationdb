@@ -60,6 +60,7 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 #include <numeric>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <tuple>
 #include <type_traits>

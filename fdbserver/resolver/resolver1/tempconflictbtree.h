@@ -104,6 +104,8 @@ public:
 					int64_t& tooOldWithinWindow);
 	// Writes are sorted, disjoint intervals from accepted transactions.
 	// All writes share cv, which must be nondecreasing between calls.
+	// Before each write, reclaims until the pool has room for it in the
+	// worst case; throws std::length_error if it cannot, even when empty.
 	void addWrites(
 		const std::span<const std::pair<StringRef, StringRef>> writes,
 		Version cv);
@@ -119,6 +121,9 @@ private:
 
 	BNodeHeader* root_ = nullptr;
 	Version reclaimCV_ = 0;
+	// The longest key addWrite has stored. Exteriors combine stored keys
+	// with a write's keys, so it bounds the room a write may need.
+	std::size_t maxKeyLength_ = 0;
 	uint64_t readBatch_ = 0;
 	std::vector<std::pair<BNodeHeader*,std::uint64_t>> 
 		pending_;	// Deferred leaf cleanup records; generations reject released nodes.

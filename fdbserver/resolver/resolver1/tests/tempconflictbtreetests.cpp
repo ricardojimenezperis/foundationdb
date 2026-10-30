@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 // Gives the tests access to the private parts of the tree.
@@ -4271,5 +4272,130 @@ TEST_CASE("/resolver/TempConflictBTree/CheckReadsPastSeparatorsInReusedKeyBlock"
 		checkBatchAgainstReference(t, batch, result);
 		ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 0, 0, 1, 0}));
 		ASSERT_EQ(Access::pendingCount(t.tree), 0u);
+	}
+}
+
+namespace {
+
+// A key of 0xff and then c, length bytes long.
+Bytes systemKey(uint8_t c, std::size_t length) {
+	Bytes k(length, c);
+	k[0] = 0xff;
+	return k;
+}
+
+// Blocks a write of keys of length bytes may take: three records of two keys
+// and two nodes.
+std::size_t writeBlocks(std::size_t length) {
+	const std::size_t payload = BlockSize - sizeof(KeyBlockHeader);
+	return 3 * ((2 * length + payload - 1) / payload) + 2;
+}
+
+void addWrite(TestTree& t, const Bytes& begin, const Bytes& end, Version cv) {
+	const std::pair<StringRef, StringRef> write{asRef(begin), asRef(end)};
+	t.tree.addWrites(std::span<const std::pair<StringRef, StringRef>>(&write, 1), cv);
+}
+
+} // namespace
+
+// A write inside a stored range, with keys so long that it and its two
+// exteriors take more blocks than the reserve kept for ordinary keys, into
+// a pool already full of older history: the write reclaims room for all of
+// it first, and its range and both exteriors keep their CVs. The keys are
+// 30,001 bytes, the longest a write conflict range of system keys carries
+// from FDB's client; with 8 KiB blocks, where such a write fits the
+// ordinary reserve, they are 60,000 bytes.
+TEST_CASE("/resolver/TempConflictBTree/AddWritesReclaimsRoomForLongKeys") {
+	const std::size_t length = writeBlocks(30001) > 35 ? 30001 : 60000;
+	const std::size_t need = writeBlocks(length);
+	ASSERT(need > 35);
+	const std::size_t pages = (3 * need * BlockSize + PageSize - 1) / PageSize;
+	TestTree t(pages * PageSize);
+	auto big = [length](uint8_t c) { return systemKey(c, length); };
+	Version cv = 1;
+	for (unsigned v = 0; t.tree.reclaimCV() == 0; ++v) {
+		addWrite(t, key(v % 250), keyAfter(key(v % 250)), cv++);
+	}
+	const Version stored = ++cv;
+	addWrite(t, big('a'), big('z'), stored);
+	const Version written = ++cv;
+	addWrite(t, big('m'), big('n'), written);
+	ASSERT(t.tree.reclaimCV() < stored);
+
+	const std::vector<BatchTransaction> batch = {
+		{{{big('b'), big('c')}}, stored - 1, true},   // left exterior
+		{{{big('b'), big('c')}}, stored, true},
+		{{{big('m'), big('n')}}, written - 1, true},  // the write
+		{{{big('m'), big('n')}}, written, true},
+		{{{big('o'), big('p')}}, stored - 1, true},   // right exterior
+		{{{big('o'), big('p')}}, stored, true},
+	};
+	const BatchResult result = checkBatch<16>(t, batch);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 0, 1, 0, 1, 0}));
+}
+
+// A pool that holds the reserve of ordinary keys but not one write of
+// 65,000-byte keys, even after reclaiming everything: that write throws,
+// and the tree, emptied by the reclamation, still takes ordinary writes.
+TEST_CASE("/resolver/TempConflictBTree/AddWritesThrowsWhenThePoolCannotHoldAWrite") {
+	const std::size_t blocksPerPage = PageSize / BlockSize;
+	const std::size_t pages = (35 + blocksPerPage) / blocksPerPage;
+	ASSERT(pages * blocksPerPage < writeBlocks(65000));
+	TestTree t(pages * PageSize);
+	addWrite(t, key(1), key(2), 10);
+	Bytes begin(65000, 'a'), end(65000, 'z');
+	bool thrown = false;
+	try {
+		addWrite(t, begin, end, 11);
+	} catch (const std::length_error&) {
+		thrown = true;
+	}
+	ASSERT(thrown);
+	ASSERT_EQ(t.tree.reclaimCV(), 10);
+	addWrite(t, key(3), key(4), 12);
+	const std::vector<BatchTransaction> batch = {{{{key(3), key(4)}}, 11, true}, {{{key(1), key(2)}}, 11, true}};
+	const BatchResult result = checkBatch<16>(t, batch);
+	ASSERT_EQ(result.status, (std::vector<uint8_t>{1, 0}));
+}
+
+// One write of long keys and then many writes of short keys into a pool
+// under pressure, against the same short writes alone. The reserve follows
+// the longest key written so far, so the first tree keeps reserving room
+// for the long keys after reclaiming them: it holds less history, and its
+// reclaimCV ends further ahead. Reads at each tree's reclaimCV are exact in
+// both. The keys are as long as in AddWritesReclaimsRoomForLongKeys.
+TEST_CASE("/resolver/TempConflictBTree/AddWritesKeepsTheReserveOfALongKeyAfterReclaimingIt") {
+	const std::size_t length = writeBlocks(30001) > 35 ? 30001 : 60000;
+	const std::size_t pages = (4 * writeBlocks(length) * BlockSize + PageSize - 1) / PageSize;
+	TestTree plain(pages * PageSize), afterLong(pages * PageSize);
+	addWrite(afterLong, systemKey('a', length), systemKey('z', length), 1);
+	constexpr unsigned Writes = 20000;
+	for (unsigned v = 0; v < Writes; ++v) {
+		const Bytes k = wideKey(v);
+		addWrite(plain, k, keyAfter(k), 2 + v);
+		addWrite(afterLong, k, keyAfter(k), 2 + v);
+	}
+	ASSERT(plain.tree.reclaimCV() > 1);
+	ASSERT(afterLong.tree.reclaimCV() > plain.tree.reclaimCV());
+
+	// Key v was written at 2 + v: a read of it at version r conflicts when
+	// 2 + v > r.
+	for (TestTree* t : {&plain, &afterLong}) {
+		const Version r = t->tree.reclaimCV();
+		std::vector<BatchTransaction> batch;
+		std::vector<uint8_t> expected;
+		for (unsigned v = 0; v < Writes; v += 97) {
+			batch.push_back({{{wideKey(v), keyAfter(wideKey(v))}}, r, true});
+			expected.push_back(2 + v > r);
+		}
+		for (unsigned v = r > 4 ? r - 4 : 0; v < r + 2 && v < Writes; ++v) {
+			batch.push_back({{{wideKey(v), keyAfter(wideKey(v))}}, r, true});
+			expected.push_back(2 + v > r);
+		}
+		const BatchResult result = checkBatch<16>(*t, batch);
+		ASSERT_EQ(result.status, expected);
+		for (bool tooOld : result.tooOld) {
+			ASSERT(!tooOld);
+		}
 	}
 }

@@ -1,6 +1,7 @@
 #include "tempconflictbtree.h"
 #include "bnodestore.h"
 #include <numeric>
+#include <stdexcept>
 
 TempConflictBTree::TempConflictBTree(std::size_t budget)
 	: pool_(budget, BlockSize),
@@ -20,8 +21,24 @@ void TempConflictBTree::addWrites(
 void TempConflictBTree::addWrite(
 	const std::pair<StringRef, StringRef>& write,
 	Version cv) {
-	constexpr std::size_t MaxWriteBlocks = 35;
-	reclaimUntilAvail(MaxWriteBlocks);
+	// Blocks one write may take: its range and, when it trims stored ranges,
+	// a left and a right exterior, each two keys no longer than the longest
+	// key written so far, plus two nodes (a split and a new root). The
+	// reserve is never below 35 blocks, which covers keys of up to 11,132
+	// bytes with 2 KiB blocks; a smaller pool only needs to hold the write.
+	// Reclaiming happens only here, before the write reads or stores any
+	// key, so none of its stores can fail.
+	constexpr std::size_t MinWriteBlocks = 35;
+	const std::size_t keyLength = std::max({maxKeyLength_, static_cast<std::size_t>(write.first.size()),
+											static_cast<std::size_t>(write.second.size())});
+	const std::size_t payload = keyStore_.blockSize() - sizeof(KeyBlockHeader);
+	const std::size_t recordBlocks = (2 * keyLength + payload - 1) / payload;
+	const std::size_t writeBlocks = 3 * recordBlocks + 2;
+	if (!reclaimUntilAvail(std::max(MinWriteBlocks, writeBlocks)) &&
+		pool_.availableBlocks() < writeBlocks) {
+		throw std::length_error("TempConflictBTree: the pool cannot hold one write");
+	}
+	maxKeyLength_ = keyLength;
 	LeafBlock* leaf = nullptr;
 	std::size_t rank = 0;
 	BNodeHeader* nodeNeedsSplit = nullptr;
@@ -30,6 +47,7 @@ void TempConflictBTree::addWrite(
 		split(nodeNeedsSplit, leaf, rank, found, cv);
 	}
 	auto range = keyStore_.appendRange(write.first, write.second, cv);
+	assert(range.has_value());
 	if (leaf == nullptr) {
 		leaf = createRootLeaf(cv);
 		insertAt(rank, *range, cv, leaf);
@@ -72,6 +90,7 @@ bool TempConflictBTree::insertWithLeftExterior(
 		const RangeRef oldRef = previousLeaf->ranges[slot];
 		const Version oldCV = previousLeaf->cv[slot];
 		auto left = keyStore_.appendRange(oldRef, write.first, oldCV);
+		assert(left.has_value());
 		previousLeaf->ranges[slot] = *left;
 		if (keyStore_.compareEnd(write.second, oldRef) < 0) {
 			// The write lies inside that range: its right exterior follows the
@@ -79,6 +98,7 @@ bool TempConflictBTree::insertWithLeftExterior(
 			// before. Live entries are disjoint, so the leaf's own entries
 			// begin after the range ends.
 			auto right = keyStore_.appendRange(write.second, oldRef, oldCV);
+			assert(right.has_value());
 			insertAt(rank, range, cv, leaf);
 			++rank;
 			insertAt(rank, *right, oldCV, leaf);
@@ -129,6 +149,7 @@ void TempConflictBTree::preserveRightExterior(
 		return;
 	}
 	auto right = keyStore_.appendRange(end, oldRef, leaf->cv[slot]);
+	assert(right.has_value());
 	leaf->ranges[slot] = *right;
 	if (rank == 0) {
 		// The first key of the leaf has changed; its CV has not.
