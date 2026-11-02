@@ -73,12 +73,33 @@ struct TempConflictBTreeTestAccess {
 	static void updateSeparator(TempConflictBTree& t, InternalBlock* node) {
 		t.propagateUpdates(node, 0, true, false);
 	}
-	// One write through a root search, without a destination prepared by
-	// checkReads.
+	// One write as the batch of a single transaction without reads: checkReads
+	// prepares its destination and addWrites applies it.
 	static void addWrite(TempConflictBTree& t, const StringRef& begin,
 						 const StringRef& end, Version cv) {
-		TempConflictBTree::WriteCursor cursor;
-		t.addWrite(cursor, {begin, end}, cv);
+		std::pair<int, int> slot{0, 0};
+		TransactionInfo info{};
+		info.writeRanges = VectorRef<std::pair<int, int>>(&slot, 1);
+		info.tooOld = false;
+		info.reportConflictingKeys = false;
+		TransactionInfo* infos[1] = {&info};
+		std::vector<KeyInfo> points;
+		points.emplace_back(begin, true, true, 0, &slot.first);
+		points.emplace_back(end, false, true, 0, &slot.second);
+		std::stable_sort(points.begin(), points.end(),
+						 [](const KeyInfo& a, const KeyInfo& b) {
+							 return a.key.compare(b.key) < 0;
+						 });
+		for (std::size_t p = 0; p < points.size(); ++p) {
+			*points[p].pIndex = static_cast<int>(p);
+		}
+		const std::vector<ReadConflictRange> reads;
+		const std::vector<int> offsets(1, 0);
+		bool status[1] = {false};
+		std::vector<uint8_t> conflicts;
+		int64_t tooOld = 0;
+		t.checkReads<16>(points, infos, reads, offsets, status, conflicts, tooOld);
+		t.addWrites(points, infos, status, cv);
 	}
 	static bool reclaimOldest(TempConflictBTree& t) {
 		return t.reclaimOldest();

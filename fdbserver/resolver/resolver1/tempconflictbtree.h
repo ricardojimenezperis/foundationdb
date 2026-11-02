@@ -117,6 +117,7 @@ private:
 	BNodeStore nodeStore_;
 
 	BNodeHeader* root_ = nullptr;
+	LeafBlock* rightmostLeaf_ = nullptr; // Direct insertion anchor for the right-end sentinel.
 	std::size_t maxKeyLength_ = 0;
 	Version reclaimCV_ = 0;
 	// Cleanup stamp: advances for each read batch and when writes advance the cutoff.
@@ -140,7 +141,7 @@ private:
 	// its first write position with a tagged buffered-result ticket.
 	std::vector<uint32_t> nextOther;
 	struct WriteLeaf {
-		LeafBlock* leaf;      // Prepared destination, valid while epochs match.
+		LeafBlock* leaf;      // Prepared destination, repaired locally before release.
 		uint32_t firstWrite;  // First write in the assigned mixed slice.
 		uint32_t opEnd;       // Exclusive mixed-slice bound.
 		BNodeHeader* splitCandidate = nullptr; // Deepest candidate observed during descent.
@@ -158,18 +159,23 @@ private:
 	// Tickets survive circular-buffer growth and do not occupy task slots.
 	uint64_t bufferWriteLeaf(const WriteLeaf& group);
 	uint32_t emitWriteLeaf(uint64_t ticket);
-	// Releasing a leaf invalidates prepared destinations from an earlier epoch.
-	uint64_t writeLeafEpoch_ = 0;
-	uint64_t writeLeavesEpoch_ = 0;
+	// After routing, nextOther[firstWrite] holds a group representative. Leaf
+	// firstWrite fields identify representatives; no node layout changes.
+	bool writeDestinationsActive_ = false;
+	void prepareWriteDestinations();
+	void clearWriteDestinations();
+	uint32_t resolveWriteGroup(uint32_t group);
+	void redirectWriteLeaf(LeafBlock* leaf, LeafBlock* replacement);
+	void redirectWriteSubtree(BNodeHeader* node, LeafBlock* replacement);
 	// Split candidates remain reusable until split state or topology changes.
 	uint64_t writeSplitEpoch_ = 0;
 	uint64_t writeLeavesSplitEpoch_ = 0;
 	struct WriteCursor {
 		LeafBlock* leaf = nullptr;
 		BNodeHeader* splitCandidate = nullptr;
-		uint64_t leafEpoch = 0;
 		uint64_t splitEpoch = 0;
 	};
+	WriteCursor* activeWriteCursor_ = nullptr;
 
 	// Covers both internal separators and leaf entries for the configured block size.
 	static constexpr std::size_t MaxSeparators =

@@ -21,6 +21,11 @@ void TempConflictBTree::addWrites(
 		writeLeaves.push_back({nullptr, firstWrite,
 			static_cast<uint32_t>(readWriteBegins.size()), nullptr});
 	}
+	if (!writeDestinationsActive_) prepareWriteDestinations();
+	struct DestinationGuard {
+		TempConflictBTree& tree;
+		~DestinationGuard() { tree.clearWriteDestinations(); }
+	} destinationGuard{*this};
 	WriteCursor cursor;
 	uint32_t cursorGroup = static_cast<uint32_t>(writeLeaves.size());
 	uint32_t pendingGroup = 0;
@@ -28,9 +33,12 @@ void TempConflictBTree::addWrites(
 	bool hasPending = false;
 	auto applyPending = [&]() {
 		if (cursorGroup != pendingGroup) {
-			const WriteLeaf& group = writeLeaves[pendingGroup];
-			cursor = {group.leaf, group.splitCandidate,
-				writeLeavesEpoch_, writeLeavesSplitEpoch_};
+			const WriteLeaf& group = writeLeaves[resolveWriteGroup(pendingGroup)];
+			if (group.leaf != nullptr) {
+				cursor = {group.leaf, group.splitCandidate, writeLeavesSplitEpoch_};
+			} else {
+				cursor = {rightmostLeaf_, nullptr, writeSplitEpoch_ - 1};
+			}
 			cursorGroup = pendingGroup;
 		}
 		addWrite(cursor, pending, cv);
@@ -67,6 +75,77 @@ void TempConflictBTree::addWrites(
 		}
 	}
 	if (hasPending) applyPending();
+}
+void TempConflictBTree::prepareWriteDestinations() {
+	assert(!writeDestinationsActive_);
+	if (writeLeaves.empty()) return;
+	writeDestinationsActive_ = true;
+	for (uint32_t g = 0; g < writeLeaves.size(); ++g) {
+		WriteLeaf& group = writeLeaves[g];
+		nextOther[group.firstWrite] = g;
+		if (group.leaf == nullptr) continue;
+		uint32_t& representative = group.leaf->firstWrite;
+		if (representative == UINT32_MAX) {
+			representative = g;
+		} else {
+			nextOther[group.firstWrite] = representative;
+		}
+	}
+}
+uint32_t TempConflictBTree::resolveWriteGroup(uint32_t group) {
+	assert(writeDestinationsActive_ && group < writeLeaves.size());
+	uint32_t root = group;
+	while (nextOther[writeLeaves[root].firstWrite] != root) {
+		root = nextOther[writeLeaves[root].firstWrite];
+	}
+	while (group != root) {
+		uint32_t& parent = nextOther[writeLeaves[group].firstWrite];
+		const uint32_t next = parent;
+		parent = root;
+		group = next;
+	}
+	return root;
+}
+void TempConflictBTree::clearWriteDestinations() {
+	if (!writeDestinationsActive_) return;
+	for (uint32_t g = 0; g < writeLeaves.size(); ++g) {
+		const WriteLeaf& group = writeLeaves[g];
+		if (nextOther[group.firstWrite] == g && group.leaf != nullptr) {
+			group.leaf->firstWrite = UINT32_MAX;
+		}
+	}
+	writeDestinationsActive_ = false;
+}
+void TempConflictBTree::redirectWriteLeaf(LeafBlock* leaf, LeafBlock* replacement) {
+	assert(leaf != replacement);
+	if (activeWriteCursor_ != nullptr && activeWriteCursor_->leaf == leaf) {
+		activeWriteCursor_->leaf = replacement;
+		activeWriteCursor_->splitCandidate = nullptr;
+		activeWriteCursor_->splitEpoch = writeSplitEpoch_ - 1;
+	}
+	if (!writeDestinationsActive_ || leaf->firstWrite == UINT32_MAX) return;
+	const uint32_t source = leaf->firstWrite;
+	assert(nextOther[writeLeaves[source].firstWrite] == source);
+	leaf->firstWrite = UINT32_MAX;
+	WriteLeaf& group = writeLeaves[source];
+	group.splitCandidate = nullptr;
+	if (replacement != nullptr && replacement->firstWrite != UINT32_MAX) {
+		nextOther[group.firstWrite] = replacement->firstWrite;
+		group.leaf = nullptr;
+	} else {
+		group.leaf = replacement;
+		if (replacement != nullptr) replacement->firstWrite = source;
+	}
+}
+void TempConflictBTree::redirectWriteSubtree(BNodeHeader* node, LeafBlock* replacement) {
+	if (!writeDestinationsActive_ && activeWriteCursor_ == nullptr) return;
+	LeafBlock* leaf = firstLeaf(node);
+	LeafBlock* last = lastLeaf(node);
+	for (;;) {
+		redirectWriteLeaf(leaf, replacement);
+		if (leaf == last) break;
+		leaf = leaf->right;
+	}
 }
 uint64_t TempConflictBTree::bufferWriteLeaf(const WriteLeaf& group) {
 	const std::size_t count = writeLeafBufferNext_ - writeLeafBufferFirst_;
@@ -117,6 +196,12 @@ void TempConflictBTree::addWrite(
 		WriteCursor& cursor,
 		const std::pair<StringRef, StringRef>& write,
 		Version cv) {
+	assert(activeWriteCursor_ == nullptr);
+	activeWriteCursor_ = &cursor;
+	struct CursorGuard {
+		TempConflictBTree& tree;
+		~CursorGuard() { tree.activeWriteCursor_ = nullptr; }
+	} cursorGuard{*this};
 	// Reserve before using the cursor: reclamation can release its leaf.
 	constexpr std::size_t MinWriteBlocks = 35;
 	const std::size_t keyLength = std::max({maxKeyLength_,
@@ -131,15 +216,15 @@ void TempConflictBTree::addWrite(
 	}
 	maxKeyLength_ = keyLength;
 	LeafBlock*& leaf = cursor.leaf;
+	if (leaf == nullptr) {
+		leaf = rightmostLeaf_;
+		cursor.splitCandidate = nullptr;
+		cursor.splitEpoch = writeSplitEpoch_ - 1;
+	}
 	std::size_t rank = 0;
 	BNodeHeader* nodeNeedsSplit = nullptr;
 	bool found = false;
-	if (cursor.leafEpoch != writeLeafEpoch_ || leaf == nullptr) {
-		// Reclamation or an earlier overlap may have released the destination.
-		found = findKey(write.first, leaf, rank, nodeNeedsSplit);
-		cursor.splitCandidate = nodeNeedsSplit;
-		cursor.splitEpoch = writeSplitEpoch_;
-	} else {
+	if (leaf != nullptr) {
 		cleanExpired(leaf);
 		// Only inspect the right boundary to decide whether to advance. Clean
 		// a sibling after selecting it, never speculatively for every write.
@@ -173,6 +258,9 @@ void TempConflictBTree::addWrite(
 		cursor.splitCandidate = nodeNeedsSplit;
 		cursor.splitEpoch = writeSplitEpoch_;
 	}
+	if (leaf == nullptr && root_ != nullptr) {
+		throw std::logic_error("TempConflictBTree: missing prepared write destination");
+	}
 	if (nodeNeedsSplit != nullptr) {
 		split(nodeNeedsSplit, leaf, rank, found, cv);
 	}
@@ -190,9 +278,7 @@ void TempConflictBTree::addWrite(
 			preserveRightExterior(write.second, scanLeaf, scanRank);
 		}
 	}
-	// The inserted write keeps this leaf alive even if the overlap scan
-	// removed later leaves. No new sibling is added to the group agenda.
-	cursor.leafEpoch = writeLeafEpoch_;
+	// Splits retain the left anchor; later writes advance through leaf links.
 }
 
 bool TempConflictBTree::insertWithLeftExterior(
@@ -285,6 +371,7 @@ LeafBlock* TempConflictBTree::createRootLeaf(Version cv) {
 	LeafBlock* leaf = nodeStore_.allocateLeaf(cv);
 	assert(leaf != nullptr);
 	root_ = &leaf->header;
+	rightmostLeaf_ = leaf;
 	return leaf;
 }
 
@@ -308,6 +395,7 @@ bool TempConflictBTree::findKey(
 		if (internal->header.count == 0) {
 			assert(current == root_);
 			root_ = nullptr;
+			rightmostLeaf_ = nullptr;
 			++writeSplitEpoch_;
 			nodeStore_.releaseNode(current);
 			return false;
@@ -361,10 +449,13 @@ void  TempConflictBTree::insertAt(
 void TempConflictBTree::normalizeRoot() {
 	while (root_ != nullptr) {
 		if (root_->count == 0) {
-			if (root_->kind == BNodeKind::Leaf) ++writeLeafEpoch_;
+			if (root_->kind == BNodeKind::Leaf) {
+				redirectWriteLeaf(reinterpret_cast<LeafBlock*>(root_), nullptr);
+			}
 			++writeSplitEpoch_;
 			nodeStore_.releaseNode(root_);
 			root_ = nullptr;
+			rightmostLeaf_ = nullptr;
 			return;
 		}
 		if (root_->kind != BNodeKind::Internal || root_->count != 1) {
@@ -386,7 +477,8 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 					 rank == 0 && leaf->header.count > 0, false);
 	if (leaf->header.count==0) {
 		if (leaf->parent()==nullptr){
-			++writeLeafEpoch_;
+			redirectWriteLeaf(leaf, nullptr);
+			rightmostLeaf_ = nullptr;
 			++writeSplitEpoch_;
 			nodeStore_.releaseNode(leaf);
 			root_=nullptr;
@@ -432,7 +524,11 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 BNodeHeader* TempConflictBTree::eraseAt(std::size_t rank, InternalBlock* node) {
 	BNodeHeader* child = node->children[node->order[rank]];
 	// The subtree's leaves are a contiguous run of the leaf chain.
-	unlinkLeaves(firstLeaf(child), lastLeaf(child));
+	LeafBlock* first = firstLeaf(child);
+	LeafBlock* last = lastLeaf(child);
+	redirectWriteSubtree(child, last->right);
+	if (last->right == nullptr) rightmostLeaf_ = first->left;
+	unlinkLeaves(first, last);
 	const bool splitBefore = needsSplit(node);
 	if (needsSplit(child)) {
 		--node->header.childrenNeedingSplit;
@@ -492,14 +588,15 @@ void  TempConflictBTree::removeSubtreeRec(BNodeHeader* node) {
 			removeSubtreeRec(internal->children[order]);
 		}
 	}
-	if (node->kind == BNodeKind::Leaf) ++writeLeafEpoch_;
 	++writeSplitEpoch_;
 	nodeStore_.releaseNode(node);
 }
 
 void  TempConflictBTree::removeSubtree(BNodeHeader* node) {
 	if (node->parent==nullptr){
+		redirectWriteSubtree(node, nullptr);
 		root_=nullptr;
+		rightmostLeaf_ = nullptr;
 	} else {
 		eraseAt(node->parentRank(), node->parent);
 	}
@@ -712,8 +809,10 @@ void TempConflictBTree::removeEmptyChild(
 	const bool splitBefore = needsSplit(parent);
 
 	if (child->kind == BNodeKind::Leaf) {
-		++writeLeafEpoch_;
-		unlinkLeaf(reinterpret_cast<LeafBlock*>(child));
+		auto* leaf = reinterpret_cast<LeafBlock*>(child);
+		redirectWriteLeaf(leaf, leaf->right);
+		if (leaf->right == nullptr) rightmostLeaf_ = leaf->left;
+		unlinkLeaf(leaf);
 	}
 
 	// The empty child's split-state transition has already been propagated.
@@ -734,6 +833,7 @@ void TempConflictBTree::removeIfEmpty(BNodeHeader* node) {
 	if (parent == nullptr) {
 		if (node->kind == BNodeKind::Internal) {
 			root_ = nullptr;
+			rightmostLeaf_ = nullptr;
 			++writeSplitEpoch_;
 			nodeStore_.releaseNode(node);
 		}
@@ -848,6 +948,7 @@ LeafBlock* TempConflictBTree::splitLeaf(
 		newNode->right->left = newNode;
 	}
 	oldNode->right = newNode;
+	if (newNode->right == nullptr) rightmostLeaf_ = newNode;
 
 	if (rank > cutRank || (found && rank == cutRank)) {
 		leaf = newNode;
@@ -1106,6 +1207,7 @@ void TempConflictBTree::checkReads(
 	std::vector<NewTask> newTasks;
 	newTasks.reserve(G); // At most one right sibling per active task.
 
+	clearWriteDestinations();
 	conflicts.assign(reads.size(), 0);
 	readWriteBegins.clear();
 	nextBegin.clear();
@@ -1802,7 +1904,6 @@ void TempConflictBTree::checkReads(
 	} else {
 		writeLeafBuffer_.reserve(2 * static_cast<std::size_t>(G));
 	}
-	writeLeavesEpoch_ = writeLeafEpoch_;
 	writeLeavesSplitEpoch_ = writeSplitEpoch_;
 	if (root_ == nullptr || readWriteBegins.empty()) return;
 	initializeRootTask();
@@ -1813,6 +1914,7 @@ void TempConflictBTree::checkReads(
 	}
 	assert(writeFrontier == operationCount);
 	assert(writeLeafBufferFirst_ == writeLeafBufferNext_);
+	prepareWriteDestinations();
 	cleanPending();
 }
 

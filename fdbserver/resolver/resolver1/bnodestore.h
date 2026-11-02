@@ -197,6 +197,9 @@ struct LeafBlockLayout {
 	// Batch stamp: the readBatch_ of the checkReads call that last compacted
 	// this leaf. Zero from allocation; batch stamps start at one.
 	uint64_t lastCleanReadBatch;
+	// While addWrites applies a batch, the representative of the write groups prepared for this
+	// leaf; UINT32_MAX when none.
+	std::uint32_t firstWrite = UINT32_MAX;
 
 	InternalBlock* parent() const {
 		return header.parent;
