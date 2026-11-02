@@ -141,11 +141,16 @@ private:
 	// its first write position with a tagged buffered-result ticket.
 	std::vector<uint32_t> nextOther;
 	struct WriteLeaf {
+		static constexpr uint32_t RightCheckFlag = uint32_t{1} << 31;
 		LeafBlock* leaf;      // Prepared destination, repaired locally before release.
 		uint32_t firstWrite;  // First write in the assigned mixed slice.
-		uint32_t opEnd;       // Exclusive mixed-slice bound.
+		uint32_t opEnd;       // Exclusive bound with an optional RightCheckFlag; use end().
 		BNodeHeader* splitCandidate = nullptr; // Deepest candidate observed during descent.
+		uint32_t end() const { return opEnd & ~RightCheckFlag; }
+		bool needsRightCheck() const { return (opEnd & RightCheckFlag) != 0; }
+		void requireRightCheck() { opEnd |= RightCheckFlag; }
 	};
+	static_assert(sizeof(void*) != 8 || sizeof(WriteLeaf) == 24);
 	std::vector<WriteLeaf> writeLeaves;
 	uint32_t firstWriteBegin_ = 0;
 	struct BufferedWriteLeaf {
@@ -174,6 +179,7 @@ private:
 		LeafBlock* leaf = nullptr;
 		BNodeHeader* splitCandidate = nullptr;
 		uint64_t splitEpoch = 0;
+		bool rightCheckRequired = true; // False for a proved partition or the current right end.
 	};
 	WriteCursor* activeWriteCursor_ = nullptr;
 
