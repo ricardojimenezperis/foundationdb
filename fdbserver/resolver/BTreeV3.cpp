@@ -1,5 +1,5 @@
 /*
- * BTreeV2.cpp
+ * BTreeV3.cpp
  *
  * This source file is part of the FoundationDB open source project
  *
@@ -19,8 +19,8 @@
  */
 
 /*
- * Compiles btree-v2, the sources of fdbserver/resolver/resolver1, as one unit inside
- * namespace btree_v2. ConflictSet.cpp declares the same types through resolver1's headers,
+ * Compiles btree-v3, the sources of fdbserver/resolver/resolver1, as one unit inside
+ * namespace btree_v3. ConflictSet.cpp declares the same types through resolver1's headers,
  * in the same namespace, and calls them directly. resolver1 is its own project with its own
  * tests. Its only change for FDB is a branch in fdbcompat.h, taken under RESOLVER1_IN_FDB,
  * that uses FDB's StringRef and the batch records of ResolverBatchTypes.h.
@@ -42,8 +42,8 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 
 #include "ResolverBatchTypes.h"
 
-#ifndef BTREE_V2_TASKS
-#error "BTREE_V2_TASKS, the task capacity of checkReads, is set by fdbserver/resolver/CMakeLists.txt"
+#ifndef BTREE_V3_TASKS
+#error "BTREE_V3_TASKS, the task capacity of checkReads, is set by fdbserver/resolver/CMakeLists.txt"
 #endif
 
 // Every standard header resolver1 includes, first, so that its own includes, inside the
@@ -68,15 +68,15 @@ static force_inline int compare(const StringRef& a, const StringRef& b) {
 #include <vector>
 
 #define RESOLVER1_IN_FDB 1
-namespace btree_v2 {
+namespace btree_v3 {
 #include "resolver1/pagepool.cpp"
 #include "resolver1/keystore.cpp"
 #include "resolver1/bnodestore.cpp"
 #include "resolver1/tempconflictbtree.cpp"
 
 // The configured task capacity, when it is not one tempconflictbtree.cpp instantiates
-#if BTREE_V2_TASKS != 16 && BTREE_V2_TASKS != 32
-template void TempConflictBTree::checkReads<BTREE_V2_TASKS>(const std::vector<KeyInfo>&,
+#if BTREE_V3_TASKS != 16 && BTREE_V3_TASKS != 24 && BTREE_V3_TASKS != 32
+template void TempConflictBTree::checkReads<BTREE_V3_TASKS>(const std::vector<KeyInfo>&,
                                                             TransactionInfo* const*,
                                                             const std::vector<ReadConflictRange>&,
                                                             const std::vector<int>&,
@@ -84,5 +84,5 @@ template void TempConflictBTree::checkReads<BTREE_V2_TASKS>(const std::vector<Ke
                                                             std::vector<uint8_t>&,
                                                             int64_t&);
 #endif
-} // namespace btree_v2
+} // namespace btree_v3
 #undef RESOLVER1_IN_FDB

@@ -26,7 +26,8 @@ def patch(name, pairs):
 
 cs = open(D + 'ConflictSet.cpp').read()
 capacity_pool = ('(int64_t(SERVER_KNOBS->PAGED_RESOLVER_POOL_PAGES)*65536)'
-                 if 'btree_v2::TempConflictBTree btreeV2;' in cs else 'int64_t(0)')
+                 if ('btree_v2::TempConflictBTree btreeV2;' in cs or
+                     'btree_v3::TempConflictBTree btreeV3;' in cs) else 'int64_t(0)')
 
 patch('ConflictSet.cpp', [
     ('#include "flow/UnitTest.h"\n', '''#include "flow/UnitTest.h"
@@ -139,4 +140,4 @@ rep(' printf("by5lengths");',
     ''' printf("by5acct backend=%s maxLiveSkipBytes=%lld poolPhysicalBytes=%lld maxMetadataBytes=%lld maxReadScratchBytes=%lld maxWriteScratchBytes=%lld maxHistoryBytes=%lld maxMeasuredHistoryBytes=%lld maxHistoryPlusScratchBytes=%lld maxBatchArenaBytes=%lld maxVmRssKiB=%lld maxHugetlbKiB=%lld walkChecks=%llu walkMismatches=%llu\\n",conflictSetIndexName(cs.get()),(long long)acctMaxLive,(long long)acctPool,(long long)acctMaxAux,(long long)acctMaxScratch,(long long)acctMaxWriteScratch,(long long)acctMaxHistory,(long long)acctMaxMeasuredHistory,(long long)acctMaxHistoryScratch,(long long)acctMaxArena,(long long)acctMaxRss,(long long)acctMaxHuge,(unsigned long long)acctChecks,(unsigned long long)acctMismatches);
  printf("by5lengths");''')
 open(p, 'w').write(s)
-print('by5-acct applied (%s)' % ('btree-v2' if capacity_pool != 'int64_t(0)' else 'skip list'))
+print('by5-acct applied (%s)' % ('btree pool' if capacity_pool != 'int64_t(0)' else 'skip list'))

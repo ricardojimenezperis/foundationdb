@@ -74,7 +74,6 @@ private:
 	Standalone<VectorRef<struct TransactionInfo*>> transactionInfo;
 	std::vector<struct KeyInfo> points;
 	int transactionCount;
-	std::vector<std::pair<StringRef, StringRef>> combinedWriteConflictRanges;
 	std::vector<struct ReadConflictRange> combinedReadConflictRanges;
 	bool* transactionConflictStatus;
 	// Stores the map: a transaction -> conflicted transactions' indices
@@ -88,7 +87,6 @@ private:
 	bool ignoreReadSet() const;
 
 	void checkIntraBatchConflicts();
-	void combineWriteConflictRanges();
 	void checkReadConflictRanges();
 	void mergeWriteConflictRanges(Version now);
 	void addConflictRanges(Version now,

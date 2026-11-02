@@ -77,9 +77,8 @@ struct TempConflictBTreeTestAccess {
 	// checkReads.
 	static void addWrite(TempConflictBTree& t, const StringRef& begin,
 						 const StringRef& end, Version cv) {
-		LeafBlock* leaf = nullptr;
-		std::uint64_t epoch = t.writeLeafEpoch_;
-		t.addWrite(leaf, epoch, {begin, end}, cv);
+		TempConflictBTree::WriteCursor cursor;
+		t.addWrite(cursor, {begin, end}, cv);
 	}
 	static bool reclaimOldest(TempConflictBTree& t) {
 		return t.reclaimOldest();

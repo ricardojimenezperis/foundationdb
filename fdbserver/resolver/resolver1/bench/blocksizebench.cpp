@@ -1,17 +1,40 @@
 // Measures TempConflictBTree at the block size it is compiled with
 // (-DRESOLVER1_BLOCK_SIZE), with the same budget in bytes for every size and
 // no reclamation. The batches are made before timing, from a fixed seed, so
-// that every build sees the same ones. Reads and writes are timed apart.
+// that every build sees the same ones.
+//
+// One source for every tree, through the interface its tree has, chosen with
+// -DBENCH_API (3 by default):
+// - 1, btree-v1: checkReads(reads, status) and addWrites(sorted writes, cv).
+// - 2, btree-v2: checkReads<G> over the sorted endpoints of the reads, then
+//   addWrites(sorted writes, cv).
+// - 3, btree-v3: checkReads<G> over the sorted endpoints of the reads and the
+//   writes, which also prepares the writes' destinations, then
+//   addWrites(points, transactions, final decisions, cv).
+// G is -DBENCH_TASKS, 16 by default.
+//
+// Each batch is timed in three consecutive, non-overlapping phases, and as a
+// whole: prepS builds the inputs the tree's interface takes from the batch
+// (for 2 and 3 the endpoints, sorted, and for 3 each endpoint's position in
+// its slot); readS is checkReads; writeS is addWrites; totalS is the three
+// together. With 3, part of the work on writes is in checkReads, so only
+// totalS compares the trees as a whole.
+//
+// Each read is a transaction of its own, so its decision is the read's; the
+// writes are one more transaction without reads, last, which commits.
 //
 // Usage: blocksizebench <points|ranges> <batches> <budget MiB>
-// Prints one line: block size, capacities, seconds and rates, the reclaim
-// cut (0 when nothing was reclaimed) and a hash of the read decisions.
+// Prints one line: interface, G, block size, capacities, seconds and rates,
+// the reclaim cut (0 when nothing was reclaimed) and a hash of the read
+// decisions.
 #include "tempconflictbtree.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -33,8 +56,14 @@ struct Random {
 constexpr int KeyBytes = 12;
 constexpr std::uint64_t KeySpace = 10'000'000;
 
+#ifndef BENCH_API
+#define BENCH_API 3
+#endif
+#ifndef BENCH_TASKS
+#define BENCH_TASKS 16
+#endif
 // Tasks interleaved by checkReads; tempconflictbtree.cpp instantiates it.
-constexpr std::uint8_t Tasks = 16;
+constexpr std::uint8_t Tasks = BENCH_TASKS;
 
 struct Batch {
 	Version cv;
@@ -103,66 +132,117 @@ int main(int argc, char** argv) {
 	TempConflictBTree tree(budget);
 	std::vector<std::pair<StringRef, StringRef>> writes;
 	std::vector<ReadConflictRange> reads;
-	// One transaction per read, so status holds the decision of each read.
-	// Each transaction's only read range is its entry in readRanges, which
-	// its endpoints point into, as in FDB's batch.
-	std::vector<std::uint8_t> status(readsPerBatch);
+	// One transaction per read, and a last one with the writes, so status
+	// holds the decision of each read. Each read transaction's only read range
+	// is its entry in readRanges, which its endpoints point into, as in FDB's
+	// batch; the writer's ranges are in writeSlots.
+	const int transactionCount = readsPerBatch + 1;
+	const int writer = readsPerBatch;
+	std::vector<std::uint8_t> status(transactionCount);
+#if BENCH_API != 1
 	std::vector<std::pair<int, int>> readRanges(readsPerBatch);
-	std::vector<TransactionInfo> transactions(readsPerBatch);
-	std::vector<TransactionInfo*> transactionInfo(readsPerBatch);
-	std::vector<int> offsets(readsPerBatch);
+	std::vector<std::pair<int, int>> writeSlots;
+	writeSlots.reserve(writesPerBatch);
+	std::vector<TransactionInfo> transactions(transactionCount);
+	std::vector<TransactionInfo*> transactionInfo(transactionCount);
+	std::vector<int> offsets(transactionCount, 0);
 	std::vector<KeyInfo> points;
 	std::vector<std::uint8_t> readConflicts;
-	for (int i = 0; i < readsPerBatch; ++i) {
-		transactions[i].readRanges = VectorRef<std::pair<int, int>>(&readRanges[i], 1);
+	for (int i = 0; i < transactionCount; ++i) {
+		if (i < readsPerBatch) {
+			transactions[i].readRanges = VectorRef<std::pair<int, int>>(&readRanges[i], 1);
+			offsets[i] = i;
+		}
+		transactions[i].tooOld = false;
+		transactions[i].reportConflictingKeys = false;
 		transactionInfo[i] = &transactions[i];
-		offsets[i] = i;
 	}
-	double readSeconds = 0, writeSeconds = 0;
+#endif
+	using Clock = std::chrono::steady_clock;
+	auto seconds = [](Clock::time_point a, Clock::time_point b) {
+		return std::chrono::duration<double>(b - a).count();
+	};
+	double prepSeconds = 0, readSeconds = 0, writeSeconds = 0, totalSeconds = 0;
 	std::uint64_t hash = 1469598103934665603ull, conflicts = 0, writeRanges = 0;
 	for (const Batch& batch : work) {
+		const auto t0 = Clock::now();
+		// Preparation: what the interface takes from the batch.
 		reads.clear();
-		points.clear();
 		for (std::size_t i = 0; i < batch.reads.size(); ++i) {
-			const StringRef begin = key(batch.reads[i].first);
-			const StringRef end = key(batch.reads[i].second);
-			reads.emplace_back(begin, end, batch.readVersions[i], int(i), 0);
-			points.emplace_back(begin, true, false, int(i), &readRanges[i].first);
-			points.emplace_back(end, false, false, int(i), &readRanges[i].second);
-			transactions[i].tooOld = false;
-			transactions[i].reportConflictingKeys = false;
+			reads.emplace_back(key(batch.reads[i].first), key(batch.reads[i].second),
+			                   batch.readVersions[i], int(i), 0);
 		}
-		std::stable_sort(points.begin(), points.end(), [](const KeyInfo& a, const KeyInfo& b) {
-			return a.key.compare(b.key) < 0;
-		});
 		std::memset(status.data(), 0, status.size());
-		int64_t tooOld = 0;
-		auto t0 = std::chrono::steady_clock::now();
-		tree.checkReads<Tasks>(points, transactionInfo.data(), reads, offsets,
-		                       reinterpret_cast<bool*>(status.data()), readConflicts, tooOld);
-		auto t1 = std::chrono::steady_clock::now();
+#if BENCH_API == 1 || BENCH_API == 2
 		writes.clear();
 		for (const auto& [b, e] : batch.writes) {
 			writes.emplace_back(key(b), key(e));
 		}
-		auto t2 = std::chrono::steady_clock::now();
+#endif
+#if BENCH_API == 2 || BENCH_API == 3
+		points.clear();
+		for (std::size_t i = 0; i < batch.reads.size(); ++i) {
+			points.emplace_back(reads[i].begin, true, false, int(i), &readRanges[i].first);
+			points.emplace_back(reads[i].end, false, false, int(i), &readRanges[i].second);
+		}
+#endif
+#if BENCH_API == 3
+		writeSlots.resize(batch.writes.size());
+		transactions[writer].writeRanges =
+		    VectorRef<std::pair<int, int>>(writeSlots.data(), int(writeSlots.size()));
+		for (std::size_t w = 0; w < batch.writes.size(); ++w) {
+			points.emplace_back(key(batch.writes[w].first), true, true, writer, &writeSlots[w].first);
+			points.emplace_back(key(batch.writes[w].second), false, true, writer, &writeSlots[w].second);
+		}
+#endif
+#if BENCH_API == 2 || BENCH_API == 3
+		std::stable_sort(points.begin(), points.end(), [](const KeyInfo& a, const KeyInfo& b) {
+			return a.key.compare(b.key) < 0;
+		});
+#endif
+#if BENCH_API == 3
+		for (std::size_t p = 0; p < points.size(); ++p) {
+			*points[p].pIndex = int(p);
+		}
+#endif
+		[[maybe_unused]] int64_t tooOld = 0;
+		const auto t1 = Clock::now();
+#if BENCH_API == 1
+		tree.checkReads(std::span<const ReadConflictRange>(reads.data(), reads.size()),
+		                reinterpret_cast<bool*>(status.data()));
+#else
+		tree.checkReads<Tasks>(points, transactionInfo.data(), reads, offsets,
+		                       reinterpret_cast<bool*>(status.data()), readConflicts, tooOld);
+#endif
+		const auto t2 = Clock::now();
+#if BENCH_API == 3
+		tree.addWrites(points, transactionInfo.data(), reinterpret_cast<const bool*>(status.data()), batch.cv);
+#else
 		tree.addWrites(std::span<const std::pair<StringRef, StringRef>>(writes.data(), writes.size()), batch.cv);
-		auto t3 = std::chrono::steady_clock::now();
-		readSeconds += std::chrono::duration<double>(t1 - t0).count();
-		writeSeconds += std::chrono::duration<double>(t3 - t2).count();
-		writeRanges += writes.size();
-		for (std::uint8_t s : status) {
-			conflicts += s;
-			hash = (hash ^ s) * 1099511628211ull;
+#endif
+		const auto t3 = Clock::now();
+		prepSeconds += seconds(t0, t1);
+		readSeconds += seconds(t1, t2);
+		writeSeconds += seconds(t2, t3);
+		totalSeconds += seconds(t0, t3);
+		writeRanges += batch.writes.size();
+		for (int i = 0; i < readsPerBatch; ++i) {
+			conflicts += status[i];
+			hash = (hash ^ status[i]) * 1099511628211ull;
+		}
+		if (status[writer] != 0 || tooOld != 0) {
+			std::fprintf(stderr, "the writer conflicted or a read was too old\n");
+			return 1;
 		}
 	}
 	const double readCount = double(batches) * readsPerBatch;
-	std::printf("block=%zu internal=%zu leaf=%zu workload=%s batches=%d reads=%.0f writes=%llu "
-	            "readS=%.3f writeS=%.3f totalS=%.3f readsPerS=%.0f writesPerS=%.0f conflicts=%llu "
-	            "reclaimCV=%lld decisions=%016llx\n",
-	            BlockSize, InternalCapacity, LeafCapacity, ranges ? "ranges" : "points", batches, readCount,
-	            (unsigned long long)writeRanges, readSeconds, writeSeconds, readSeconds + writeSeconds,
-	            readCount / readSeconds, double(writeRanges) / writeSeconds, (unsigned long long)conflicts,
-	            (long long)tree.reclaimCV(), (unsigned long long)hash);
+	std::printf("api=%d tasks=%d block=%zu internal=%zu leaf=%zu workload=%s batches=%d reads=%.0f "
+	            "writes=%llu prepS=%.3f readS=%.3f writeS=%.3f totalS=%.3f batchesPerS=%.1f readsPerS=%.0f "
+	            "writesPerS=%.0f conflicts=%llu reclaimCV=%lld decisions=%016llx\n",
+	            BENCH_API, BENCH_API == 1 ? 0 : int(Tasks), BlockSize, InternalCapacity, LeafCapacity,
+	            ranges ? "ranges" : "points", batches, readCount, (unsigned long long)writeRanges, prepSeconds,
+	            readSeconds, writeSeconds, totalSeconds, batches / totalSeconds, readCount / readSeconds,
+	            double(writeRanges) / writeSeconds, (unsigned long long)conflicts, (long long)tree.reclaimCV(),
+	            (unsigned long long)hash);
 	return tree.reclaimCV() == 0 ? 0 : 1;
 }

@@ -96,7 +96,7 @@ public:
 					bool* transactionConflictStatus,
 					std::vector<uint8_t>& conflicts,
 					int64_t& tooOldWithinWindow);
-	// Applies accepted writes from the batch prepared by checkReads. The batch,
+	// Coalesces overlapping or adjacent accepted writes from checkReads. The batch,
 	// its indices and input key bytes must remain valid through this call.
 	// All intervals use cv; commit versions must be nondecreasing across calls.
 	// May reclaim history. Throws std::length_error if the per-write reserve
@@ -119,14 +119,16 @@ private:
 	BNodeHeader* root_ = nullptr;
 	std::size_t maxKeyLength_ = 0;
 	Version reclaimCV_ = 0;
+	// Cleanup stamp: advances for each read batch and when writes advance the cutoff.
 	std::uint64_t readBatch_ = 0;
+	Version cleanLeafCV_ = 0;
 	std::vector<std::pair<BNodeHeader*,std::uint64_t>>
 		pending_;	// leaves to clean, with their generation, queued by refreshSeparatorDeferred
 	void cleanPending();
 
 	struct RangeEntry {
 		static constexpr uint32_t WriteFlag = uint32_t{1} << 31;
-		uint32_t rangeIndex;  // Tagged index: global in reads, local in writeRanges.
+		uint32_t rangeIndex;  // Tagged index: global in reads, begin endpoint in points.
 		uint32_t transaction; // Index in transactionInfo.
 		bool isWrite() const { return (rangeIndex & WriteFlag) != 0; }
 		uint32_t index() const { return rangeIndex & ~WriteFlag; }
@@ -134,13 +136,14 @@ private:
 	};
 	std::vector<RangeEntry> readWriteBegins;
 	std::vector<uint32_t> nextBegin; // Next begin of the same type; reads may be unlinked.
-	// First later begin of the other type. Once a slice reaches its leaf,
-	// its first position becomes a tagged buffered-result ticket.
+	// First later begin of the other type. A write-bearing slice replaces
+	// its first write position with a tagged buffered-result ticket.
 	std::vector<uint32_t> nextOther;
 	struct WriteLeaf {
 		LeafBlock* leaf;      // Prepared destination, valid while epochs match.
 		uint32_t firstWrite;  // First write in the assigned mixed slice.
 		uint32_t opEnd;       // Exclusive mixed-slice bound.
+		BNodeHeader* splitCandidate = nullptr; // Deepest candidate observed during descent.
 	};
 	std::vector<WriteLeaf> writeLeaves;
 	uint32_t firstWriteBegin_ = 0;
@@ -158,6 +161,15 @@ private:
 	// Releasing a leaf invalidates prepared destinations from an earlier epoch.
 	uint64_t writeLeafEpoch_ = 0;
 	uint64_t writeLeavesEpoch_ = 0;
+	// Split candidates remain reusable until split state or topology changes.
+	uint64_t writeSplitEpoch_ = 0;
+	uint64_t writeLeavesSplitEpoch_ = 0;
+	struct WriteCursor {
+		LeafBlock* leaf = nullptr;
+		BNodeHeader* splitCandidate = nullptr;
+		uint64_t leafEpoch = 0;
+		uint64_t splitEpoch = 0;
+	};
 
 	// Covers both internal separators and leaf entries for the configured block size.
 	static constexpr std::size_t MaxSeparators =
@@ -178,15 +190,8 @@ private:
 	BNodeHeader* findSplitCandidate(
 		LeafBlock* leaf,
 		std::vector<InternalBlock*>& candidates);
-	void addLeafWrites(
-		uint32_t currentLeafIdx,
-		const std::vector<KeyInfo>& points,
-		TransactionInfo* const* transactionInfo,
-		const bool* transactionConflictStatus,
-		Version cv);
 	void addWrite(
-		LeafBlock*& leaf,
-		uint64_t& cursorEpoch,
+		WriteCursor& cursor,
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);
 	bool hasConflict(const ReadConflictRange& read);
