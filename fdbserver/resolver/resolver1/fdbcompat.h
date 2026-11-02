@@ -60,6 +60,7 @@ public:
 	T* begin() const { return data_; }
 	T* end() const { return data_ + size_; }
 	int size() const { return size_; }
+	bool empty() const { return size_ == 0; }
 	T& operator[](int i) const { return data_[i]; }
 
 private:

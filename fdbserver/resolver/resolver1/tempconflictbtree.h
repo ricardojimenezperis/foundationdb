@@ -6,9 +6,8 @@
 // Uses BNodeStore for node allocation and age tracking, and KeyStore for key
 // storage. Both stores draw blocks from the same PagePool.
 //
-// Checks batches of read-conflict intervals and applies batches of accepted
-// write-conflict intervals. Reads share grouped traversal; writes are
-// applied individually.
+// Routes sorted read and write begins together, checks read conflicts, and
+// applies accepted writes in groups prepared for their destination leaves.
 // Input key bytes are borrowed during each call; retained keys are copied
 // into KeyStore.
 //
@@ -49,7 +48,8 @@
 #include <vector>
 
 namespace temp_conflict_btree_detail {
-// Breadth-first midpoint ranks of binary partitions over [0, count).
+// Preorder of binary partitions over [0, count) in breadth order:
+// 		midpoint, left, right.
 // Row count contains count valid ranks; the remaining positions are unused.
 template<std::size_t Capacity>
 constexpr auto makePrefetchOrder() {
@@ -73,8 +73,8 @@ constexpr auto makePrefetchOrder() {
 		}
 	}
 	return table;
-}
-} // namespace temp_conflict_btree_detail
+} // template
+} //namespace
 
 class TempConflictBTree {
 	friend struct TempConflictBTreeTestAccess;
@@ -85,15 +85,9 @@ public:
 	TempConflictBTree(const TempConflictBTree&) = delete;
 	TempConflictBTree& operator=(const TempConflictBTree&) = delete;
 
-	// Requires begin-sorted endpoints and input records/bytes valid for the
-	// call. No writes or key-block reclamation may interleave with traversal.
-	// Resets conflicts and sets conflicting transaction flags without clearing
-	// existing flags. Reads below reclaimCV_ mark the transaction too old and
-	// increment tooOldWithinWindow once per newly too-old transaction.
-	// A non-null reporting pointer keeps other reads of a conflicted
-	// transaction eligible; individual conflict bits identify their results.
-	// May refresh separators, clean expired entries and remove empty nodes.
-	// Does not add writes or reclaim key blocks.
+	// Checks reads and prepares write destinations from sorted batch endpoints.
+	// Marks conflicting and too-old transactions without clearing status flags.
+	// May clean expired entries; does not add writes or advance reclaimCV.
 	template<uint8_t G>
 	void checkReads(const std::vector<KeyInfo>& points,
 					TransactionInfo* const* transactionInfo,
@@ -102,12 +96,15 @@ public:
 					bool* transactionConflictStatus,
 					std::vector<uint8_t>& conflicts,
 					int64_t& tooOldWithinWindow);
-	// Writes are sorted, disjoint intervals from accepted transactions.
-	// All writes share cv, which must be nondecreasing between calls.
-	// Before each write, reclaims until the pool has room for it in the
-	// worst case; throws std::length_error if it cannot, even when empty.
+	// Applies accepted writes from the batch prepared by checkReads. The batch,
+	// its indices and input key bytes must remain valid through this call.
+	// All intervals use cv; commit versions must be nondecreasing across calls.
+	// May reclaim history. Throws std::length_error if the per-write reserve
+	// cannot be met; earlier writes and reclamation are not rolled back.
 	void addWrites(
-		const std::span<const std::pair<StringRef, StringRef>> writes,
+		const std::vector<KeyInfo>& points,
+		TransactionInfo* const* transactionInfo,
+		const bool* transactionConflictStatus,
 		Version cv);
 
 	Version reclaimCV() const {
@@ -120,21 +117,47 @@ private:
 	BNodeStore nodeStore_;
 
 	BNodeHeader* root_ = nullptr;
-	Version reclaimCV_ = 0;
-	// The longest key addWrite has stored. Exteriors combine stored keys
-	// with a write's keys, so it bounds the room a write may need.
 	std::size_t maxKeyLength_ = 0;
-	uint64_t readBatch_ = 0;
-	std::vector<std::pair<BNodeHeader*,std::uint64_t>> 
-		pending_;	// Deferred leaf cleanup records; generations reject released nodes.
+	Version reclaimCV_ = 0;
+	std::uint64_t readBatch_ = 0;
+	std::vector<std::pair<BNodeHeader*,std::uint64_t>>
+		pending_;	// leaves to clean, with their generation, queued by refreshSeparatorDeferred
 	void cleanPending();
 
 	struct RangeEntry {
-		uint32_t rangeIndex;  // Global index in reads; local index in writeRanges.
+		static constexpr uint32_t WriteFlag = uint32_t{1} << 31;
+		uint32_t rangeIndex;  // Tagged index: global in reads, local in writeRanges.
 		uint32_t transaction; // Index in transactionInfo.
+		bool isWrite() const { return (rangeIndex & WriteFlag) != 0; }
+		uint32_t index() const { return rangeIndex & ~WriteFlag; }
+		void setWrite() { rangeIndex |= WriteFlag; }
 	};
-	std::vector<RangeEntry> readBegins;
-	std::vector<RangeEntry> writeBegins;
+	std::vector<RangeEntry> readWriteBegins;
+	std::vector<uint32_t> nextBegin; // Next begin of the same type; reads may be unlinked.
+	// First later begin of the other type. Once a slice reaches its leaf,
+	// its first position becomes a tagged buffered-result ticket.
+	std::vector<uint32_t> nextOther;
+	struct WriteLeaf {
+		LeafBlock* leaf;      // Prepared destination, valid while epochs match.
+		uint32_t firstWrite;  // First write in the assigned mixed slice.
+		uint32_t opEnd;       // Exclusive mixed-slice bound.
+	};
+	std::vector<WriteLeaf> writeLeaves;
+	uint32_t firstWriteBegin_ = 0;
+	struct BufferedWriteLeaf {
+		WriteLeaf group;
+		bool released;
+	};
+	std::vector<BufferedWriteLeaf> writeLeafBuffer_;
+	std::size_t writeLeafBufferHead_ = 0;
+	uint64_t writeLeafBufferFirst_ = 0;
+	uint64_t writeLeafBufferNext_ = 0;
+	// Tickets survive circular-buffer growth and do not occupy task slots.
+	uint64_t bufferWriteLeaf(const WriteLeaf& group);
+	uint32_t emitWriteLeaf(uint64_t ticket);
+	// Releasing a leaf invalidates prepared destinations from an earlier epoch.
+	uint64_t writeLeafEpoch_ = 0;
+	uint64_t writeLeavesEpoch_ = 0;
 
 	// Covers both internal separators and leaf entries for the configured block size.
 	static constexpr std::size_t MaxSeparators =
@@ -142,10 +165,9 @@ private:
 	// Generated at compile time. Bounds are [lo, hi).
 	static constexpr auto prefetchOrder =
 		temp_conflict_btree_detail::makePrefetchOrder<MaxSeparators>();
-	
-	// Returns whether key exists; leaf/rank identify its entry or insertion
-	// point. An empty tree returns leaf == nullptr. nodeNeedsSplit is the
-	// deepest node on the path still needing a split, or nullptr.
+
+	// Returns the insertion point, leaf & rank, and whether is found.
+	// If the tree is empty return nullptr as leaf.
 	bool findKey(
 		const StringRef& key,
 		LeafBlock*& leaf,
@@ -156,14 +178,22 @@ private:
 	BNodeHeader* findSplitCandidate(
 		LeafBlock* leaf,
 		std::vector<InternalBlock*>& candidates);
+	void addLeafWrites(
+		uint32_t currentLeafIdx,
+		const std::vector<KeyInfo>& points,
+		TransactionInfo* const* transactionInfo,
+		const bool* transactionConflictStatus,
+		Version cv);
 	void addWrite(
+		LeafBlock*& leaf,
+		uint64_t& cursorEpoch,
 		const std::pair<StringRef, StringRef>& write,
 		Version cv);
 	bool hasConflict(const ReadConflictRange& read);
 	// Inserts range at leaf/rank, preserving overlapping exteriors
 	// and their CVs. Requires two free slots. Returns true if the write
 	// is complete. Otherwise leaves leaf/rank at the inserted range.
-	// An expired previous range is erased without reading its keys.
+	// Removes an expired predecessor without reading its key bytes.
 	bool insertWithLeftExterior(
 		const std::pair<StringRef, StringRef>& write,
 		const RangeRef& range,
@@ -171,9 +201,8 @@ private:
 		bool found,
 		LeafBlock*& leaf,
 		std::size_t& rank);
-	// Erases expired entries without reading their keys, and live entries
-	// ending at or before end. Stops at the first live entry ending after
-	// end, or tree end.
+	// Erases entries ending at or before end.
+	// Stops at the first entry ending after end, or tree end.
 	// The preceding write keeps the tree nonempty.
 	void eraseCoveredRanges(
 		const StringRef& end,
@@ -232,13 +261,11 @@ private:
 	bool refreshSeparator(InternalBlock* node, std::size_t rank);
 	// Child has no live entries; removal is deferred.
 	static constexpr Version EmptyChildCV = -1;
-	// Requires reclaimed key blocks to have CV <= reclaimCV_. Refreshes
-	// rank without structural removal; queues leaf cleanup and preserves
-	// saved internal ranks. Returns whether that child has a live entry.
-	// Empty runs receive EmptyChildCV and may borrow a live reference,
-	// preferring the left. With no live child, all references remain unread.
-	// Empty markers must route conservatively left, without key comparison;
-	// a read can extend beyond an empty subtree into later live history.
+	// Refreshes without removal; queues cleanup. Same cutoff requirement.
+	// Returns whether the child has live entries.
+	// If empty, copies a live neighbour's separator, preferring left,
+	// with EmptyChildCV; searches must redirect to that neighbour.
+	// If all children are empty, separators must not be compared.
 	bool refreshSeparatorDeferred(InternalBlock* node, std::size_t rank);
 	// Returns the first live range/CV, or nullopt; defers cleanup.
 	// Refreshes separators and marks leading empty children.
@@ -247,8 +274,7 @@ private:
 	// Refreshes from the child's first live key, deferring cleanup.
 	// Returns false without replacing the separator if no live key exists.
 	bool refreshLiveSeparator(InternalBlock* node, std::size_t rank);
-	// Copies the separator at rank from into ranks [first, last) and
-	// marks those ranks EmptyChildCV. Requires a live source reference.
+	// Copies separator from to [first, last), marking them EmptyChildCV.
 	static void markEmptyChildren(InternalBlock* node, std::size_t first,
 								  std::size_t last, std::size_t from);
 	// Releases an empty child and repairs leaf links.
@@ -305,4 +331,5 @@ private:
 	// Detaches and releases the subtree; clears root_ if it is the root.
 	void removeSubtree(BNodeHeader* node);
 	// Releases the subtree, children first.
-	void removeSubtreeRec(BNodeHeader* node);};
+	void removeSubtreeRec(BNodeHeader* node);
+};

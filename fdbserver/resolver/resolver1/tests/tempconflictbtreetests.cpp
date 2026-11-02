@@ -73,9 +73,13 @@ struct TempConflictBTreeTestAccess {
 	static void updateSeparator(TempConflictBTree& t, InternalBlock* node) {
 		t.propagateUpdates(node, 0, true, false);
 	}
+	// One write through a root search, without a destination prepared by
+	// checkReads.
 	static void addWrite(TempConflictBTree& t, const StringRef& begin,
 						 const StringRef& end, Version cv) {
-		t.addWrite({begin, end}, cv);
+		LeafBlock* leaf = nullptr;
+		std::uint64_t epoch = t.writeLeafEpoch_;
+		t.addWrite(leaf, epoch, {begin, end}, cv);
 	}
 	static bool reclaimOldest(TempConflictBTree& t) {
 		return t.reclaimOldest();
@@ -3443,10 +3447,12 @@ struct BatchResult {
 // Calls checkReads<G> on a batch laid out as FDB's ConflictBatch lays it
 // out: the reads of each transaction consecutive, and the begin and end of
 // every read range, plus those of optional write ranges, in points sorted
-// by key.
+// by key, each point's slot holding its position. With applyAt, then calls
+// addWrites at that version with the final decisions of the batch.
 template<uint8_t G>
 BatchResult checkBatch(TestTree& t, const std::vector<BatchTransaction>& batch,
-					   const std::vector<std::pair<Bytes, Bytes>>& writes = {}) {
+					   const std::vector<std::pair<Bytes, Bytes>>& writes = {},
+					   std::optional<Version> applyAt = std::nullopt) {
 	const std::size_t T = batch.size();
 	std::vector<std::vector<std::pair<int, int>>> readSlots(T);
 	std::vector<std::pair<int, int>> writeSlots(writes.size());
@@ -3496,6 +3502,9 @@ BatchResult checkBatch(TestTree& t, const std::vector<BatchTransaction>& batch,
 					 [](const KeyInfo& a, const KeyInfo& b) {
 						 return a.key.compare(b.key) < 0;
 					 });
+	for (std::size_t p = 0; p < points.size(); ++p) {
+		*points[p].pIndex = static_cast<int>(p);
+	}
 
 	BatchResult result;
 	result.status.resize(T);
@@ -3505,6 +3514,10 @@ BatchResult checkBatch(TestTree& t, const std::vector<BatchTransaction>& batch,
 	t.tree.checkReads<G>(points, infoPointers.data(), reads, offsets,
 						 reinterpret_cast<bool*>(result.status.data()),
 						 result.conflicts, result.tooOldWithinWindow);
+	if (applyAt) {
+		t.tree.addWrites(points, infoPointers.data(),
+						 reinterpret_cast<const bool*>(result.status.data()), *applyAt);
+	}
 	for (const TransactionInfo& info : infos) {
 		result.tooOld.push_back(info.tooOld);
 	}
@@ -4134,11 +4147,7 @@ TEST_CASE("/resolver/TempConflictBTree/AddWritesAgainstReference") {
 			model.push_back({position, last, cv});
 			position = last + next() % 12;
 		}
-		std::vector<std::pair<StringRef, StringRef>> writes;
-		for (const auto& [b, e] : owned) {
-			writes.emplace_back(asRef(b), asRef(e));
-		}
-		t.tree.addWrites(std::span<const std::pair<StringRef, StringRef>>(writes.data(), writes.size()), cv);
+		checkBatch<16>(t, {BatchTransaction{}}, owned, cv);
 		ASSERT_EQ(t.tree.reclaimCV(), 0);
 
 		std::vector<BatchTransaction> batch(40);
@@ -4291,9 +4300,9 @@ std::size_t writeBlocks(std::size_t length) {
 	return 3 * ((2 * length + payload - 1) / payload) + 2;
 }
 
+// One write as the batch of a single transaction without reads.
 void addWrite(TestTree& t, const Bytes& begin, const Bytes& end, Version cv) {
-	const std::pair<StringRef, StringRef> write{asRef(begin), asRef(end)};
-	t.tree.addWrites(std::span<const std::pair<StringRef, StringRef>>(&write, 1), cv);
+	checkBatch<16>(t, {BatchTransaction{}}, {{begin, end}}, cv);
 }
 
 } // namespace

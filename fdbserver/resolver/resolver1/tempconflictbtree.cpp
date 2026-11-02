@@ -10,27 +10,101 @@ TempConflictBTree::TempConflictBTree(std::size_t budget)
 }
 
 void TempConflictBTree::addWrites(
-		const std::span<const std::pair<StringRef, StringRef>> writes,
+		const std::vector<KeyInfo>& points,
+		TransactionInfo* const* transactionInfo,
+		const bool* transactionConflictStatus,
 		Version cv) {
-	std::size_t sz = writes.size();
-	for (std::size_t i=0; i<sz; ++i) {
-		addWrite(writes[i], cv);
+	if (readWriteBegins.empty()) return;
+	if (writeLeaves.empty()) {
+		const uint32_t firstWrite = firstWriteBegin_;
+		if (firstWrite == readWriteBegins.size()) return;
+		writeLeaves.push_back({nullptr, firstWrite,
+			static_cast<uint32_t>(readWriteBegins.size())});
+	}
+	for (uint32_t currentLeafIdx = 0; currentLeafIdx < writeLeaves.size(); ++currentLeafIdx) {
+		addLeafWrites(currentLeafIdx, points, transactionInfo, transactionConflictStatus, cv);
 	}
 }
-
+uint64_t TempConflictBTree::bufferWriteLeaf(const WriteLeaf& group) {
+	const std::size_t count = writeLeafBufferNext_ - writeLeafBufferFirst_;
+	std::size_t capacity = writeLeafBuffer_.capacity();
+	assert(capacity > 0);
+	if (count == capacity) {
+		std::vector<BufferedWriteLeaf> grown;
+		grown.reserve(2 * capacity);
+		for (std::size_t i = 0; i < count; ++i) {
+			grown.push_back(writeLeafBuffer_[(writeLeafBufferHead_ + i) % capacity]);
+		}
+		writeLeafBuffer_.swap(grown);
+		writeLeafBufferHead_ = 0;
+		capacity = writeLeafBuffer_.capacity();
+	}
+	const std::size_t position = (writeLeafBufferHead_ + count) % capacity;
+	if (position == writeLeafBuffer_.size()) {
+		writeLeafBuffer_.push_back({group, false});
+	} else {
+		assert(position < writeLeafBuffer_.size());
+		writeLeafBuffer_[position] = {group, false};
+	}
+	return writeLeafBufferNext_++;
+}
+uint32_t TempConflictBTree::emitWriteLeaf(uint64_t ticket) {
+	assert(ticket >= writeLeafBufferFirst_ && ticket < writeLeafBufferNext_);
+	const std::size_t capacity = writeLeafBuffer_.capacity();
+	const std::size_t position =
+		(writeLeafBufferHead_ + ticket - writeLeafBufferFirst_) % capacity;
+	auto& buffered = writeLeafBuffer_[position];
+	assert(!buffered.released);
+	const uint32_t opEnd = buffered.group.opEnd;
+	if (buffered.group.firstWrite < opEnd) {
+		assert(writeLeaves.empty() || writeLeaves.back().firstWrite < buffered.group.firstWrite);
+		writeLeaves.push_back(buffered.group);
+	}
+	buffered.released = true;
+	// Prefix order can differ from arrival order. Reuse a ring position only
+	// after its ticket and all earlier arrival tickets have been released.
+	while (writeLeafBufferFirst_ < writeLeafBufferNext_ &&
+		   writeLeafBuffer_[writeLeafBufferHead_].released) {
+		++writeLeafBufferFirst_;
+		writeLeafBufferHead_ = (writeLeafBufferHead_ + 1) % capacity;
+	}
+	return opEnd;
+}
+void TempConflictBTree::addLeafWrites(
+		uint32_t currentLeafIdx,
+		const std::vector<KeyInfo>& points,
+		TransactionInfo* const* transactionInfo,
+		const bool* transactionConflictStatus,
+		Version cv) {
+	const WriteLeaf& group = writeLeaves[currentLeafIdx];
+	// Bounds outlive the original leaf, which an earlier write may erase.
+	const uint32_t opEnd = group.opEnd;
+	LeafBlock* leaf = nullptr;
+	uint64_t cursorEpoch = writeLeavesEpoch_;
+	if (cursorEpoch == writeLeafEpoch_) leaf = group.leaf;
+	for (uint32_t writeIdx = group.firstWrite; writeIdx < opEnd;
+		 writeIdx = nextBegin[writeIdx]) {
+		const RangeEntry& entry = readWriteBegins[writeIdx];
+		assert(entry.isWrite());
+		const TransactionInfo& info = *transactionInfo[entry.transaction];
+		if (info.tooOld || transactionConflictStatus[entry.transaction]) continue;
+		const auto& range = info.writeRanges[entry.index()];
+		const StringRef& begin = points[range.first].key;
+		const StringRef& end = points[range.second].key;
+		if (begin.compare(end) >= 0) continue;
+		addWrite(leaf, cursorEpoch, {begin, end}, cv);
+	}
+}
 void TempConflictBTree::addWrite(
-	const std::pair<StringRef, StringRef>& write,
-	Version cv) {
-	// Blocks one write may take: its range and, when it trims stored ranges,
-	// a left and a right exterior, each two keys no longer than the longest
-	// key written so far, plus two nodes (a split and a new root). The
-	// reserve is never below 35 blocks, which covers keys of up to 11,132
-	// bytes with 2 KiB blocks; a smaller pool only needs to hold the write.
-	// Reclaiming happens only here, before the write reads or stores any
-	// key, so none of its stores can fail.
+		LeafBlock*& leaf,
+		uint64_t& cursorEpoch,
+		const std::pair<StringRef, StringRef>& write,
+		Version cv) {
+	// Reserve before using the cursor: reclamation can release its leaf.
 	constexpr std::size_t MinWriteBlocks = 35;
-	const std::size_t keyLength = std::max({maxKeyLength_, static_cast<std::size_t>(write.first.size()),
-											static_cast<std::size_t>(write.second.size())});
+	const std::size_t keyLength = std::max({maxKeyLength_,
+		static_cast<std::size_t>(write.first.size()),
+		static_cast<std::size_t>(write.second.size())});
 	const std::size_t payload = keyStore_.blockSize() - sizeof(KeyBlockHeader);
 	const std::size_t recordBlocks = (2 * keyLength + payload - 1) / payload;
 	const std::size_t writeBlocks = 3 * recordBlocks + 2;
@@ -39,10 +113,45 @@ void TempConflictBTree::addWrite(
 		throw std::length_error("TempConflictBTree: the pool cannot hold one write");
 	}
 	maxKeyLength_ = keyLength;
-	LeafBlock* leaf = nullptr;
 	std::size_t rank = 0;
 	BNodeHeader* nodeNeedsSplit = nullptr;
-	const bool found = findKey(write.first, leaf, rank, nodeNeedsSplit);
+	bool found = false;
+	if (cursorEpoch != writeLeafEpoch_ || leaf == nullptr) {
+		// Only a missing or invalidated destination needs a root search.
+		found = findKey(write.first, leaf, rank, nodeNeedsSplit);
+	} else {
+		cleanExpired(leaf);
+		// A split can leave later writes in a new right sibling. The scan
+		// cursor stays at the inserted write, not at the overlap's far end.
+		while (leaf->right != nullptr) {
+			if (leaf->header.count == 0) {
+				LeafBlock* right = leaf->right;
+				removeIfEmpty(&leaf->header);
+				leaf = right;
+				cleanExpired(leaf);
+				continue;
+			}
+			LeafBlock* right = leaf->right;
+			cleanExpired(right);
+			if (right->header.count == 0) {
+				removeIfEmpty(&right->header);
+				continue;
+			}
+			const auto slot = right->order[0];
+			if (keyStore_.compareBegin(write.first, right->ranges[slot]) < 0) break;
+			leaf = right;
+		}
+		found = nodeStore_.findKey(write.first, rank, leaf);
+		// Earlier groups can change split state in a shared ancestor.
+		// Follow current parent links rather than a saved candidate pointer.
+		for (BNodeHeader* node = &leaf->header; node != nullptr;
+			 node = node->parent == nullptr ? nullptr : &node->parent->header) {
+			if (needsSplit(node)) {
+				nodeNeedsSplit = node;
+				break;
+			}
+		}
+	}
 	if (nodeNeedsSplit != nullptr) {
 		split(nodeNeedsSplit, leaf, rank, found, cv);
 	}
@@ -51,19 +160,18 @@ void TempConflictBTree::addWrite(
 	if (leaf == nullptr) {
 		leaf = createRootLeaf(cv);
 		insertAt(rank, *range, cv, leaf);
-		return;
+	} else if (!insertWithLeftExterior(write, *range, cv, found, leaf, rank)) {
+		LeafBlock* scanLeaf = leaf;
+		std::size_t scanRank = rank;
+		std::size_t slot = 0;
+		if (nextRank(scanLeaf, scanRank, slot)) {
+			eraseCoveredRanges(write.second, scanLeaf, scanRank);
+			preserveRightExterior(write.second, scanLeaf, scanRank);
+		}
 	}
-	if (insertWithLeftExterior(write, *range, cv, found, leaf, rank)) {
-		return;
-	}
-	// The write is in its leaf. From the entry after it on, possibly in later
-	// leaves, what it covers is erased and the last range it overlaps keeps
-	// its right exterior; moving on does not change where the write went.
-	std::size_t slot = 0;
-	if (nextRank(leaf, rank, slot)) {
-		eraseCoveredRanges(write.second, leaf, rank);
-		preserveRightExterior(write.second, leaf, rank);
-	}
+	// The inserted write keeps this leaf alive even if the overlap scan
+	// removed later leaves. No new sibling is added to the group agenda.
+	cursorEpoch = writeLeafEpoch_;
 }
 
 bool TempConflictBTree::insertWithLeftExterior(
@@ -73,30 +181,26 @@ bool TempConflictBTree::insertWithLeftExterior(
 		bool found,
 		LeafBlock*& leaf,
 		std::size_t& rank) {
-	// Every insertion of a write goes into the leaf findKey reached, which
-	// split left with room for two entries. Other leaves are only trimmed in
-	// place or lose entries.
+	// Only the destination leaf has space reserved for insertion. A right
+	// exterior must stay here even if its original range is in the left leaf.
 	assert(leaf->freeSlotCount() >= 2);
 	LeafBlock* previousLeaf = leaf;
 	std::size_t previous = rank;
 	std::size_t slot = 0;
 	const bool hasPrevious = !found && prevRank(previousLeaf, previous, slot);
-	// An expired range is not read: its key may have been reclaimed.
+	// Expired entries can still name reclaimed key blocks.
 	const bool expired = hasPrevious && previousLeaf->cv[slot] <= reclaimCV_;
 	if (hasPrevious && !expired &&
 			keyStore_.compareEnd(write.first, previousLeaf->ranges[slot]) < 0) {
-		// The previous range overlaps the start of the write: keep its left
-		// exterior with its original CV, in its place.
+		// The left exterior retains its original CV and physical position.
 		const RangeRef oldRef = previousLeaf->ranges[slot];
 		const Version oldCV = previousLeaf->cv[slot];
 		auto left = keyStore_.appendRange(oldRef, write.first, oldCV);
 		assert(left.has_value());
 		previousLeaf->ranges[slot] = *left;
 		if (keyStore_.compareEnd(write.second, oldRef) < 0) {
-			// The write lies inside that range: its right exterior follows the
-			// write, in the same leaf, even when the range is in the leaf
-			// before. Live entries are disjoint, so the leaf's own entries
-			// begin after the range ends.
+			// Disjointness puts every later live entry beyond the old range.
+			// Both the write and its right exterior fit in the prepared leaf.
 			auto right = keyStore_.appendRange(write.second, oldRef, oldCV);
 			assert(right.has_value());
 			insertAt(rank, range, cv, leaf);
@@ -107,9 +211,8 @@ bool TempConflictBTree::insertWithLeftExterior(
 	}
 	insertAt(rank, range, cv, leaf);
 	if (expired) {
-		// Erased only now, so that its leaf, if it is this one, cannot be left
-		// empty. Entries before it end before it, so none overlaps the write.
-		// eraseAt leaves the position at the next entry: the write.
+		// Insert first so deleting an expired predecessor cannot empty the
+		// destination leaf. Disjointness excludes any earlier overlap.
 		eraseAt(previous, previousLeaf);
 		leaf = previousLeaf;
 		rank = previous;
@@ -121,12 +224,11 @@ void TempConflictBTree::eraseCoveredRanges(
 		const StringRef& end,
 		LeafBlock*& leaf,
 		std::size_t& rank) {
-	// The write is already in the tree, before the position, so erasing cannot
-	// empty it.
+	// The preceding inserted write keeps the tree nonempty during erasure.
 	assert(leaf != nullptr);
 	while (rank < leaf->header.count) {
 		const auto slot = leaf->order[rank];
-		// An expired entry, whose key may be gone, is erased unread.
+		// Check the CV before reading potentially reclaimed key bytes.
 		if (leaf->cv[slot] > reclaimCV_ &&
 				keyStore_.compareEnd(end, leaf->ranges[slot]) < 0) {
 			return;
@@ -210,7 +312,7 @@ BNodeHeader* TempConflictBTree::findSplitCandidate(
 	if (needsSplit(leaf)) {
 		return &leaf->header;
 	}
-	// Deepest first: candidates were pushed on the way down.
+	// Cleanup can change split state after a candidate was recorded.
 	while (!candidates.empty()) {
 		InternalBlock* node = candidates.back();
 		candidates.pop_back();
@@ -236,6 +338,7 @@ void  TempConflictBTree::insertAt(
 void TempConflictBTree::normalizeRoot() {
 	while (root_ != nullptr) {
 		if (root_->count == 0) {
+			if (root_->kind == BNodeKind::Leaf) ++writeLeafEpoch_;
 			nodeStore_.releaseNode(root_);
 			root_ = nullptr;
 			return;
@@ -251,10 +354,6 @@ void TempConflictBTree::normalizeRoot() {
 	}
 }
 
-// Removes the entry at the given logical rank and repairs the tree.
-// On return, leaf and rank identify the next entry, or the end position
-// (rank == count) in the last leaf.
-// If the tree becomes empty, leaf is nullptr and rank is zero.
 void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 	bool splitBefore=needsSplit(leaf);
 	nodeStore_.eraseAt(rank,leaf);
@@ -262,6 +361,7 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 					 rank == 0 && leaf->header.count > 0, false);
 	if (leaf->header.count==0) {
 		if (leaf->parent()==nullptr){
+			++writeLeafEpoch_;
 			nodeStore_.releaseNode(leaf);
 			root_=nullptr;
 			leaf=nullptr;
@@ -270,8 +370,8 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 			LeafBlock* oldRight=leaf->right;
 			InternalBlock* oldParent=leaf->parent();
 			removeEmptyChild(leaf->parent(), leaf->parentRank());
-			// Remove the ancestors left empty. Without other leaves 
-			// this reaches the root, which normalizeRoot then releases.
+			// Empty ancestors have no separator to propagate; remove them
+			// before updating the first surviving ancestor.
 			while (oldParent->header.count == 0 && oldParent->parent() != nullptr) {
 				InternalBlock* tmp = oldParent;
 				oldParent = tmp->parent();
@@ -288,7 +388,6 @@ void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 				leaf= oldLeft;
 				rank=leaf->header.count;
 			} else {
-				// The last leaf was removed.
 				assert(root_ == nullptr);
 				leaf=nullptr;
 				rank=0;
@@ -315,11 +414,10 @@ BNodeHeader* TempConflictBTree::eraseAt(std::size_t rank, InternalBlock* node) {
 	nodeStore_.eraseAt(rank, node);
 	child->parent = nullptr;
 	child->parentSlot = 0;
-	// node gained a free slot and no counted child: if it needed a split,
-	// it no longer does.
+	// Removing a child frees a slot and cannot add a pending split.
 	assert(!needsSplit(node));
 	propagateUpdates(node, splitBefore ? -1 : 0, false, false);
-	// Remove the ancestors left empty, as eraseAt does for a leaf.
+	// Empty ancestors have no first key to propagate.
 	while (node->header.count == 0 && node->parent() != nullptr) {
 		InternalBlock* tmp = node;
 		node = tmp->parent();
@@ -368,6 +466,7 @@ void  TempConflictBTree::removeSubtreeRec(BNodeHeader* node) {
 			removeSubtreeRec(internal->children[order]);
 		}
 	}
+	if (node->kind == BNodeKind::Leaf) ++writeLeafEpoch_;
 	nodeStore_.releaseNode(node);
 }
 
@@ -388,8 +487,8 @@ bool TempConflictBTree::reclaimOldest() {
 	}
 	const Version minCV = !keyCV ? *nodeCV
 		: !nodeCV ? *keyCV : std::min(*keyCV, *nodeCV);
-	// Key blocks are reclaimed in allocation order, and a later block may
-	// hold only records older than the cut: the cut must not move back.
+	// Exteriors can append older records to later key blocks. Allocation
+	// order does not imply increasing CVs, so the cutoff must not decrease.
 	reclaimCV_ = std::max(reclaimCV_, minCV);
 	while (nodeStore_.oldestCV() == minCV) {
 		removeSubtree(nodeStore_.oldestNode());
@@ -522,8 +621,8 @@ bool TempConflictBTree::refreshLiveSeparator(
 		InternalBlock* node, std::size_t rank) {
 	const auto slot = node->order[rank];
 	const Version cv = node->separatorsCV[slot];
-	// No entry is added while cleanups are deferred: a marked child stays
-	// without live entries until cleanPending removes it.
+	// Without writes or a changing cutoff, an empty marker stays valid
+	// throughout deferred cleanup.
 	if (cv == EmptyChildCV) {
 		return false;
 	}
@@ -579,11 +678,11 @@ void TempConflictBTree::removeEmptyChild(
 	const bool splitBefore = needsSplit(parent);
 
 	if (child->kind == BNodeKind::Leaf) {
+		++writeLeafEpoch_;
 		unlinkLeaf(reinterpret_cast<LeafBlock*>(child));
 	}
 
-	// The empty child no longer needs splitting. Its transition
-	// was already propagated when it was cleaned.
+	// The empty child's split-state transition has already been propagated.
 	nodeStore_.eraseAt(rank, parent);
 	nodeStore_.releaseNode(child);
 
@@ -634,7 +733,6 @@ void TempConflictBTree::split(
 		sibling = &splitLeaf(leaf, rank, found, cv)->header;
 	}
 	insertSibling(node, sibling, cv);
-	// Propagate the sibling's conservative maximum CV.
 	propagateUpdates(sibling, 0, false, true);
 }
 
@@ -753,8 +851,8 @@ void TempConflictBTree::insertSibling(
 		return;
 	}
 
-	// The parent loses a child needing a split and a free slot, so its own
-	// state does not change and there is nothing to propagate.
+	// Consuming one reserved slot removes one pending-child contribution.
+	// Free slots minus pending children, and hence split state, is unchanged.
 	const bool parentSplitBefore = needsSplit(parent);
 	assert(parent->freeSlotCount() > 0);
 	assert(parent->header.childrenNeedingSplit > 0);
@@ -772,8 +870,8 @@ void TempConflictBTree::propagateUpdates(
 		bool updateCV) {
 	assert(splitDelta >= -1 && splitDelta <= 1);
 
-	// The separator is the node's first key with its CV. Up the chain the
-	// parent's first separator is that same key, so it is read only once.
+	// The first range and its CV propagate unchanged through ancestors
+	// whose first child is on this path; read the descriptor only once.
 	const RangeRef* separator = nullptr;
 	Version separatorCV = 0;
 	if (updateSeparator) {
@@ -899,9 +997,8 @@ bool TempConflictBTree::prevRank(
 
 void TempConflictBTree::cleanPending() {
 	for (const auto& [node, generation] : pending_) {
-		// A leaf released since it was queued, by an earlier cleanup of the
-		// queue, has its generation cleared. Nothing is allocated before the
-		// queue is emptied, so its block is not reused meanwhile.
+		// Duplicate records are allowed. Release clears the generation, and
+		// no allocation can reuse that block before the queue is drained.
 		if (node->generation != generation) {
 			continue;
 		}
@@ -921,33 +1018,33 @@ void TempConflictBTree::checkReads(
 			std::vector<uint8_t>& conflicts,
 			int64_t& tooOldWithinWindow) {
 
-	// Consuming states separate a prefetch hint from a later task visit.
-	// Local work can continue directly; scans yield at leaf boundaries.
+	// One dispatch per resident task per round separates a hint from its use.
+	// Local continuations can run in the same visit; scans yield at leaf boundaries.
 	enum class Step : std::uint8_t {
 		Empty,             // Unused slot.
-		InspectNode,       // Node prefetched: prepare internal/leaf search.
-		CompareKeys,       // Separator and midpoint read prefetched.
-		CompareLeafKey,    // Entry key and first read begin prefetched.
-		FindPrev,          // A leaf to the left prefetched: find a live entry.
-		CheckPrev,         // Its end and the current read begin prefetched.
-		StartScan,         // Initialize the unresolved-read list at the saved scan start.
-		ScanLeaf,          // Scan pending reads against the current leaf.
-		Done               // Release the slot.
+		InspectNode,       // Inspect a hinted node and initialize its search bounds.
+		CompareKeys,       // Consume hints for a separator and midpoint read begin.
+		CompareLeafKey,    // Consume hints for a leaf entry and first read begin.
+		FindPrev,          // Inspect a hinted left leaf for a live predecessor.
+		CheckPrev,         // Compare the hinted predecessor end and read begin.
+		StartScan,         // Initialize unresolved reads at the saved scan position.
+		ScanLeaf,          // Scan unresolved reads against the current leaf.
+		Done               // Completed; retired at round end.
 	};
 	struct Task {
 		NodeRef node{nullptr};
-		uint32_t readBegin = 0; // Assigned read slice, end exclusive.
-		uint32_t readEnd = 0;
-		int32_t lo = 0;        // Internal node or leaf search bounds.
+		uint32_t opBegin = 0;   // Assigned mixed slice of readWriteBegins, end exclusive.
+		uint32_t opEnd = 0;
+		int32_t lo = 0;         // Internal node or leaf search bounds.
 		int32_t hi = 0;
 		union {
-			uint32_t readLo = 0;  // Internal partition search lower bound.
-			uint32_t readReachedEnd; // Scan: earlier reads' begins were reached.
+			uint32_t opLo = 0;  // Internal partition search bounds over reads and writes.
+			uint32_t readReachedEnd; // Index in readWriteBegins ending the reached-begin prefix.
 		};
-		uint32_t readHi = 0;
+		uint32_t opHi = 0;
 		uint32_t readIndex = 0; // Read being scanned.
-		uint32_t readHead = 0;  // First pending read; readEnd is the sentinel.
-		uint32_t readPrev = 0;  // Predecessor in the current scan pass.
+		uint32_t readHead = 0;  // First pending read; opEnd is the sentinel.
+		uint32_t readPrev = 0;  // Previous list index; opEnd denotes the head.
 		uint32_t rank = 0;      // Leaf entry being scanned.
 		LeafBlock* prevLeaf = nullptr;
 		uint32_t prevRank = 0;
@@ -960,9 +1057,8 @@ void TempConflictBTree::checkReads(
 	bool completedTasks = false;
 	FreeSlots<G> freeSlots;
 	std::vector<Task> pending; // Lowest priority first; back() resumes next.
-	// Read slices are disjoint once they reach their leaf tasks. Each task
-	// owns the links in its slice; tasks kept in pending retain their cursors.
-	std::vector<uint32_t> nextRead;
+	// Task slices own disjoint sets of read indices, even when their scans
+	// share a leaf. Suspension preserves those links and the task's cursors.
 	struct NewTask {
 		uint32_t parent; // Position in this round's order, not a physical slot.
 		Task task;
@@ -971,86 +1067,121 @@ void TempConflictBTree::checkReads(
 	newTasks.reserve(G); // At most one right sibling per active task.
 
 	conflicts.assign(reads.size(), 0);
-	readBegins.clear();
-	writeBegins.clear();
-	readBegins.reserve(points.size() / 2);
-	writeBegins.reserve(points.size() / 2);
+	readWriteBegins.clear();
+	nextBegin.clear();
+	nextOther.clear();
+	writeLeaves.clear();
+	writeLeafBuffer_.clear();
+	writeLeafBufferHead_ = 0;
+	writeLeafBufferFirst_ = writeLeafBufferNext_ = 0;
+	readWriteBegins.reserve(points.size() / 2);
+	nextBegin.reserve(points.size() / 2);
+	nextOther.reserve(points.size() / 2);
+	writeLeaves.reserve(points.size() / 2);
+
 	auto buildBeginIndexes = [&]() {
 		const uint32_t pointsSize = points.size();
+		uint32_t lastRead = pointsSize;
+		uint32_t lastWrite = pointsSize;
 		for (uint32_t p = 0; p < pointsSize; ++p) {
 			const KeyInfo& point = points[p];
 			if (!point.begin) continue;
 			const uint32_t t = point.transaction;
 			TransactionInfo& info = *transactionInfo[t];
-			const auto& ranges =
-				point.write ? info.writeRanges : info.readRanges;
-			const uint32_t r =
-				(reinterpret_cast<const char*>(point.pIndex) -
-				 reinterpret_cast<const char*>(ranges.begin())) /
-				sizeof(std::pair<int, int>);
-			if (point.write) {
-				writeBegins.push_back({r, t});
-				continue;
-			}
 			if (info.tooOld) continue;
-			const uint32_t rangeIndex = offsets[t] + r;
-			const ReadConflictRange& read = reads[rangeIndex];
-			if (read.version < reclaimCV_) {
+			if (!info.readRanges.empty() &&
+				reads[offsets[t]].version < reclaimCV_) {
 				info.tooOld = true;
 				transactionConflictStatus[t] = true;
 				++tooOldWithinWindow;
 				continue;
 			}
-			if (transactionConflictStatus[t] &&
-				read.conflictingKeyRange == nullptr) continue;
-			if (read.begin.compare(read.end) >= 0) continue;
-			readBegins.push_back({rangeIndex, t});
+			const auto& ranges =
+				point.write ? info.writeRanges : info.readRanges;
+			const uint32_t r =
+				(reinterpret_cast<const char*>(point.pIndex) -
+				 reinterpret_cast<const char*>(ranges.begin())) /
+				sizeof(*ranges.begin());
+			uint32_t rangeIndex;
+			if (point.write) {
+				rangeIndex = r | RangeEntry::WriteFlag;
+			} else {
+				rangeIndex = offsets[t] + r;
+				const ReadConflictRange& read = reads[rangeIndex];
+				if (transactionConflictStatus[t] &&
+					read.conflictingKeyRange == nullptr) continue;
+				if (read.begin.compare(read.end) >= 0) continue;
+			}
+			const uint32_t index = readWriteBegins.size();
+			readWriteBegins.push_back({rangeIndex, t});
+			nextBegin.push_back(pointsSize);
+			nextOther.push_back(pointsSize);
+			uint32_t& last = point.write ? lastWrite : lastRead;
+			if (last != pointsSize) nextBegin[last] = index;
+			// Entries between the previous begin of this type and this one have
+			// the opposite type. Consecutive begins of the same type skip the loop.
+			for (uint32_t i = last == pointsSize ? 0 : last + 1;
+				 i < index; ++i) {
+				nextOther[i] = index;
+			}
+			last = index;
 		}
-		uint32_t kept = 0;
-		const uint32_t count = readBegins.size();
-		for (uint32_t i = 0; i < count; ++i) {
-			const RangeEntry entry = readBegins[i];
-			if (transactionInfo[entry.transaction]->tooOld) continue;
-			readBegins[kept++] = entry;
+		const uint32_t end = readWriteBegins.size();
+		if (lastRead != pointsSize) nextBegin[lastRead] = end;
+		if (lastWrite != pointsSize) nextBegin[lastWrite] = end;
+		const uint32_t tailBegin =
+			lastRead == pointsSize || lastWrite == pointsSize
+				? 0 : std::min(lastRead, lastWrite) + 1;
+		for (uint32_t i = tailBegin; i < end; ++i) {
+			nextOther[i] = end;
 		}
-		readBegins.resize(kept);
 	};
 
 	auto markConflict = [&](uint32_t readIndex) {
-		const RangeEntry& entry = readBegins[readIndex];
+		const RangeEntry& entry = readWriteBegins[readIndex];
 		conflicts[entry.rangeIndex] = 1;
 		transactionConflictStatus[entry.transaction] = true;
 	};
 
 	auto readAt = [&](uint32_t rank) -> const ReadConflictRange& {
-		return reads[readBegins[rank].rangeIndex];
+		return reads[readWriteBegins[rank].rangeIndex];
+	};
+	auto beginAt = [&](uint32_t rank) -> const StringRef& {
+		const RangeEntry& entry = readWriteBegins[rank];
+		if (!entry.isWrite()) {
+			return reads[entry.index()].begin;
+		}
+		const auto& range =
+			transactionInfo[entry.transaction]->writeRanges[entry.index()];
+		return points[range.first].key;
 	};
 
 	auto readStillNeeded = [&](uint32_t rank) -> bool {
-		const RangeEntry& entry = readBegins[rank];
+		const RangeEntry& entry = readWriteBegins[rank];
 		if (transactionInfo[entry.transaction]->tooOld ||
 			conflicts[entry.rangeIndex]) return false;
 		return !transactionConflictStatus[entry.transaction] ||
 			reads[entry.rangeIndex].conflictingKeyRange != nullptr;
 	};
 
-	// Unlink a resolved read in O(1), preserving the order of the remaining
-	// reads. readBegin/readEnd and readBegins stay unchanged for routing.
+	// Read ends are not sorted, so a resolved read can be anywhere in the list.
+	// Unlink it without moving the begin-sorted records or changing routing bounds.
 	auto removeScanRead = [&](Task& task) {
-		assert(task.readIndex < task.readEnd);
-		const uint32_t next = nextRead[task.readIndex];
-		assert(next <= task.readEnd);
-		if (task.readPrev == task.readEnd) {
+		assert(task.readIndex < task.opEnd);
+		const uint32_t next =
+			std::min(nextBegin[task.readIndex], task.opEnd);
+		assert(next > task.readIndex);
+		if (task.readPrev == task.opEnd) {
 			task.readHead = next;
 		} else {
-			nextRead[task.readPrev] = next;
+			nextBegin[task.readPrev] = next;
 		}
 		task.readIndex = next;
 	};
 
-	// Compact a leaf before its first saved rank in this batch. With a
-	// fixed cutoff and no writes, later visits preserve every saved rank.
-	// Empty leaves stay linked until all tasks have finished.
+	// Compact before the first saved rank in this batch. With a fixed cutoff
+	// and no writes, later visits preserve saved ranks. Empty leaves remain
+	// linked and allocated until every traversal cursor has been retired.
 	auto cleanReadLeaf = [&](LeafBlock* leaf) {
 		if (leaf->lastCleanReadBatch == readBatch_) return;
 		cleanExpired(leaf);
@@ -1063,8 +1194,8 @@ void TempConflictBTree::checkReads(
 	auto initializeRootTask = [&]() {
 		Task& task = tasks[0];
 		task.node.header = root_;
-		task.readBegin = task.readLo = 0;
-		task.readEnd = task.readHi = readBegins.size();
+		task.opBegin = task.opLo = 0;
+		task.opEnd = task.opHi = readWriteBegins.size();
 		task.step = Step::InspectNode;
 
 		order[0] = 0;
@@ -1079,8 +1210,9 @@ void TempConflictBTree::checkReads(
 		}
 	};
 
-	// Follow block links only when the requested prefetch crosses a block.
-	// Check validity before dereferencing a potentially reclaimed header.
+	// Check generation validity before reading any linked-block header.
+	// Locate the requested key bytes past headers and issue at most two hints;
+	// locating a key in later blocks can still require several header reads.
 	auto prefetchStoredKeySlow = [&](const RangeRef& range,
 							 std::size_t start, std::size_t length) {
 		if (length == 0 || !keyStore_.isValid(range)) return;
@@ -1110,9 +1242,9 @@ void TempConflictBTree::checkReads(
 		}
 	};
 
-	// Requires live referenced bytes throughout the access. Up to two
-	// cache lines can be hinted without reading a same-block header; only
-	// the linked-block path needs to inspect headers.
+	// Requires live referenced bytes throughout the access. If the hinted
+	// lines fit in the first block, compute addresses without reading its header.
+	// At most two lines are hinted; the rest of a long key may still miss.
 	auto prefetchStoredKey = [&](const RangeRef& range,
 							 std::size_t start, std::size_t length) {
 		if (length == 0) return;
@@ -1162,8 +1294,8 @@ void TempConflictBTree::checkReads(
 		prefetchKey(readAt(rank).begin);
 	};
 
-	// Continuations: each issues the prefetch that its step consumes in a
-	// later visit, and sets that step.
+	// Continuations issue hints and set the state that consumes them on a
+	// later visit. Prefetch completion is not guaranteed.
 	auto toInspectNode = [&](Task& task) {
 		prefetchBlock(task.node);
 		task.step = Step::InspectNode;
@@ -1175,14 +1307,14 @@ void TempConflictBTree::checkReads(
 		const auto slot = node->order[mid];
 		if (node->separatorsCV[slot] <= reclaimCV_ &&
 			node->separatorsCV[slot] != EmptyChildCV) {
-			// Refresh before prefetching: the old key block may be reused.
-			// Deferred cleanup preserves every task's ranks during the batch.
+			// Repair the descriptor before hinting: its old block may be reused.
+			// Deferred structural cleanup preserves saved internal ranks.
 			refreshSeparatorDeferred(node, mid);
 		}
 		if (node->separatorsCV[slot] != EmptyChildCV) {
 			prefetchSepKey(task.node, mid);
 		}
-		prefetchReadKey(std::midpoint(task.readLo, task.readHi));
+		prefetchKey(beginAt(std::midpoint(task.opLo, task.opHi)));
 		task.step = Step::CompareKeys;
 	};
 
@@ -1191,12 +1323,12 @@ void TempConflictBTree::checkReads(
 		const int32_t mid = std::midpoint(task.lo, task.hi);
 		task.rank = static_cast<uint32_t>(mid);
 		prefetchRangeBegin(leaf->ranges[leaf->order[mid]]);
-		prefetchReadKey(task.readBegin);
+		prefetchReadKey(task.readHead);
 		task.step = Step::CompareLeafKey;
 	};
 
 	auto toCheckPrev = [&](Task& task) {
-		if (task.readIndex == task.readBegin) {
+		if (task.readIndex == task.readHead) {
 			const auto slot = task.prevLeaf->order[task.prevRank];
 			prefetchRangeEnd(task.prevLeaf->ranges[slot]);
 		}
@@ -1209,8 +1341,8 @@ void TempConflictBTree::checkReads(
 		task.step = Step::ScanLeaf;
 	};
 
-	// Suspension may outlast cache residency. Reissue hints for the
-	// resumed state without assuming its earlier data is still cached.
+	// Suspension may outlast cache residency. Reissue the resumed state's
+	// hints without assuming the earlier data is still cached.
 	auto prefetchAgain = [&](Task& task) {
 		switch (task.step) {
 			case Step::InspectNode:
@@ -1233,13 +1365,12 @@ void TempConflictBTree::checkReads(
 		}
 	};
 
-	// Gives the task the reads [readBegin, readEnd) for the children of its
-	// internal node delimited by separators [lo, hi), that is, children
-	// lo - 1 to hi - 1. Descends when only one child remains.
+	// Separators [lo, hi) delimit child ranks [lo - 1, hi - 1], inclusive.
+	// With no boundary left, the entire slice of operations belongs to one child.
 	auto assignChildren = [&](Task& task, int32_t lo, int32_t hi,
-						  uint32_t readBegin, uint32_t readEnd) {
-		task.readBegin = task.readLo = readBegin;
-		task.readEnd = task.readHi = readEnd;
+						  uint32_t opBegin, uint32_t opEnd) {
+		task.opBegin = task.opLo = opBegin;
+		task.opEnd = task.opHi = opEnd;
 		if (lo == hi) {
 			const auto slot = task.node.internal->order[lo - 1];
 			task.node.header = task.node.internal->children[slot];
@@ -1277,19 +1408,39 @@ void TempConflictBTree::checkReads(
 		task.step = Step::FindPrev;
 	};
 
+	constexpr uint32_t BufferedLeafFlag = uint32_t{1} << 31;
+	uint32_t operationCount = 0;
+	uint32_t writeFrontier = 0;
+	auto bufferTaskLeaf = [&](Task& task, LeafBlock* leaf, uint32_t firstWrite) {
+		if (firstWriteBegin_ == operationCount) return;
+		const uint64_t ticket = bufferWriteLeaf({leaf, firstWrite, task.opEnd});
+		assert(ticket < BufferedLeafFlag);
+		// This slice consumed its nextOther value on arrival. Slices are
+		// disjoint, so reuse their first position as a result lookup slot.
+		nextOther[task.opBegin] = BufferedLeafFlag | static_cast<uint32_t>(ticket);
+	};
 	auto inspectNode = [&](Task& task) {
 		if (task.node.header->kind == BNodeKind::Leaf) {
-			cleanReadLeaf(task.node.leaf);
-		}
-		task.hi = task.node.header->count;
-
-		if (task.node.header->kind == BNodeKind::Leaf) {
+			auto* leaf = task.node.leaf;
+			cleanReadLeaf(leaf);
+			const uint32_t first = task.opBegin;
+			const uint32_t other =
+				std::min(nextOther[first], task.opEnd);
+			const bool writeFirst = readWriteBegins[first].isWrite();
+			const uint32_t firstWrite = writeFirst ? first : other;
+			task.readHead = writeFirst ? other : first;
+			bufferTaskLeaf(task, leaf, firstWrite);
+			if (task.readHead == task.opEnd) {
+				task.step = Step::Done;
+				completedTasks = true;
+				return;
+			}
+			task.hi = leaf->header.count;
 			task.lo = 0;
-			task.readIndex = task.readBegin;
-
+			task.readIndex = task.readHead;
 			if (task.hi == 0) {
 				task.rank = 0;
-				task.prevLeaf = task.node.leaf;
+				task.prevLeaf = leaf;
 				task.prevRank = 0;
 				findPrev(task);
 			} else {
@@ -1297,47 +1448,51 @@ void TempConflictBTree::checkReads(
 			}
 			return;
 		}
-
+		task.hi = task.node.header->count;
 		if (task.hi == 0) {
+			const uint32_t first = task.opBegin;
+			const uint32_t firstWrite = readWriteBegins[first].isWrite()
+				? first : std::min(nextOther[first], task.opEnd);
+			bufferTaskLeaf(task, nullptr, firstWrite);
 			task.step = Step::Empty;
 			completedTasks = true;
 			return;
 		}
-
 		assignChildren(task, 1, task.hi,
-					   task.readBegin, task.readEnd);
+					   task.opBegin, task.opEnd);
 	};
 
 	auto compareKeys = [&](Task& task, uint32_t position) {
-		// Find the first read whose begin is >= separator mid.
+		// Lower-bound the operation begins: equality belongs on the right, including
+		// all duplicates, so an equal comparison cannot end the search early.
 		const int32_t mid = std::midpoint(task.lo, task.hi);
-		const uint32_t midRead = std::midpoint(task.readLo, task.readHi);
+		const uint32_t midRead = std::midpoint(task.opLo, task.opHi);
 		const uint32_t slot = task.node.internal->order[mid];
 		const RangeRef& separator = task.node.internal->separators[slot];
 		if (task.node.internal->separatorsCV[slot] == EmptyChildCV) {
-			// Empty markers are not comparable keys, even when a live
-			// neighbour was copied. Route left so forward scans retain all
-			// possible overlaps, including beyond an entirely empty subtree.
-			task.readLo = task.readHi;
-		} else if (keyStore_.compareBegin(readAt(midRead).begin, separator) < 0) {
-			task.readLo = midRead + 1;
+			// Empty markers need no live key reference. Route left so forward
+			// scans retain overlaps beyond even a wholly empty subtree.
+			task.opLo = task.opHi;
+		} else if (keyStore_.compareBegin(beginAt(midRead), separator) < 0) {
+			task.opLo = midRead + 1;
 		} else {
-			task.readHi = midRead;
+			task.opHi = midRead;
 		}
-		if (task.readLo < task.readHi) {
+		if (task.opLo < task.opHi) {
 			toCompareKeys(task);
 			return;
 		}
-		const uint32_t split = task.readLo;
-		if (split == task.readEnd) {
-			assignChildren(task, task.lo, mid, task.readBegin, task.readEnd);
-		} else if (split == task.readBegin) {
-			assignChildren(task, mid + 1, task.hi, task.readBegin, task.readEnd);
+		const uint32_t split = task.opLo;
+		if (split == task.opEnd) {
+			assignChildren(task, task.lo, mid, task.opBegin, task.opEnd);
+		} else if (split == task.opBegin) {
+			assignChildren(task, mid + 1, task.hi, task.opBegin, task.opEnd);
 		} else {
-			// The sibling prefetches its first access now; endRound admits it.
+			// Hint the sibling's first access at creation. It cannot execute
+			// in this round; admission may suspend it for later rounds.
 			Task right = task;
-			assignChildren(right, mid + 1, task.hi, split, task.readEnd);
-			assignChildren(task, task.lo, mid, task.readBegin, split);
+			assignChildren(right, mid + 1, task.hi, split, task.opEnd);
+			assignChildren(task, task.lo, mid, task.opBegin, split);
 			newTasks.push_back({position, right});
 		}
 	};
@@ -1347,11 +1502,10 @@ void TempConflictBTree::checkReads(
 		const auto* leaf = task.node.leaf;
 		const auto slot = leaf->order[mid];
 		const int cmp = keyStore_.compareBegin(
-			readAt(task.readBegin).begin, leaf->ranges[slot]);
-
+			readAt(task.readHead).begin, leaf->ranges[slot]);
 		if (cmp == 0) {
 			task.rank = mid;
-			task.readIndex = task.readBegin;
+			task.readIndex = task.readHead;
 			task.step = Step::StartScan;
 			return;
 		}
@@ -1360,14 +1514,12 @@ void TempConflictBTree::checkReads(
 		} else {
 			task.hi = mid;
 		}
-
 		if (task.lo < task.hi) {
 			toCompareLeafKey(task);
 			return;
 		}
-
 		task.rank = task.lo;
-		task.readIndex = task.readBegin;
+		task.readIndex = task.readHead;
 		task.prevLeaf = task.node.leaf;
 		task.prevRank = task.rank;
 		findPrev(task);
@@ -1380,41 +1532,36 @@ void TempConflictBTree::checkReads(
 			const auto& read = readAt(task.readIndex);
 			const int cmp = keyStore_.compareEnd(
 				read.begin, leaf->ranges[slot]);
-
 			if (cmp >= 0) {
 				// Later reads also begin at or after this write's end.
 				task.step = Step::StartScan;
 				return;
 			}
-
 			if (leaf->cv[slot] > read.version) {
 				markConflict(task.readIndex);
 			}
 		}
-
-		++task.readIndex;
-		while (task.readIndex < task.readEnd &&
+		task.readIndex=std::min(nextBegin[task.readIndex],task.opEnd);
+		while (task.readIndex < task.opEnd &&
 			   !readStillNeeded(task.readIndex)) {
-			++task.readIndex;
+			task.readIndex=std::min(nextBegin[task.readIndex],task.opEnd);
 		}
-
-		if (task.readIndex < task.readEnd) {
+		if (task.readIndex < task.opEnd) {
 			toCheckPrev(task);
 		} else {
 			task.step = Step::StartScan;
 		}
 	};
 
-	// A scan yields only at a leaf boundary or when the task finishes.
-	// Key comparisons run directly, without per-pair scheduling/prefetches.
+	// Scan a whole leaf per visit, without dispatching individual pairs.
+	// Yield at a leaf boundary after hinting the next leaf.
 	auto scanLeaf = [&](Task& task) {
 		auto* leaf = task.node.leaf;
 		cleanReadLeaf(leaf);
-
 		while (task.rank < leaf->header.count) {
 			const auto slot = leaf->order[task.rank];
 			const auto& write = leaf->ranges[slot];
-			while (task.readIndex < task.readEnd) {
+			while (task.readIndex < task.opEnd) {
 				if (!readStillNeeded(task.readIndex)) {
 					removeScanRead(task);
 					continue;
@@ -1425,57 +1572,52 @@ void TempConflictBTree::checkReads(
 						// This read and the following ones need later writes.
 						break;
 					}
-					// Ordered disjoint writes have increasing ends, so a reached
-					// read begin stays below every later write end.
+					// Ordered disjoint writes have increasing ends; a reached
+					// begin stays below every later write end.
 					task.readReachedEnd = task.readIndex + 1;
 				}
-
 				if (keyStore_.compareBegin(read.end, write) <= 0) {
 					removeScanRead(task);
 				} else if (leaf->cv[slot] > read.version) {
 					markConflict(task.readIndex);
 					removeScanRead(task);
 				} else {
-					// Keep this read pending for later writes.
 					task.readPrev = task.readIndex;
-					task.readIndex = nextRead[task.readIndex];
+					task.readIndex =
+						std::min(nextBegin[task.readIndex], task.opEnd);
 				}
 			}
-
-			if (task.readHead == task.readEnd) {
+			if (task.readHead == task.opEnd) {
 				task.step = Step::Done;
 				completedTasks = true;
 				return;
 			}
 			++task.rank;
 			task.readIndex = task.readHead;
-			task.readPrev = task.readEnd;
+			task.readPrev = task.opEnd;
 		}
-
 		if (leaf->right == nullptr) {
 			task.step = Step::Done;
 			completedTasks = true;
 			return;
 		}
-
 		task.node.leaf = leaf->right;
 		task.rank = 0;
 		toScanLeaf(task);
 	};
 
 	auto startScan = [&](Task& task) {
-		// Partition and scan phases are exclusive, so the union can reuse
-		// readLo for the reached prefix of sorted read begins.
-		task.readReachedEnd = task.readBegin;
-		task.readHead = task.readBegin;
+		// Partition and scan phases are exclusive. The union now holds the
+		// reached prefix of begin-sorted reads instead of a partition bound.
+		task.readReachedEnd = task.opBegin;
 		task.readIndex = task.readHead;
-		task.readPrev = task.readEnd;
-		while (task.readIndex < task.readEnd &&
+		task.readPrev = task.opEnd;
+		while (task.readIndex < task.opEnd &&
 			   !readStillNeeded(task.readIndex)) {
 			removeScanRead(task);
 		}
 
-		if (task.readIndex == task.readEnd) {
+		if (task.readIndex == task.opEnd) {
 			task.step = Step::Done;
 			completedTasks = true;
 			return;
@@ -1484,7 +1626,8 @@ void TempConflictBTree::checkReads(
 		scanLeaf(task);
 	};
 
-	// New siblings wait until the next round; active order is fixed here.
+	// The visitation order stays fixed throughout a round. New siblings
+	// cannot execute until a later round.
 	auto runRound = [&]() {
 		for (uint32_t t = 0; t < active; ++t) {
 			Task& task = tasks[order[t]];
@@ -1522,7 +1665,19 @@ void TempConflictBTree::checkReads(
 		}
 	};
 
+	// Only the next unresolved slice can block output. A ready slice names
+	// its result directly; opEnd advances the frontier without searching.
+	auto flushWritePrefix = [&]() {
+		while (writeFrontier < operationCount) {
+			const uint32_t result = nextOther[writeFrontier];
+			if ((result & BufferedLeafFlag) == 0) break;
+			const uint32_t next = emitWriteLeaf(result & ~BufferedLeafFlag);
+			assert(next > writeFrontier && next <= operationCount);
+			writeFrontier = next;
+		}
+	};
 	auto endRound = [&]() {
+		flushWritePrefix();
 		// Bounds and cursors may change without changing the task order.
 		// Rebuild only when tasks finish or a partition creates a sibling.
 		if (!completedTasks && newTasks.empty()) return;
@@ -1591,21 +1746,43 @@ void TempConflictBTree::checkReads(
 
 	++readBatch_;
 	buildBeginIndexes();
-	if (root_ == nullptr || readBegins.empty()) return;
-	nextRead.resize(readBegins.size());
-	std::iota(nextRead.begin(), nextRead.end(), uint32_t{1});
+	if (readWriteBegins.size() >= BufferedLeafFlag) {
+		throw std::length_error("TempConflictBTree: the batch has too many operations");
+	}
+	operationCount = static_cast<uint32_t>(readWriteBegins.size());
+	firstWriteBegin_ = operationCount;
+	if (operationCount != 0) {
+		firstWriteBegin_ = readWriteBegins[0].isWrite() ? 0 : nextOther[0];
+	}
+	if (firstWriteBegin_ == operationCount) {
+		writeFrontier = operationCount;
+	} else {
+		writeLeafBuffer_.reserve(2 * static_cast<std::size_t>(G));
+	}
+	writeLeavesEpoch_ = writeLeafEpoch_;
+	if (root_ == nullptr || readWriteBegins.empty()) return;
 	initializeRootTask();
 	prefetchBlock(tasks[0].node);
 	while (active != 0) {
 		runRound();
 		endRound();
 	}
+	assert(writeFrontier == operationCount);
+	assert(writeLeafBufferFirst_ == writeLeafBufferNext_);
 	cleanPending();
 }
 
-// 16 is the default task capacity of the FDB integration and the benchmark;
-// the tests compare it with 32. Other capacities need their own instantiation.
+// Explicit instantiations for the supported task capacities.
 template void TempConflictBTree::checkReads<16>(
+	const std::vector<KeyInfo>& points,
+	TransactionInfo* const* transactionInfo,
+	const std::vector<ReadConflictRange>& reads,
+	const std::vector<int>& offsets,
+	bool* transactionConflictStatus,
+	std::vector<uint8_t>& conflicts,
+	int64_t& tooOldWithinWindow);
+
+template void TempConflictBTree::checkReads<24>(
 	const std::vector<KeyInfo>& points,
 	TransactionInfo* const* transactionInfo,
 	const std::vector<ReadConflictRange>& reads,
