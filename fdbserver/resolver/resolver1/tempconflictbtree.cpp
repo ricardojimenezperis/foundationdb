@@ -10,7 +10,7 @@
 #define RESOLVER1_WRITE_PENDING (4 * RESOLVER1_WRITE_LG)
 #endif
 #ifdef RESOLVER1_WRITE_GROUPS
-#error "v3.10 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
+#error "v3.11 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
 #endif
 
 TempConflictBTree::TempConflictBTree(std::size_t budget)
@@ -101,15 +101,18 @@ void TempConflictBTree::addWrites(
 		uint32_t group = 0, representative = 0, entry = 0;
 		Step step = Step::Done, afterKey = Step::Done, afterPrepare = Step::Inspect;
 		bool found = false, owned = false;
-		bool runnable = false;
+		bool runnable = false, parked = false, writable = false, local = false, localChecked = false;
+		std::size_t reserved = 0;
 	};
-	// Storage order is mutation order. Parked tasks retain their slot but do
-	// not appear in ready. Neither queue allocates or moves a live cursor.
+	// Slots retain input order; independent leaf owners may complete out of order.
+	// Neither queue allocates or moves a live cursor.
 	std::array<WriteTask, TaskCapacity> tasks;
 	std::array<uint32_t, RunnableTarget> ready;
 	uint32_t firstTask = 0, pendingTasks = 0;
 	uint32_t readyFirst = 0, readyCount = 0;
-	uint32_t nextGroup = 0;
+	uint32_t nextGroup = 0, nextOwner = 0, unowned = 0, owners = 0;
+	std::size_t reservedBlocks = 0;
+	bool exclusive = false;
 	auto enqueue = [&](uint32_t slot) {
 		assert(readyCount < RunnableTarget && !tasks[slot].runnable);
 		uint32_t tail = readyFirst + readyCount;
@@ -170,6 +173,7 @@ void TempConflictBTree::addWrites(
 			setInput(t);
 			resetSearch(t);
 			++pendingTasks;
+			++unowned;
 			enqueue(slot);
 		}
 	};
@@ -277,7 +281,7 @@ void TempConflictBTree::addWrites(
 				}
 				LeafBlock* before = t.cursor.leaf;
 				const Version cutoff = reclaimCV_;
-				reserveWrite(t.write);
+				if (!t.local) reserveWrite(t.write);
 				if (t.cursor.leaf == nullptr) t.cursor.leaf = rightmostLeaf_;
 				t.step = t.afterPrepare;
 				if (before != t.cursor.leaf || cutoff != reclaimCV_) {
@@ -372,7 +376,7 @@ void TempConflictBTree::addWrites(
 			case Step::SearchReady:
 			searchReady:
 				if (!head) return Visit::Parked;
-				prepareWriteSplit(t.cursor, t.rank, t.found, cv);
+				if (!t.local) prepareWriteSplit(t.cursor, t.rank, t.found, cv);
 				t.step = Step::Previous;
 				goto previous;
 			case Step::Previous:
@@ -463,11 +467,83 @@ void TempConflictBTree::addWrites(
 		}
 	};
 
+	// Prove a whole leaf group stays inside its leaf. Two spare entries per
+	// interval bound insertion/exteriors; a live last entry fences the scan.
+	// Key-block credits prevent reclamation while another cursor is owned.
+	auto localBudget = [&](WriteTask& t) -> std::size_t {
+		auto* leaf = t.cursor.leaf;
+		if (t.step != Step::SearchReady || leaf == nullptr || t.rank == 0 ||
+			t.cursor.rightCheckRequired || cleanLeafCV_ != reclaimCV_ ||
+			leaf->lastCleanReadBatch != readBatch_) return 0;
+		std::size_t count = 0, budget = 0, maxLength = maxKeyLength_;
+		uint32_t last = t.entry;
+		const std::size_t payload = keyStore_.blockSize() - sizeof(KeyBlockHeader);
+		for (uint32_t w = t.entry; w < writeLeaves[t.group].end(); w = nextBegin[w]) {
+			last = w;
+			const auto& e = readWriteBegins[w];
+			maxLength = std::max({maxLength, std::size_t(points[e.index()].key.size()),
+				std::size_t(points[e.transaction].key.size())});
+			++count;
+			if (count > leaf->freeSlotCount() / 2) return 0;
+		}
+		const auto slot = leaf->order[leaf->header.count - 1];
+		if (leaf->cv[slot] <= reclaimCV_ || keyStore_.compareBegin(
+			points[readWriteBegins[last].transaction].key, leaf->ranges[slot]) >= 0) return 0;
+		budget = count * (3 * ((2 * maxLength + payload - 1) / payload) + 2);
+		if (pool_.availableBlocks() < reservedBlocks + budget + 35) return 0;
+		maxKeyLength_ = maxLength;
+		return budget;
+	};
+	// Admission is ordered, execution is not. A non-local operation is a
+	// barrier, so it cannot reclaim, split or unlink beneath a live owner.
+	auto promote = [&]() {
+		while (unowned != 0 && !exclusive && readyCount < RunnableTarget) {
+			auto& t = tasks[nextOwner];
+			if (!t.parked) break;
+			const auto representative = resolveWriteGroup(t.group);
+			const auto& d = writeLeaves[representative];
+			const auto* anchor = d.leaf != nullptr ? d.leaf : rightmostLeaf_;
+			if (representative != t.representative || anchor != t.anchor ||
+				writePreparation_[representative].mutation != t.mutation || reclaimCV_ != t.cutoff) {
+				resetSearch(t);
+				t.parked = false;
+				t.localChecked = false;
+				enqueue(nextOwner);
+				break;
+			}
+			// Pointer checks only at admission, never on each continuation.
+			bool shared = false;
+			for (uint32_t i = 0, slot = firstTask; i < pendingTasks; ++i) {
+				const auto& other = tasks[slot];
+				if (other.writable && other.step != Step::Done &&
+					other.cursor.leaf == t.cursor.leaf) { shared = true; break; }
+				slot = slot + 1 == TaskCapacity ? 0 : slot + 1;
+			}
+			if (shared) break;
+			if (!t.localChecked) {
+				t.reserved = localBudget(t);
+				t.localChecked = true;
+			}
+			auto budget = t.reserved;
+			if (budget != 0 && pool_.availableBlocks() < reservedBlocks + budget + 35) {
+				if (owners != 0) break;
+				budget = 0;
+			}
+			if (budget == 0 && owners != 0) break;
+			t.local = budget != 0;
+			t.reserved = budget;
+			reservedBlocks += budget;
+			exclusive = !t.local;
+			t.writable = true;
+			t.parked = false;
+			++owners;
+			--unowned;
+			enqueue(nextOwner);
+			nextOwner = nextOwner + 1 == TaskCapacity ? 0 : nextOwner + 1;
+		}
+	};
 	fill();
 	while (pendingTasks != 0) {
-		assert(readyCount != 0 && tasks[firstTask].runnable);
-		// Freeze the turn length: each selected task gets one continuation.
-		// Refills happen after the turn, never inside advance or its dispatch.
 		const uint32_t turn = std::min(LG, readyCount);
 		for (uint32_t served = 0; served < turn; ++served) {
 			const uint32_t slot = ready[readyFirst];
@@ -476,21 +552,25 @@ void TempConflictBTree::addWrites(
 			auto& task = tasks[slot];
 			assert(task.runnable);
 			task.runnable = false;
-			const Visit visit = advance(task, slot == firstTask);
+			const Visit visit = advance(task, task.writable);
 			if (visit == Visit::Prefetched) {
 				enqueue(slot);
-			} else if (visit == Visit::Done) {
-				assert(slot == firstTask);
-				--pendingTasks;
-				firstTask = firstTask + 1 == TaskCapacity ? 0 : firstTask + 1;
-				// Wake only the new writer, before admitting speculative work.
-				// advance validates it before consuming any saved leaf/key pointer.
-				if (pendingTasks != 0 && !tasks[firstTask].runnable) enqueue(firstTask);
+			} else if (visit == Visit::Parked) {
+				task.parked = true;
+			} else {
+				assert(task.writable && owners != 0);
+				--owners;
+				reservedBlocks -= task.reserved;
+				if (!task.local) exclusive = false;
+				while (pendingTasks != 0 && tasks[firstTask].step == Step::Done) {
+					--pendingTasks;
+					firstTask = firstTask + 1 == TaskCapacity ? 0 : firstTask + 1;
+				}
 			}
 		}
-		// Append freshly hinted tasks behind the current runnable rotation.
-		// At cold start / a depleted tail, available work limits the lead.
+		promote();
 		fill();
+		assert(pendingTasks == 0 || readyCount != 0);
 	}
 
 }
