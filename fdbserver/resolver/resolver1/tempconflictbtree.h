@@ -156,6 +156,10 @@ private:
 	struct WritePreparation {
 		uint64_t mutation = 0;
 		uint32_t firstAccepted = UINT32_MAX;
+		uint32_t componentEnd = 0;
+		LeafBlock* start = nullptr;
+		LeafBlock* low = nullptr;
+		LeafBlock* high = nullptr;
 	};
 	// Write-phase scratch only; preserve the read scheduler's 24-byte records.
 	std::vector<WritePreparation> writePreparation_;
@@ -196,6 +200,7 @@ private:
 		bool rightCheckRequired = true; // False for a proved partition or the current right end.
 	};
 	WriteCursor* activeWriteCursor_ = nullptr;
+	LeafBlock** activeWriteLimit_ = nullptr;
 
 	// Covers both internal separators and leaf entries for the configured block size.
 	static constexpr std::size_t MaxSeparators =
