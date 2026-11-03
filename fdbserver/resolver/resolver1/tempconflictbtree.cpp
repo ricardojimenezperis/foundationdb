@@ -213,27 +213,45 @@ void TempConflictBTree::addWrites(
 		if (t.scan->right != nullptr) return hintLeaf(t.scan->right);
 		return t.scan->header.count == 1 && hintLeaf(t.scan->left);
 	};
-	// Keep scheduler variables out of the register allocation of the step machine.
-	auto advance = [&](WriteTask& t, bool head) __attribute__((noinline)) -> Visit {
+	// Pure search: no reserve, cursor guard, split, scan or mutation arguments.
+	// Returns true only after hinting the next dependency; false at SearchReady.
+	auto advanceSearch = [&](WriteTask& t) __attribute__((always_inline)) -> bool {
+		if (t.step == Step::KeyMore) {
+			assert(t.afterKey == Step::CompareSearch);
+			t.keyBlock = t.keyBlock->nextBlock;
+			assert(t.keyBlock != nullptr);
+			t.keyOffset = sizeof(KeyBlockHeader);
+			hintKeyChunk(t);
+			return true;
+		}
+		const auto* leaf = t.cursor.leaf;
+		assert(leaf != nullptr);
+		for (;;) {
+			if (t.step == Step::CompareSearch) {
+				const int compare = keyStore_.compareBegin(t.write.first, leaf->ranges[leaf->order[t.rank]]);
+				if (compare == 0) {
+					t.found = true;
+					t.step = Step::SearchReady;
+					return false;
+				}
+				if (compare < 0) t.hi = t.rank; else t.lo = t.rank + 1;
+			}
+			assert(t.lo <= t.hi);
+			if (t.lo == t.hi) {
+				t.rank = t.lo;
+				t.found = false;
+				t.step = Step::SearchReady;
+				return false;
+			}
+			t.rank = t.lo + (t.hi - t.lo) / 2;
+			if (hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch)) return true;
+			// Empty stored begins need no memory hint and no scheduler round trip.
+		}
+	};
+	// Ownership, cleanup and mutations retain their own register allocation.
+	auto advanceSlow = [&](WriteTask& t, bool head) __attribute__((noinline)) -> Visit {
 		assert(t.step != Step::Done);
 		assert(!t.owned || head);
-		// Check metadata before consuming a speculative pointer. A cached root
-		// stays valid until its parent changes; resolve only after a redirection.
-		if (!t.owned) {
-			const uint32_t representative =
-				nextOther[writeLeaves[t.representative].firstWrite] == t.representative
-				? t.representative : resolveWriteGroup(t.group);
-			const auto& d = writeLeaves[representative];
-			const LeafBlock* anchor = d.leaf != nullptr ? d.leaf : rightmostLeaf_;
-			if (representative != t.representative || anchor != t.anchor ||
-				writePreparation_[representative].mutation != t.mutation || reclaimCV_ != t.cutoff) {
-				// Do not repeatedly redo a search while older writes keep changing
-				// its destination. Park without dereferencing the saved pointers.
-				if (!head) return Visit::Parked;
-				resetSearch(t);
-				if (t.cursor.leaf != nullptr) return Visit::Prefetched;
-			}
-		}
 		struct CursorGuard {
 			TempConflictBTree& tree;
 			bool head;
@@ -328,32 +346,9 @@ void TempConflictBTree::addWrites(
 				}
 				continue;
 			case Step::Search:
-			search:
-				if (t.lo == t.hi) {
-					t.rank = t.lo;
-					t.found = false;
-					t.step = Step::SearchReady;
-					goto searchReady;
-				} else {
-					assert(t.lo < t.hi);
-					t.rank = t.lo + (t.hi - t.lo) / 2;
-					if (hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch)) {
-						return Visit::Prefetched;
-					}
-				}
-				continue;
-			case Step::CompareSearch: {
-				const int compare = keyStore_.compareBegin(t.write.first, leaf->ranges[leaf->order[t.rank]]);
-				if (compare == 0) {
-					t.found = true;
-					t.step = Step::SearchReady;
-					goto searchReady;
-				} else {
-					if (compare < 0) t.hi = t.rank; else t.lo = t.rank + 1;
-					t.step = Step::Search;
-					goto search;
-				}
-			}
+			case Step::CompareSearch:
+				if (advanceSearch(t)) return Visit::Prefetched;
+				goto searchReady;
 			case Step::SearchReady:
 			searchReady:
 				if (!head) return Visit::Parked;
@@ -446,6 +441,39 @@ void TempConflictBTree::addWrites(
 			case Step::Done: return Visit::Done;
 			}
 		}
+	};
+
+	// Validate before dereferencing speculative state, then take the small search
+	// path when possible. Only an owned head can bypass PrepareInput.
+	auto advance = [&](WriteTask& t, bool head) __attribute__((always_inline)) -> Visit {
+		assert(t.step != Step::Done);
+		assert(!t.owned || head);
+		// Check metadata before consuming a speculative pointer. A cached root
+		// stays valid until its parent changes; resolve only after a redirection.
+		if (!t.owned) {
+			const uint32_t representative =
+				nextOther[writeLeaves[t.representative].firstWrite] == t.representative
+				? t.representative : resolveWriteGroup(t.group);
+			const auto& d = writeLeaves[representative];
+			const LeafBlock* anchor = d.leaf != nullptr ? d.leaf : rightmostLeaf_;
+			if (representative != t.representative || anchor != t.anchor ||
+				writePreparation_[representative].mutation != t.mutation || reclaimCV_ != t.cutoff) {
+				// Do not repeatedly redo a search while older writes keep changing
+				// its destination. Park without dereferencing the saved pointers.
+				if (!head) return Visit::Parked;
+				resetSearch(t);
+				if (t.cursor.leaf != nullptr) return Visit::Prefetched;
+			}
+		}
+		if ((!head || t.owned) &&
+			(t.step == Step::Search || t.step == Step::CompareSearch ||
+			 (t.step == Step::KeyMore && t.afterKey == Step::CompareSearch))) {
+			if (advanceSearch(t)) return Visit::Prefetched;
+			if (!head) return Visit::Parked;
+		}
+		// A finished speculative search needs no mutation frame until ownership.
+		if (!head && t.step == Step::SearchReady) return Visit::Parked;
+		return advanceSlow(t, head);
 	};
 
 	for (auto& group : groups) fill(group);
