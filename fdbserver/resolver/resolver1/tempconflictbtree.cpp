@@ -4,7 +4,7 @@
 #include <stdexcept>
 
 #ifndef RESOLVER1_WRITE_LG
-#define RESOLVER1_WRITE_LG 16
+#define RESOLVER1_WRITE_LG 8
 #endif
 
 TempConflictBTree::TempConflictBTree(std::size_t budget)
@@ -14,6 +14,414 @@ TempConflictBTree::TempConflictBTree(std::size_t budget)
 }
 
 void TempConflictBTree::addWrites(
+		const std::vector<KeyInfo>& points,
+		TransactionInfo* const* transactionInfo,
+		const bool* transactionConflictStatus,
+		Version cv) {
+	constexpr uint32_t LG = RESOLVER1_WRITE_LG;
+	constexpr uint32_t TaskCapacity = LG == 0 ? 1 : LG;
+	static_assert(LG <= 256, "write task groups must be bounded");
+	if constexpr (LG == 0) {
+		addWritesSequential(points, transactionInfo, transactionConflictStatus, cv);
+		return;
+	}
+	if (readWriteBegins.empty()) return;
+	const auto endWrites = static_cast<uint32_t>(readWriteBegins.size());
+	if (writeLeaves.empty()) {
+		if (firstWriteBegin_ == endWrites) return;
+		writeLeaves.push_back({nullptr, firstWriteBegin_, endWrites, nullptr});
+	}
+	if (!writeDestinationsActive_) prepareWriteDestinations();
+	struct DestinationGuard {
+		TempConflictBTree& tree;
+		~DestinationGuard() { tree.clearWriteDestinations(); }
+	} destinationGuard{*this};
+
+	// Compact accepted unions into the existing begin records and links.
+	// Decisions are final: transaction becomes endIndex only after filtering.
+	// Keep firstWrite/nextOther intact for destination redirection. No key bytes
+	// or per-write allocations are needed here; tasks consume the keys once.
+	writePreparation_.assign(writeLeaves.size(), WritePreparation{});
+	uint32_t pending = endWrites;
+	for (uint32_t g = 0; g < writeLeaves.size(); ++g) {
+		const auto& group = writeLeaves[g];
+		auto& preparation = writePreparation_[g];
+		preparation.firstAccepted = endWrites;
+		for (uint32_t w = group.firstWrite; w < group.end();) {
+			const uint32_t next = nextBegin[w];
+			auto& entry = readWriteBegins[w];
+			const auto& info = *transactionInfo[entry.transaction];
+			if (!info.tooOld && !transactionConflictStatus[entry.transaction]) {
+				const auto& point = points[entry.index()];
+				const std::size_t r = (reinterpret_cast<const char*>(point.pIndex) -
+					reinterpret_cast<const char*>(info.writeRanges.begin())) /
+					sizeof(*info.writeRanges.begin());
+				const uint32_t end = static_cast<uint32_t>(info.writeRanges[r].second);
+				if (entry.index() < end) {
+					if (pending != endWrites && entry.index() <= readWriteBegins[pending].transaction) {
+						readWriteBegins[pending].transaction =
+							std::max(readWriteBegins[pending].transaction, end);
+					} else {
+						if (pending != endWrites) nextBegin[pending] = w;
+						pending = w;
+						entry.transaction = end;
+						nextBegin[w] = endWrites;
+						if (preparation.firstAccepted == endWrites) preparation.firstAccepted = w;
+					}
+				}
+			}
+			w = next;
+		}
+	}
+
+	enum class Step : uint8_t {
+		Inspect, Route, InspectRight, CompareRight, Search, CompareSearch,
+		SearchReady, Previous, InspectPrevious, Insert, Scan, CompareEnd, Erase,
+		KeyMore, Done
+	};
+	struct WriteTask {
+		WriteCursor cursor;
+		std::pair<StringRef, StringRef> write;
+		LeafBlock* anchor = nullptr;
+		LeafBlock* scan = nullptr;
+		const KeyBlockHeader* keyBlock = nullptr;
+		std::size_t keyOffset = 0, keyLeft = 0;
+		std::size_t lo = 0, hi = 0, rank = 0, scanRank = 0;
+		uint64_t mutation = 0;
+		Version cutoff = 0;
+		uint32_t group = 0, representative = 0, entry = 0;
+		Step step = Step::Done, afterKey = Step::Done;
+		bool found = false, owned = false, reserved = false, checkedInput = false;
+	};
+	struct Group {
+		std::array<WriteTask, TaskCapacity> tasks;
+		uint32_t count = 0, first = 0;
+	};
+	std::array<Group, 2> groups;
+	uint32_t nextGroup = 0;
+	auto hintBytes = [](const void* address, std::size_t length) {
+		if (length == 0) return;
+		const auto* bytes = static_cast<const char*>(address);
+		__builtin_prefetch(bytes);
+		const std::size_t first = 64 - (reinterpret_cast<std::uintptr_t>(bytes) & 63);
+		for (std::size_t off = first; off < length; off += 64) __builtin_prefetch(bytes + off);
+	};
+	auto hintLeaf = [&](const LeafBlock* leaf) {
+		if (leaf != nullptr) hintBytes(leaf, BlockSize);
+	};
+	auto setInput = [&](WriteTask& t) {
+		const auto& entry = readWriteBegins[t.entry];
+		t.write = {points[entry.index()].key, points[entry.transaction].key};
+		hintBytes(t.write.first.begin(), t.write.first.size());
+		hintBytes(t.write.second.begin(), t.write.second.size());
+		t.reserved = false;
+		t.checkedInput = false;
+	};
+	auto resetSearch = [&](WriteTask& t) {
+		t.representative = resolveWriteGroup(t.group);
+		const auto& destination = writeLeaves[t.representative];
+		t.anchor = destination.leaf != nullptr ? destination.leaf : rightmostLeaf_;
+		t.cursor = {t.anchor, destination.splitCandidate, writeLeavesSplitEpoch_,
+			destination.leaf != nullptr && destination.needsRightCheck()};
+		t.mutation = writePreparation_[t.representative].mutation;
+		t.cutoff = reclaimCV_;
+		t.lo = 0;
+		t.found = false;
+		t.step = Step::Inspect;
+		hintLeaf(t.cursor.leaf);
+	};
+	auto fill = [&](Group& g) {
+		g.count = g.first = 0;
+		while (g.count < TaskCapacity && nextGroup < writeLeaves.size()) {
+			const uint32_t index = nextGroup++;
+			if (writePreparation_[index].firstAccepted == endWrites) continue;
+			auto& t = g.tasks[g.count++];
+			t = WriteTask{};
+			t.group = index;
+			t.entry = writePreparation_[index].firstAccepted;
+			setInput(t);
+			resetSearch(t);
+		}
+	};
+	// Hint one block of stored key bytes without following a cold link.
+	// A linked-block header is hinted now and dereferenced on a later pass.
+	auto hintKeyChunk = [&](WriteTask& t) {
+		const std::size_t bytes = std::min(t.keyLeft, BlockSize - t.keyOffset);
+		hintBytes(reinterpret_cast<const char*>(t.keyBlock) + t.keyOffset, bytes);
+		t.keyLeft -= bytes;
+		if (t.keyLeft != 0) {
+			hintBytes(t.keyBlock, sizeof(KeyBlockHeader));
+			t.step = Step::KeyMore;
+		} else {
+			t.step = t.afterKey;
+		}
+	};
+	auto hintKey = [&](WriteTask& t, const RangeRef& range, bool wholeRange, Step after) {
+		t.keyBlock = range.firstBlock;
+		t.keyOffset = range.keyOffset;
+		t.keyLeft = wholeRange ? std::max<std::size_t>(range.beginLength,
+			std::size_t(range.endStart) + range.endLength) : range.beginLength;
+		t.afterKey = after;
+		if (t.keyLeft == 0) { t.step = after; return; }
+		hintKeyChunk(t);
+	};
+	auto finishInterval = [&](WriteTask& t) {
+		t.entry = nextBegin[t.entry];
+		if (t.entry >= writeLeaves[t.group].end()) {
+			t.step = Step::Done;
+			return;
+		}
+		// rank identifies the insertion or its right exterior, both <= the
+		// next accepted begin. Search only the remaining suffix of this leaf.
+		t.lo = t.rank;
+		t.found = false;
+		t.step = Step::Inspect;
+		setInput(t);
+	};
+	auto advance = [&](WriteTask& t, bool head) {
+		if (t.step == Step::Done) return;
+		// Speculative state is checked using batch metadata before dereferencing
+		// a saved leaf/key pointer. No generation load from a potentially reused block.
+		if (!t.owned) {
+			const uint32_t representative = resolveWriteGroup(t.group);
+			const auto& d = writeLeaves[representative];
+			const LeafBlock* anchor = d.leaf != nullptr ? d.leaf : rightmostLeaf_;
+			if (representative != t.representative || anchor != t.anchor ||
+				writePreparation_[representative].mutation != t.mutation || reclaimCV_ != t.cutoff) {
+				resetSearch(t);
+				return;
+			}
+		}
+		struct CursorGuard {
+			TempConflictBTree& tree;
+			~CursorGuard() { tree.activeWriteCursor_ = nullptr; }
+		} guard{*this};
+		assert(activeWriteCursor_ == nullptr);
+		if (head) {
+			t.owned = true;
+			activeWriteCursor_ = &t.cursor;
+			if (!t.checkedInput) {
+				t.checkedInput = true;
+				if (t.write.first.compare(t.write.second) >= 0) {
+					// No insertion happened; retain the previous lower bound.
+					t.rank = t.lo;
+					finishInterval(t);
+					return;
+				}
+			}
+			if (!t.reserved) {
+				LeafBlock* before = t.cursor.leaf;
+				const Version cutoff = reclaimCV_;
+				reserveWrite(t.write);
+				t.reserved = true;
+				if (t.cursor.leaf == nullptr) t.cursor.leaf = rightmostLeaf_;
+				if (before != t.cursor.leaf || cutoff != reclaimCV_) {
+					t.lo = 0;
+					t.found = false;
+					t.step = Step::Inspect;
+					hintLeaf(t.cursor.leaf);
+					return;
+				}
+			}
+		}
+		auto* leaf = t.cursor.leaf;
+		switch (t.step) {
+		case Step::Inspect:
+			if (leaf == nullptr) {
+				t.rank = 0;
+				t.found = false;
+				t.step = Step::SearchReady;
+				break;
+			}
+			if (leaf->parent() != nullptr) hintBytes(leaf->parent(), BlockSize);
+			// Cleanup is a mutation, so only the head task may perform it.
+			if (!head && (cleanLeafCV_ != reclaimCV_ || leaf->lastCleanReadBatch != readBatch_)) break;
+			if (head && cleanExpired(leaf)) t.lo = 0;
+			if (t.cursor.rightCheckRequired) {
+				if (head) t.step = Step::Route;
+			} else {
+				t.hi = leaf->header.count;
+				t.step = Step::Search;
+			}
+			break;
+		case Step::Route:
+			t.scan = leaf->right;
+			hintLeaf(t.scan);
+			t.step = Step::InspectRight;
+			break;
+		case Step::InspectRight:
+			if (t.scan == nullptr) {
+				t.hi = leaf->header.count;
+				t.step = Step::Search;
+				break;
+			}
+			t.scanRank = 0;
+			while (t.scanRank < t.scan->header.count &&
+				t.scan->cv[t.scan->order[t.scanRank]] <= reclaimCV_) ++t.scanRank;
+			if (t.scanRank == t.scan->header.count) {
+				t.scan = t.scan->right;
+				hintLeaf(t.scan);
+			} else {
+				hintKey(t, t.scan->ranges[t.scan->order[t.scanRank]], false, Step::CompareRight);
+			}
+			break;
+		case Step::CompareRight:
+			if (keyStore_.compareBegin(t.write.first, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
+				t.hi = leaf->header.count;
+				t.step = Step::Search;
+			} else {
+				t.cursor.leaf = t.scan;
+				if (leaf->header.count == 0) removeIfEmpty(&leaf->header);
+				cleanExpired(t.cursor.leaf);
+				t.cursor.splitEpoch = writeSplitEpoch_ - 1;
+				t.lo = 0;
+				t.step = Step::Route;
+			}
+			break;
+		case Step::Search:
+			if (t.lo == t.hi) {
+				t.rank = t.lo;
+				t.found = false;
+				t.step = Step::SearchReady;
+			} else {
+				assert(t.lo < t.hi);
+				t.rank = t.lo + (t.hi - t.lo) / 2;
+				hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch);
+			}
+			break;
+		case Step::CompareSearch: {
+			const int compare = keyStore_.compareBegin(t.write.first, leaf->ranges[leaf->order[t.rank]]);
+			if (compare == 0) {
+				t.found = true;
+				t.step = Step::SearchReady;
+			} else {
+				if (compare < 0) t.hi = t.rank; else t.lo = t.rank + 1;
+				// Issue the next dependent hint in this pass, consume on the next.
+				if (t.lo < t.hi) {
+					t.rank = t.lo + (t.hi - t.lo) / 2;
+					hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch);
+				} else {
+					t.rank = t.lo;
+					t.found = false;
+					t.step = Step::SearchReady;
+				}
+			}
+			break;
+		}
+		case Step::SearchReady:
+			if (!head) break;
+			prepareWriteSplit(t.cursor, t.rank, t.found, cv);
+			t.step = Step::Previous;
+			break;
+		case Step::Previous:
+			if (t.cursor.leaf == nullptr || t.found) {
+				t.step = Step::Insert;
+			} else if (t.rank > 0) {
+				t.scan = t.cursor.leaf;
+				t.scanRank = t.rank - 1;
+				const auto slot = t.scan->order[t.scanRank];
+				if (t.scan->cv[slot] > reclaimCV_) hintKey(t, t.scan->ranges[slot], true, Step::Insert);
+				else t.step = Step::Insert;
+			} else {
+				t.scan = t.cursor.leaf->left;
+				hintLeaf(t.scan);
+				t.step = Step::InspectPrevious;
+			}
+			break;
+		case Step::InspectPrevious:
+			if (t.scan == nullptr) { t.step = Step::Insert; break; }
+			if (t.scan->header.count == 0) {
+				t.scan = t.scan->left;
+				hintLeaf(t.scan);
+			} else {
+				t.scanRank = t.scan->header.count - 1;
+				const auto slot = t.scan->order[t.scanRank];
+				if (t.scan->cv[slot] > reclaimCV_) hintKey(t, t.scan->ranges[slot], true, Step::Insert);
+				else t.step = Step::Insert;
+			}
+			break;
+		case Step::Insert: {
+			auto range = keyStore_.appendRange(t.write.first, t.write.second, cv);
+			assert(range.has_value());
+			if (t.cursor.leaf == nullptr) {
+				t.cursor.leaf = createRootLeaf(cv);
+				insertAt(t.rank, *range, cv, t.cursor.leaf);
+				finishInterval(t);
+			} else if (insertWithLeftExterior(t.write, *range, cv, t.found, t.cursor.leaf, t.rank)) {
+				finishInterval(t);
+			} else {
+				t.scan = t.cursor.leaf;
+				t.scanRank = t.rank + 1;
+				t.step = Step::Scan;
+			}
+			break;
+		}
+		case Step::Scan:
+			if (t.scan == nullptr) { finishInterval(t); break; }
+			if (t.scanRank >= t.scan->header.count) {
+				t.scan = t.scan->right;
+				t.scanRank = 0;
+				hintLeaf(t.scan);
+			} else {
+				const auto slot = t.scan->order[t.scanRank];
+				if (t.scan->cv[slot] > reclaimCV_) hintKey(t, t.scan->ranges[slot], true, Step::CompareEnd);
+				else {
+					hintLeaf(t.scan->right);
+					t.step = Step::Erase;
+				}
+			}
+			break;
+		case Step::CompareEnd:
+			if (keyStore_.compareEnd(t.write.second, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
+				preserveRightExterior(t.write.second, t.scan, t.scanRank);
+				finishInterval(t);
+			} else {
+				hintLeaf(t.scan->right);
+				t.step = Step::Erase;
+			}
+			break;
+		case Step::Erase:
+			eraseAt(t.scanRank, t.scan);
+			hintLeaf(t.scan);
+			t.step = Step::Scan;
+			break;
+		case Step::KeyMore:
+			t.keyBlock = t.keyBlock->nextBlock;
+			assert(t.keyBlock != nullptr);
+			t.keyOffset = sizeof(KeyBlockHeader);
+			hintKeyChunk(t);
+			break;
+		case Step::Done: break;
+		}
+	};
+
+	fill(groups[0]);
+	fill(groups[1]);
+	uint32_t oldest = 0;
+	while (groups[oldest].count != 0) {
+		// One stage per task per pass; only the oldest unfinished task mutates.
+		for (unsigned which = 0; which < 2; ++which) {
+			auto& group = groups[oldest ^ which];
+			for (uint32_t i = group.first; i < group.count; ++i) {
+				advance(group.tasks[i], which == 0 && i == group.first);
+				if (i == group.first && group.tasks[i].step == Step::Done) ++group.first;
+			}
+		}
+		if (groups[oldest].first == groups[oldest].count) {
+			// A has completed: hint C into its slot, then alternate B and C.
+			fill(groups[oldest]);
+			oldest ^= 1;
+		}
+	}
+}
+
+void TempConflictBTree::noteWriteLeafMutation(LeafBlock* leaf) {
+	if (!writePreparation_.empty() && leaf->firstWrite != UINT32_MAX) {
+		++writePreparation_[leaf->firstWrite].mutation;
+	}
+}
+
+void TempConflictBTree::addWritesSequential(
 		const std::vector<KeyInfo>& points,
 		TransactionInfo* const* transactionInfo,
 		const bool* transactionConflictStatus,
@@ -158,6 +566,7 @@ void TempConflictBTree::clearWriteDestinations() {
 		}
 	}
 	writeDestinationsActive_ = false;
+	writePreparation_.clear();
 }
 void TempConflictBTree::redirectWriteLeaf(LeafBlock* leaf, LeafBlock* replacement) {
 	assert(leaf != replacement);
@@ -168,6 +577,7 @@ void TempConflictBTree::redirectWriteLeaf(LeafBlock* leaf, LeafBlock* replacemen
 		activeWriteCursor_->rightCheckRequired = true;
 	}
 	if (!writeDestinationsActive_ || leaf->firstWrite == UINT32_MAX) return;
+	noteWriteLeafMutation(leaf);
 	const uint32_t source = leaf->firstWrite;
 	assert(nextOther[writeLeaves[source].firstWrite] == source);
 	leaf->firstWrite = UINT32_MAX;
@@ -175,6 +585,7 @@ void TempConflictBTree::redirectWriteLeaf(LeafBlock* leaf, LeafBlock* replacemen
 	group.splitCandidate = nullptr;
 	group.requireRightCheck();
 	if (replacement != nullptr && replacement->firstWrite != UINT32_MAX) {
+		noteWriteLeafMutation(replacement);
 		writeLeaves[replacement->firstWrite].requireRightCheck();
 		nextOther[group.firstWrite] = replacement->firstWrite;
 		group.leaf = nullptr;
@@ -238,16 +649,7 @@ uint32_t TempConflictBTree::emitWriteLeaf(uint64_t ticket) {
 	}
 	return opEnd;
 }
-void TempConflictBTree::addWrite(
-		WriteCursor& cursor,
-		const std::pair<StringRef, StringRef>& write,
-		Version cv) {
-	assert(activeWriteCursor_ == nullptr);
-	activeWriteCursor_ = &cursor;
-	struct CursorGuard {
-		TempConflictBTree& tree;
-		~CursorGuard() { tree.activeWriteCursor_ = nullptr; }
-	} cursorGuard{*this};
+void TempConflictBTree::reserveWrite(const std::pair<StringRef, StringRef>& write) {
 	// Reserve before using the cursor: reclamation can release its leaf.
 	constexpr std::size_t MinWriteBlocks = 35;
 	const std::size_t keyLength = std::max({maxKeyLength_,
@@ -261,35 +663,12 @@ void TempConflictBTree::addWrite(
 		throw std::length_error("TempConflictBTree: the pool cannot hold one write");
 	}
 	maxKeyLength_ = keyLength;
+}
+
+void TempConflictBTree::prepareWriteSplit(WriteCursor& cursor, std::size_t& rank, bool found, Version cv) {
 	LeafBlock*& leaf = cursor.leaf;
-	if (leaf == nullptr) {
-		leaf = rightmostLeaf_;
-		cursor.splitCandidate = nullptr;
-		cursor.splitEpoch = writeSplitEpoch_ - 1;
-		cursor.rightCheckRequired = false; // A right-end anchor has no right boundary to cross.
-	}
-	std::size_t rank = 0;
 	BNodeHeader* nodeNeedsSplit = nullptr;
-	bool found = false;
 	if (leaf != nullptr) {
-		cleanExpired(leaf);
-		// The original group is bounded by the descent's partition. Only a
-		// split, redirection or ambiguous expired boundary requires this walk.
-		if (cursor.rightCheckRequired) {
-			for (LeafBlock* right = leaf->right; right != nullptr; right = right->right) {
-				std::size_t first = 0;
-				while (first < right->header.count &&
-					   right->cv[right->order[first]] <= reclaimCV_) ++first;
-				if (first == right->header.count) continue;
-				if (keyStore_.compareBegin(write.first, right->ranges[right->order[first]]) < 0) break;
-				LeafBlock* previous = leaf;
-				leaf = right;
-				if (previous->header.count == 0) removeIfEmpty(&previous->header);
-				cleanExpired(leaf);
-				cursor.splitEpoch = writeSplitEpoch_ - 1;
-			}
-		}
-		found = nodeStore_.findKey(write.first, rank, leaf);
 		if (needsSplit(leaf)) {
 			nodeNeedsSplit = &leaf->header;
 		} else if (cursor.splitEpoch == writeSplitEpoch_) {
@@ -313,6 +692,50 @@ void TempConflictBTree::addWrite(
 	if (nodeNeedsSplit != nullptr) {
 		split(nodeNeedsSplit, leaf, rank, found, cv);
 	}
+}
+
+void TempConflictBTree::addWrite(
+		WriteCursor& cursor,
+		const std::pair<StringRef, StringRef>& write,
+		Version cv) {
+	assert(activeWriteCursor_ == nullptr);
+	activeWriteCursor_ = &cursor;
+	struct CursorGuard {
+		TempConflictBTree& tree;
+		~CursorGuard() { tree.activeWriteCursor_ = nullptr; }
+	} cursorGuard{*this};
+	reserveWrite(write);
+	LeafBlock*& leaf = cursor.leaf;
+	if (leaf == nullptr) {
+		leaf = rightmostLeaf_;
+		cursor.splitCandidate = nullptr;
+		cursor.splitEpoch = writeSplitEpoch_ - 1;
+		cursor.rightCheckRequired = false; // A right-end anchor has no right boundary to cross.
+	}
+	std::size_t rank = 0;
+	bool found = false;
+	if (leaf != nullptr) {
+		cleanExpired(leaf);
+		// The original group is bounded by the descent's partition. Only a
+		// split, redirection or ambiguous expired boundary requires this walk.
+		if (cursor.rightCheckRequired) {
+			for (LeafBlock* right = leaf->right; right != nullptr; right = right->right) {
+				std::size_t first = 0;
+				while (first < right->header.count &&
+					   right->cv[right->order[first]] <= reclaimCV_) ++first;
+				if (first == right->header.count) continue;
+				if (keyStore_.compareBegin(write.first, right->ranges[right->order[first]]) < 0) break;
+				LeafBlock* previous = leaf;
+				leaf = right;
+				if (previous->header.count == 0) removeIfEmpty(&previous->header);
+				cleanExpired(leaf);
+				cursor.splitEpoch = writeSplitEpoch_ - 1;
+			}
+		}
+		found = nodeStore_.findKey(write.first, rank, leaf);
+	}
+	prepareWriteSplit(cursor, rank, found, cv);
+
 	auto range = keyStore_.appendRange(write.first, write.second, cv);
 	assert(range.has_value());
 	if (leaf == nullptr) {
@@ -353,6 +776,7 @@ bool TempConflictBTree::insertWithLeftExterior(
 		const Version oldCV = previousLeaf->cv[slot];
 		auto left = keyStore_.appendRange(oldRef, write.first, oldCV);
 		assert(left.has_value());
+		noteWriteLeafMutation(previousLeaf);
 		previousLeaf->ranges[slot] = *left;
 		if (keyStore_.compareEnd(write.second, oldRef) < 0) {
 			// Disjointness puts every later live entry beyond the old range.
@@ -408,6 +832,7 @@ void TempConflictBTree::preserveRightExterior(
 	}
 	auto right = keyStore_.appendRange(end, oldRef, leaf->cv[slot]);
 	assert(right.has_value());
+	noteWriteLeafMutation(leaf);
 	leaf->ranges[slot] = *right;
 	if (rank == 0) {
 		// The first key of the leaf has changed; its CV has not.
@@ -489,6 +914,7 @@ void  TempConflictBTree::insertAt(
 		Version cv,
 		LeafBlock*& leaf) {
 	const bool splitBefore = needsSplit(leaf);
+	noteWriteLeafMutation(leaf);
 	nodeStore_.insertAt(rank, range, cv, leaf);
 	if (cv <= reclaimCV_) leaf->lastCleanReadBatch = readBatch_ - 1;
 	const bool splitAfter = needsSplit(leaf);
@@ -521,6 +947,7 @@ void TempConflictBTree::normalizeRoot() {
 
 void  TempConflictBTree::eraseAt(std::size_t& rank, LeafBlock*& leaf) {
 	bool splitBefore=needsSplit(leaf);
+	noteWriteLeafMutation(leaf);
 	nodeStore_.eraseAt(rank,leaf);
 	propagateUpdates(leaf, splitBefore && !needsSplit(leaf) ? -1 : 0,
 					 rank == 0 && leaf->header.count > 0, false);
@@ -835,6 +1262,7 @@ bool TempConflictBTree::cleanExpired(LeafBlock* leaf) {
 	while (rank < leaf->header.count) {
 		const auto slot = leaf->order[rank];
 		if (leaf->cv[slot] <= reclaimCV_) {
+			noteWriteLeafMutation(leaf);
 			nodeStore_.eraseAt(rank, leaf);
 			deleted = true;
 		} else {
@@ -971,6 +1399,7 @@ LeafBlock* TempConflictBTree::splitLeaf(
 		bool found,
 		Version cv) {
 	LeafBlock* oldNode = leaf;
+	noteWriteLeafMutation(oldNode);
 	// A local split can place later begins from this prepared group on the
 	// new right half. Unrelated leaves and internal splits do not invalidate it.
 	if (activeWriteCursor_ != nullptr && activeWriteCursor_->leaf == oldNode) {

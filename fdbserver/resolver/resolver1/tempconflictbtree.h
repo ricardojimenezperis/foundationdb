@@ -153,6 +153,12 @@ private:
 	};
 	static_assert(sizeof(void*) != 8 || sizeof(WriteLeaf) == 24);
 	std::vector<WriteLeaf> writeLeaves;
+	struct WritePreparation {
+		uint64_t mutation = 0;
+		uint32_t firstAccepted = UINT32_MAX;
+	};
+	// Write-phase scratch only; preserve the read scheduler's 24-byte records.
+	std::vector<WritePreparation> writePreparation_;
 	uint32_t firstWriteBegin_ = 0;
 	struct BufferedWriteLeaf {
 		WriteLeaf group;
@@ -173,6 +179,13 @@ private:
 	uint32_t resolveWriteGroup(uint32_t group);
 	void redirectWriteLeaf(LeafBlock* leaf, LeafBlock* replacement);
 	void redirectWriteSubtree(BNodeHeader* node, LeafBlock* replacement);
+	void noteWriteLeafMutation(LeafBlock* leaf);
+	struct WriteCursor;
+	void addWritesSequential(const std::vector<KeyInfo>& points,
+		TransactionInfo* const* transactionInfo,
+		const bool* transactionConflictStatus, Version cv);
+	void reserveWrite(const std::pair<StringRef, StringRef>& write);
+	void prepareWriteSplit(WriteCursor& cursor, std::size_t& rank, bool found, Version cv);
 	// Split candidates remain reusable until split state or topology changes.
 	uint64_t writeSplitEpoch_ = 0;
 	uint64_t writeLeavesSplitEpoch_ = 0;
