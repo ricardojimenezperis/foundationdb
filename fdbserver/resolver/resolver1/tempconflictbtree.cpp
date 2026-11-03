@@ -96,6 +96,7 @@ void TempConflictBTree::addWrites(
 	struct Group {
 		std::array<WriteTask, TaskCapacity> tasks;
 		uint32_t count = 0, first = 0;
+		std::array<uint64_t, (TaskCapacity + 63) / 64> runnable{};
 	};
 	std::array<Group, 2> groups;
 	uint32_t nextGroup = 0;
@@ -107,7 +108,9 @@ void TempConflictBTree::addWrites(
 		for (std::size_t off = first; off < length; off += 64) __builtin_prefetch(bytes + off);
 	};
 	auto hintLeaf = [&](const LeafBlock* leaf) {
-		if (leaf != nullptr) hintBytes(leaf, BlockSize);
+		if (leaf == nullptr) return false;
+		hintBytes(leaf, BlockSize);
+		return true;
 	};
 	auto setInput = [&](WriteTask& t) {
 		const auto& entry = readWriteBegins[t.entry];
@@ -116,6 +119,7 @@ void TempConflictBTree::addWrites(
 		hintBytes(t.write.second.begin(), t.write.second.size());
 		t.reserved = false;
 		t.checkedInput = false;
+		return t.write.first.size() != 0 || t.write.second.size() != 0;
 	};
 	auto resetSearch = [&](WriteTask& t) {
 		t.representative = resolveWriteGroup(t.group);
@@ -132,9 +136,11 @@ void TempConflictBTree::addWrites(
 	};
 	auto fill = [&](Group& g) {
 		g.count = g.first = 0;
+		g.runnable.fill(0);
 		while (g.count < TaskCapacity && nextGroup < writeLeaves.size()) {
 			const uint32_t index = nextGroup++;
 			if (writePreparation_[index].firstAccepted == endWrites) continue;
+			g.runnable[g.count / 64] |= uint64_t{1} << (g.count % 64);
 			auto& t = g.tasks[g.count++];
 			t = WriteTask{};
 			t.group = index;
@@ -162,54 +168,74 @@ void TempConflictBTree::addWrites(
 		t.keyLeft = wholeRange ? std::max<std::size_t>(range.beginLength,
 			std::size_t(range.endStart) + range.endLength) : range.beginLength;
 		t.afterKey = after;
-		if (t.keyLeft == 0) { t.step = after; return; }
+		if (t.keyLeft == 0) { t.step = after; return false; }
 		hintKeyChunk(t);
+		return true;
 	};
 	auto finishInterval = [&](WriteTask& t) {
 		t.entry = nextBegin[t.entry];
 		if (t.entry >= writeLeaves[t.group].end()) {
 			t.step = Step::Done;
-			return;
+			return false;
 		}
 		// rank identifies the insertion or its right exterior, both <= the
 		// next accepted begin. Search only the remaining suffix of this leaf.
 		t.lo = t.rank;
 		t.found = false;
 		t.step = Step::Inspect;
-		setInput(t);
+		return setInput(t);
 	};
-	auto advance = [&](WriteTask& t, bool head) {
-		if (t.step == Step::Done) return;
-		// Speculative state is checked using batch metadata before dereferencing
-		// a saved leaf/key pointer. No generation load from a potentially reused block.
+	// A visit ends only after hinting its next dependency, parking, or finishing.
+	enum class Visit : uint8_t { Prefetched, Parked, Done };
+	auto prepareErase = [&](WriteTask& t) {
+		t.step = Step::Erase;
+		// eraseAt can hand the scan to a neighbour at the end of this leaf.
+		// Otherwise the next entry is in the already warm leaf.
+		if (t.scanRank + 1 < t.scan->header.count) return false;
+		if (t.scan->right != nullptr) return hintLeaf(t.scan->right);
+		return t.scan->header.count == 1 && hintLeaf(t.scan->left);
+	};
+	auto advance = [&](WriteTask& t, bool head) -> Visit {
+		assert(t.step != Step::Done);
+		assert(!t.owned || head);
+		// Check metadata before consuming a speculative pointer. A cached root
+		// stays valid until its parent changes; resolve only after a redirection.
 		if (!t.owned) {
-			const uint32_t representative = resolveWriteGroup(t.group);
+			const uint32_t representative =
+				nextOther[writeLeaves[t.representative].firstWrite] == t.representative
+				? t.representative : resolveWriteGroup(t.group);
 			const auto& d = writeLeaves[representative];
 			const LeafBlock* anchor = d.leaf != nullptr ? d.leaf : rightmostLeaf_;
 			if (representative != t.representative || anchor != t.anchor ||
 				writePreparation_[representative].mutation != t.mutation || reclaimCV_ != t.cutoff) {
+				// Do not repeatedly redo a search while older writes keep changing
+				// its destination. Park without dereferencing the saved pointers.
+				if (!head) return Visit::Parked;
 				resetSearch(t);
-				return;
+				if (t.cursor.leaf != nullptr) return Visit::Prefetched;
 			}
 		}
 		struct CursorGuard {
 			TempConflictBTree& tree;
-			~CursorGuard() { tree.activeWriteCursor_ = nullptr; }
-		} guard{*this};
+			bool head;
+			~CursorGuard() { if (head) tree.activeWriteCursor_ = nullptr; }
+		} guard{*this, head};
 		assert(activeWriteCursor_ == nullptr);
 		if (head) {
 			t.owned = true;
 			activeWriteCursor_ = &t.cursor;
-			if (!t.checkedInput) {
-				t.checkedInput = true;
-				if (t.write.first.compare(t.write.second) >= 0) {
-					// No insertion happened; retain the previous lower bound.
-					t.rank = t.lo;
-					finishInterval(t);
-					return;
+		}
+		for (;;) {
+			if (head && !t.reserved) {
+				if (!t.checkedInput) {
+					t.checkedInput = true;
+					if (t.write.first.compare(t.write.second) >= 0) {
+						t.rank = t.lo;
+						if (finishInterval(t)) return Visit::Prefetched;
+						if (t.step == Step::Done) return Visit::Done;
+						continue; // Empty input keys require no prefetch.
+					}
 				}
-			}
-			if (!t.reserved) {
 				LeafBlock* before = t.cursor.leaf;
 				const Version cutoff = reclaimCV_;
 				reserveWrite(t.write);
@@ -219,179 +245,178 @@ void TempConflictBTree::addWrites(
 					t.lo = 0;
 					t.found = false;
 					t.step = Step::Inspect;
-					hintLeaf(t.cursor.leaf);
-					return;
+					if (hintLeaf(t.cursor.leaf)) return Visit::Prefetched;
 				}
 			}
-		}
-		auto* leaf = t.cursor.leaf;
-		switch (t.step) {
-		case Step::Inspect:
-			if (leaf == nullptr) {
-				t.rank = 0;
-				t.found = false;
-				t.step = Step::SearchReady;
-				break;
-			}
-			if (leaf->parent() != nullptr) hintBytes(leaf->parent(), BlockSize);
-			// Cleanup is a mutation, so only the head task may perform it.
-			if (!head && (cleanLeafCV_ != reclaimCV_ || leaf->lastCleanReadBatch != readBatch_)) break;
-			if (head && cleanExpired(leaf)) t.lo = 0;
-			if (t.cursor.rightCheckRequired) {
-				if (head) t.step = Step::Route;
-			} else {
-				t.hi = leaf->header.count;
-				t.step = Step::Search;
-			}
-			break;
-		case Step::Route:
-			t.scan = leaf->right;
-			hintLeaf(t.scan);
-			t.step = Step::InspectRight;
-			break;
-		case Step::InspectRight:
-			if (t.scan == nullptr) {
-				t.hi = leaf->header.count;
-				t.step = Step::Search;
-				break;
-			}
-			t.scanRank = 0;
-			while (t.scanRank < t.scan->header.count &&
-				t.scan->cv[t.scan->order[t.scanRank]] <= reclaimCV_) ++t.scanRank;
-			if (t.scanRank == t.scan->header.count) {
-				t.scan = t.scan->right;
-				hintLeaf(t.scan);
-			} else {
-				hintKey(t, t.scan->ranges[t.scan->order[t.scanRank]], false, Step::CompareRight);
-			}
-			break;
-		case Step::CompareRight:
-			if (keyStore_.compareBegin(t.write.first, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
-				t.hi = leaf->header.count;
-				t.step = Step::Search;
-			} else {
-				t.cursor.leaf = t.scan;
-				if (leaf->header.count == 0) removeIfEmpty(&leaf->header);
-				cleanExpired(t.cursor.leaf);
-				t.cursor.splitEpoch = writeSplitEpoch_ - 1;
-				t.lo = 0;
-				t.step = Step::Route;
-			}
-			break;
-		case Step::Search:
-			if (t.lo == t.hi) {
-				t.rank = t.lo;
-				t.found = false;
-				t.step = Step::SearchReady;
-			} else {
-				assert(t.lo < t.hi);
-				t.rank = t.lo + (t.hi - t.lo) / 2;
-				hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch);
-			}
-			break;
-		case Step::CompareSearch: {
-			const int compare = keyStore_.compareBegin(t.write.first, leaf->ranges[leaf->order[t.rank]]);
-			if (compare == 0) {
-				t.found = true;
-				t.step = Step::SearchReady;
-			} else {
-				if (compare < 0) t.hi = t.rank; else t.lo = t.rank + 1;
-				// Issue the next dependent hint in this pass, consume on the next.
-				if (t.lo < t.hi) {
-					t.rank = t.lo + (t.hi - t.lo) / 2;
-					hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch);
+			auto* leaf = t.cursor.leaf;
+			switch (t.step) {
+			case Step::Inspect:
+				if (leaf == nullptr) {
+					t.rank = 0;
+					t.found = false;
+					t.step = Step::SearchReady;
+					continue;
+				}
+				// Park before emitting hints: a blocked task is not polled again.
+				if (!head && (cleanLeafCV_ != reclaimCV_ ||
+					leaf->lastCleanReadBatch != readBatch_ || t.cursor.rightCheckRequired)) {
+					return Visit::Parked;
+				}
+				if (leaf->parent() != nullptr) hintBytes(leaf->parent(), BlockSize);
+				if (head && cleanExpired(leaf)) t.lo = 0;
+				if (t.cursor.rightCheckRequired) {
+					t.step = Step::Route;
 				} else {
+					t.hi = leaf->header.count;
+					t.step = Step::Search;
+				}
+				continue;
+			case Step::Route:
+				t.scan = leaf->right;
+				t.step = Step::InspectRight;
+				if (hintLeaf(t.scan)) return Visit::Prefetched;
+				continue;
+			case Step::InspectRight:
+				if (t.scan == nullptr) {
+					t.hi = leaf->header.count;
+					t.step = Step::Search;
+					continue;
+				}
+				t.scanRank = 0;
+				while (t.scanRank < t.scan->header.count &&
+					t.scan->cv[t.scan->order[t.scanRank]] <= reclaimCV_) ++t.scanRank;
+				if (t.scanRank == t.scan->header.count) {
+					t.scan = t.scan->right;
+					if (hintLeaf(t.scan)) return Visit::Prefetched;
+				} else if (hintKey(t, t.scan->ranges[t.scan->order[t.scanRank]], false, Step::CompareRight)) {
+					return Visit::Prefetched;
+				}
+				continue;
+			case Step::CompareRight:
+				if (keyStore_.compareBegin(t.write.first, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
+					t.hi = leaf->header.count;
+					t.step = Step::Search;
+				} else {
+					t.cursor.leaf = t.scan;
+					if (leaf->header.count == 0) removeIfEmpty(&leaf->header);
+					cleanExpired(t.cursor.leaf);
+					t.cursor.splitEpoch = writeSplitEpoch_ - 1;
+					t.lo = 0;
+					t.step = Step::Route;
+				}
+				continue;
+			case Step::Search:
+				if (t.lo == t.hi) {
 					t.rank = t.lo;
 					t.found = false;
 					t.step = Step::SearchReady;
+				} else {
+					assert(t.lo < t.hi);
+					t.rank = t.lo + (t.hi - t.lo) / 2;
+					if (hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch)) {
+						return Visit::Prefetched;
+					}
 				}
+				continue;
+			case Step::CompareSearch: {
+				const int compare = keyStore_.compareBegin(t.write.first, leaf->ranges[leaf->order[t.rank]]);
+				if (compare == 0) {
+					t.found = true;
+					t.step = Step::SearchReady;
+				} else {
+					if (compare < 0) t.hi = t.rank; else t.lo = t.rank + 1;
+					t.step = Step::Search;
+				}
+				continue;
 			}
-			break;
-		}
-		case Step::SearchReady:
-			if (!head) break;
-			prepareWriteSplit(t.cursor, t.rank, t.found, cv);
-			t.step = Step::Previous;
-			break;
-		case Step::Previous:
-			if (t.cursor.leaf == nullptr || t.found) {
-				t.step = Step::Insert;
-			} else if (t.rank > 0) {
-				t.scan = t.cursor.leaf;
-				t.scanRank = t.rank - 1;
-				const auto slot = t.scan->order[t.scanRank];
-				if (t.scan->cv[slot] > reclaimCV_) hintKey(t, t.scan->ranges[slot], true, Step::Insert);
-				else t.step = Step::Insert;
-			} else {
-				t.scan = t.cursor.leaf->left;
-				hintLeaf(t.scan);
-				t.step = Step::InspectPrevious;
+			case Step::SearchReady:
+				if (!head) return Visit::Parked;
+				prepareWriteSplit(t.cursor, t.rank, t.found, cv);
+				t.step = Step::Previous;
+				continue;
+			case Step::Previous:
+				if (t.cursor.leaf == nullptr || t.found) {
+					t.step = Step::Insert;
+				} else if (t.rank > 0) {
+					t.scan = t.cursor.leaf;
+					t.scanRank = t.rank - 1;
+					const auto slot = t.scan->order[t.scanRank];
+					t.step = Step::Insert;
+					if (t.scan->cv[slot] > reclaimCV_ && hintKey(t, t.scan->ranges[slot], true, Step::Insert)) {
+						return Visit::Prefetched;
+					}
+				} else {
+					t.scan = t.cursor.leaf->left;
+					t.step = Step::InspectPrevious;
+					if (hintLeaf(t.scan)) return Visit::Prefetched;
+				}
+				continue;
+			case Step::InspectPrevious:
+				if (t.scan == nullptr) { t.step = Step::Insert; continue; }
+				if (t.scan->header.count == 0) {
+					t.scan = t.scan->left;
+					if (hintLeaf(t.scan)) return Visit::Prefetched;
+				} else {
+					t.scanRank = t.scan->header.count - 1;
+					const auto slot = t.scan->order[t.scanRank];
+					t.step = Step::Insert;
+					if (t.scan->cv[slot] > reclaimCV_ && hintKey(t, t.scan->ranges[slot], true, Step::Insert)) {
+						return Visit::Prefetched;
+					}
+				}
+				continue;
+			case Step::Insert: {
+				auto range = keyStore_.appendRange(t.write.first, t.write.second, cv);
+				assert(range.has_value());
+				if (t.cursor.leaf == nullptr) {
+					t.cursor.leaf = createRootLeaf(cv);
+					insertAt(t.rank, *range, cv, t.cursor.leaf);
+					if (finishInterval(t)) return Visit::Prefetched;
+				} else if (insertWithLeftExterior(t.write, *range, cv, t.found, t.cursor.leaf, t.rank)) {
+					if (finishInterval(t)) return Visit::Prefetched;
+				} else {
+					t.scan = t.cursor.leaf;
+					t.scanRank = t.rank + 1;
+					t.step = Step::Scan;
+				}
+				continue;
 			}
-			break;
-		case Step::InspectPrevious:
-			if (t.scan == nullptr) { t.step = Step::Insert; break; }
-			if (t.scan->header.count == 0) {
-				t.scan = t.scan->left;
-				hintLeaf(t.scan);
-			} else {
-				t.scanRank = t.scan->header.count - 1;
-				const auto slot = t.scan->order[t.scanRank];
-				if (t.scan->cv[slot] > reclaimCV_) hintKey(t, t.scan->ranges[slot], true, Step::Insert);
-				else t.step = Step::Insert;
-			}
-			break;
-		case Step::Insert: {
-			auto range = keyStore_.appendRange(t.write.first, t.write.second, cv);
-			assert(range.has_value());
-			if (t.cursor.leaf == nullptr) {
-				t.cursor.leaf = createRootLeaf(cv);
-				insertAt(t.rank, *range, cv, t.cursor.leaf);
-				finishInterval(t);
-			} else if (insertWithLeftExterior(t.write, *range, cv, t.found, t.cursor.leaf, t.rank)) {
-				finishInterval(t);
-			} else {
-				t.scan = t.cursor.leaf;
-				t.scanRank = t.rank + 1;
+			case Step::Scan:
+				if (t.scan == nullptr) {
+					if (finishInterval(t)) return Visit::Prefetched;
+					continue;
+				}
+				if (t.scanRank >= t.scan->header.count) {
+					t.scan = t.scan->right;
+					t.scanRank = 0;
+					if (hintLeaf(t.scan)) return Visit::Prefetched;
+				} else {
+					const auto slot = t.scan->order[t.scanRank];
+					if (t.scan->cv[slot] > reclaimCV_) {
+						if (hintKey(t, t.scan->ranges[slot], true, Step::CompareEnd)) return Visit::Prefetched;
+					} else if (prepareErase(t)) return Visit::Prefetched;
+				}
+				continue;
+			case Step::CompareEnd:
+				if (keyStore_.compareEnd(t.write.second, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
+					preserveRightExterior(t.write.second, t.scan, t.scanRank);
+					if (finishInterval(t)) return Visit::Prefetched;
+				} else if (prepareErase(t)) return Visit::Prefetched;
+				continue;
+			case Step::Erase:
+				eraseAt(t.scanRank, t.scan);
+				// Its possible successor was hinted before eraseAt. The current
+				// leaf needs no second full-block prefetch after deleting one entry.
 				t.step = Step::Scan;
+				continue;
+			case Step::KeyMore:
+				t.keyBlock = t.keyBlock->nextBlock;
+				assert(t.keyBlock != nullptr);
+				t.keyOffset = sizeof(KeyBlockHeader);
+				hintKeyChunk(t);
+				return Visit::Prefetched;
+			case Step::Done: return Visit::Done;
 			}
-			break;
-		}
-		case Step::Scan:
-			if (t.scan == nullptr) { finishInterval(t); break; }
-			if (t.scanRank >= t.scan->header.count) {
-				t.scan = t.scan->right;
-				t.scanRank = 0;
-				hintLeaf(t.scan);
-			} else {
-				const auto slot = t.scan->order[t.scanRank];
-				if (t.scan->cv[slot] > reclaimCV_) hintKey(t, t.scan->ranges[slot], true, Step::CompareEnd);
-				else {
-					hintLeaf(t.scan->right);
-					t.step = Step::Erase;
-				}
-			}
-			break;
-		case Step::CompareEnd:
-			if (keyStore_.compareEnd(t.write.second, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
-				preserveRightExterior(t.write.second, t.scan, t.scanRank);
-				finishInterval(t);
-			} else {
-				hintLeaf(t.scan->right);
-				t.step = Step::Erase;
-			}
-			break;
-		case Step::Erase:
-			eraseAt(t.scanRank, t.scan);
-			hintLeaf(t.scan);
-			t.step = Step::Scan;
-			break;
-		case Step::KeyMore:
-			t.keyBlock = t.keyBlock->nextBlock;
-			assert(t.keyBlock != nullptr);
-			t.keyOffset = sizeof(KeyBlockHeader);
-			hintKeyChunk(t);
-			break;
-		case Step::Done: break;
 		}
 	};
 
@@ -399,16 +424,29 @@ void TempConflictBTree::addWrites(
 	fill(groups[1]);
 	uint32_t oldest = 0;
 	while (groups[oldest].count != 0) {
-		// One stage per task per pass; only the oldest unfinished task mutates.
+		auto& headGroup = groups[oldest];
+		// This is the only wake-up of an otherwise parked task. Validation
+		// occurs inside advance, before any saved leaf/key pointer is consumed.
+		headGroup.runnable[headGroup.first / 64] |= uint64_t{1} << (headGroup.first % 64);
 		for (unsigned which = 0; which < 2; ++which) {
 			auto& group = groups[oldest ^ which];
-			for (uint32_t i = group.first; i < group.count; ++i) {
-				advance(group.tasks[i], which == 0 && i == group.first);
-				if (i == group.first && group.tasks[i].step == Step::Done) ++group.first;
+			for (std::size_t word = 0; word < group.runnable.size(); ++word) {
+				uint64_t pendingTasks = group.runnable[word];
+				while (pendingTasks != 0) {
+					const unsigned bit = __builtin_ctzll(pendingTasks);
+					const uint64_t mask = uint64_t{1} << bit;
+					pendingTasks &= pendingTasks - 1;
+					const uint32_t i = static_cast<uint32_t>(64 * word + bit);
+					const Visit visit = advance(group.tasks[i], which == 0 && i == group.first);
+					if (visit != Visit::Prefetched) group.runnable[word] &= ~mask;
+					if (visit == Visit::Done) {
+						assert(which == 0 && i == group.first);
+						++group.first;
+					}
+				}
 			}
 		}
 		if (groups[oldest].first == groups[oldest].count) {
-			// A has completed: hint C into its slot, then alternate B and C.
 			fill(groups[oldest]);
 			oldest ^= 1;
 		}
