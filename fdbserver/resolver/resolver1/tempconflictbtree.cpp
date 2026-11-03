@@ -6,8 +6,11 @@
 #ifndef RESOLVER1_WRITE_LG
 #define RESOLVER1_WRITE_LG 8
 #endif
-#ifndef RESOLVER1_WRITE_GROUPS
-#define RESOLVER1_WRITE_GROUPS 2
+#ifndef RESOLVER1_WRITE_PENDING
+#define RESOLVER1_WRITE_PENDING (4 * RESOLVER1_WRITE_LG)
+#endif
+#ifdef RESOLVER1_WRITE_GROUPS
+#error "v3.10 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
 #endif
 
 TempConflictBTree::TempConflictBTree(std::size_t budget)
@@ -22,10 +25,11 @@ void TempConflictBTree::addWrites(
 		const bool* transactionConflictStatus,
 		Version cv) {
 	constexpr uint32_t LG = RESOLVER1_WRITE_LG;
-	constexpr uint32_t TaskCapacity = LG == 0 ? 1 : LG;
-	constexpr uint32_t GroupCount = RESOLVER1_WRITE_GROUPS;
-	static_assert(LG <= 256, "write task groups must be bounded");
-	static_assert(GroupCount == 2 || GroupCount == 3, "use two or three write groups");
+	constexpr uint32_t RunnableTarget = LG == 0 ? 1 : 2 * LG;
+	constexpr uint32_t TaskCapacity = LG == 0 ? 1 : RESOLVER1_WRITE_PENDING;
+	static_assert(LG <= 256, "write service quantum must be bounded");
+	static_assert(TaskCapacity >= RunnableTarget && TaskCapacity <= 4096,
+		"pending capacity must cover 2G runnable tasks and be bounded");
 	if constexpr (LG == 0) {
 		addWritesSequential(points, transactionInfo, transactionConflictStatus, cv);
 		return;
@@ -97,14 +101,23 @@ void TempConflictBTree::addWrites(
 		uint32_t group = 0, representative = 0, entry = 0;
 		Step step = Step::Done, afterKey = Step::Done, afterPrepare = Step::Inspect;
 		bool found = false, owned = false;
+		bool runnable = false;
 	};
-	struct Group {
-		std::array<WriteTask, TaskCapacity> tasks;
-		uint32_t count = 0, first = 0;
-		std::array<uint64_t, (TaskCapacity + 63) / 64> runnable{};
-	};
-	std::array<Group, GroupCount> groups;
+	// Storage order is mutation order. Parked tasks retain their slot but do
+	// not appear in ready. Neither queue allocates or moves a live cursor.
+	std::array<WriteTask, TaskCapacity> tasks;
+	std::array<uint32_t, RunnableTarget> ready;
+	uint32_t firstTask = 0, pendingTasks = 0;
+	uint32_t readyFirst = 0, readyCount = 0;
 	uint32_t nextGroup = 0;
+	auto enqueue = [&](uint32_t slot) {
+		assert(readyCount < RunnableTarget && !tasks[slot].runnable);
+		uint32_t tail = readyFirst + readyCount;
+		if (tail >= RunnableTarget) tail -= RunnableTarget;
+		ready[tail] = slot;
+		++readyCount;
+		tasks[slot].runnable = true;
+	};
 	auto hintBytes = [](const void* address, std::size_t length) {
 		if (length == 0) return;
 		const auto* bytes = static_cast<const char*>(address);
@@ -143,19 +156,21 @@ void TempConflictBTree::addWrites(
 		t.step = Step::Inspect;
 		hintLeaf(t.cursor.leaf);
 	};
-	auto fill = [&](Group& g) {
-		g.count = g.first = 0;
-		g.runnable.fill(0);
-		while (g.count < TaskCapacity && nextGroup < writeLeaves.size()) {
+	auto fill = [&]() {
+		while (readyCount < RunnableTarget && pendingTasks < TaskCapacity &&
+			nextGroup < writeLeaves.size()) {
 			const uint32_t index = nextGroup++;
 			if (writePreparation_[index].firstAccepted == endWrites) continue;
-			g.runnable[g.count / 64] |= uint64_t{1} << (g.count % 64);
-			auto& t = g.tasks[g.count++];
+			uint32_t slot = firstTask + pendingTasks;
+			if (slot >= TaskCapacity) slot -= TaskCapacity;
+			auto& t = tasks[slot];
 			t = WriteTask{};
 			t.group = index;
 			t.entry = writePreparation_[index].firstAccepted;
 			setInput(t);
 			resetSearch(t);
+			++pendingTasks;
+			enqueue(slot);
 		}
 	};
 	// Hint one block of stored key bytes without following a cold link.
@@ -448,47 +463,36 @@ void TempConflictBTree::addWrites(
 		}
 	};
 
-	for (auto& group : groups) fill(group);
-	uint32_t oldest = 0;
-	while (groups[oldest].count != 0) {
-		auto& headGroup = groups[oldest];
-		// This is the only wake-up of an otherwise parked task. Validation
-		// occurs inside advance, before any saved leaf/key pointer is consumed.
-		headGroup.runnable[headGroup.first / 64] |= uint64_t{1} << (headGroup.first % 64);
-		for (unsigned which = 0; which < 2; ++which) {
-			// The successor's leaves were hinted when its slot was filled.
-			// Let half of the older group's tasks finish before consuming them.
-			// Parked searches therefore cannot collapse the lead to one visit.
-			if constexpr (GroupCount == 2) {
-				if (which != 0 && headGroup.first < (headGroup.count + 1) / 2) break;
-			}
-			// With three slots only the oldest two execute. The third slot
-			// is leaf-prefetched standby; rotation admits it after the oldest
-			// group has completed, without polling or touching its leaves.
-			const uint32_t slot = oldest + which < GroupCount
-				? oldest + which : oldest + which - GroupCount;
-			auto& group = groups[slot];
-			for (std::size_t word = 0; word < group.runnable.size(); ++word) {
-				uint64_t pendingTasks = group.runnable[word];
-				while (pendingTasks != 0) {
-					const unsigned bit = __builtin_ctzll(pendingTasks);
-					const uint64_t mask = uint64_t{1} << bit;
-					pendingTasks &= pendingTasks - 1;
-					const uint32_t i = static_cast<uint32_t>(64 * word + bit);
-					const Visit visit = advance(group.tasks[i], which == 0 && i == group.first);
-					if (visit != Visit::Prefetched) group.runnable[word] &= ~mask;
-					if (visit == Visit::Done) {
-						assert(which == 0 && i == group.first);
-						++group.first;
-					}
-				}
+	fill();
+	while (pendingTasks != 0) {
+		assert(readyCount != 0 && tasks[firstTask].runnable);
+		// Freeze the turn length: each selected task gets one continuation.
+		// Refills happen after the turn, never inside advance or its dispatch.
+		const uint32_t turn = std::min(LG, readyCount);
+		for (uint32_t served = 0; served < turn; ++served) {
+			const uint32_t slot = ready[readyFirst];
+			readyFirst = readyFirst + 1 == RunnableTarget ? 0 : readyFirst + 1;
+			--readyCount;
+			auto& task = tasks[slot];
+			assert(task.runnable);
+			task.runnable = false;
+			const Visit visit = advance(task, slot == firstTask);
+			if (visit == Visit::Prefetched) {
+				enqueue(slot);
+			} else if (visit == Visit::Done) {
+				assert(slot == firstTask);
+				--pendingTasks;
+				firstTask = firstTask + 1 == TaskCapacity ? 0 : firstTask + 1;
+				// Wake only the new writer, before admitting speculative work.
+				// advance validates it before consuming any saved leaf/key pointer.
+				if (pendingTasks != 0 && !tasks[firstTask].runnable) enqueue(firstTask);
 			}
 		}
-		if (groups[oldest].first == groups[oldest].count) {
-			fill(groups[oldest]);
-			oldest = oldest + 1 == GroupCount ? 0 : oldest + 1;
-		}
+		// Append freshly hinted tasks behind the current runnable rotation.
+		// At cold start / a depleted tail, available work limits the lead.
+		fill();
 	}
+
 }
 
 void TempConflictBTree::noteWriteLeafMutation(LeafBlock* leaf) {
