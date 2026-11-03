@@ -96,8 +96,9 @@ public:
 					bool* transactionConflictStatus,
 					std::vector<uint8_t>& conflicts,
 					int64_t& tooOldWithinWindow);
-	// Coalesces overlapping or adjacent accepted writes from checkReads. The batch,
-	// its indices and input key bytes must remain valid through this call.
+	// Applies accepted writes, merging overlaps by sorted endpoint indices.
+	// No inter-write key comparisons; adjacent ranges may remain separate.
+	// The batch, its indices and input key bytes must remain valid through this call.
 	// All intervals use cv; commit versions must be nondecreasing across calls.
 	// May reclaim history. Throws std::length_error if the per-write reserve
 	// cannot be met; earlier writes and reclamation are not rolled back.

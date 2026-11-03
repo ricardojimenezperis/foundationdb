@@ -3,6 +3,10 @@
 #include <numeric>
 #include <stdexcept>
 
+#ifndef RESOLVER1_WRITE_LG
+#define RESOLVER1_WRITE_LG 16
+#endif
+
 TempConflictBTree::TempConflictBTree(std::size_t budget)
 	: pool_(budget, BlockSize),
 	  keyStore_(pool_),
@@ -29,9 +33,14 @@ void TempConflictBTree::addWrites(
 	WriteCursor cursor;
 	uint32_t cursorGroup = static_cast<uint32_t>(writeLeaves.size());
 	uint32_t pendingGroup = 0;
-	std::pair<StringRef, StringRef> pending;
+	uint32_t pendingBegin = 0;
+	uint32_t pendingEnd = 0;
 	bool hasPending = false;
 	auto applyPending = [&]() {
+		const StringRef& begin = points[pendingBegin].key;
+		const StringRef& end = points[pendingEnd].key;
+		// Equal-key endpoint positions can describe an empty interval.
+		if (begin.compare(end) >= 0) return;
 		if (cursorGroup != pendingGroup) {
 			const WriteLeaf& group = writeLeaves[resolveWriteGroup(pendingGroup)];
 			if (group.leaf != nullptr) {
@@ -42,11 +51,42 @@ void TempConflictBTree::addWrites(
 			}
 			cursorGroup = pendingGroup;
 		}
-		addWrite(cursor, pending, cv);
+		addWrite(cursor, {begin, end}, cv);
 	};
-	// Merge accepted intervals across leaf groups as well as within them.
-	// The first begin owns the prepared destination of the combined interval.
+	constexpr uint32_t LG = RESOLVER1_WRITE_LG;
+	static_assert(LG <= UINT32_MAX / 4, "write leaf group is too large");
+	auto prefetchWriteLeaves = [&](uint32_t first) {
+		if constexpr (LG != 0) {
+			const std::size_t end = std::min(writeLeaves.size(), std::size_t(first) + LG);
+			for (std::size_t g = first; g < end; ++g) {
+				// Resolve now, without retaining pointers across subsequent mutations.
+				const WriteLeaf& destination = writeLeaves[resolveWriteGroup(g)];
+				const LeafBlock* leaf = destination.leaf != nullptr
+					? destination.leaf : rightmostLeaf_;
+				if (leaf == nullptr) continue;
+				const auto* bytes = reinterpret_cast<const char*>(leaf);
+				constexpr std::size_t LineBytes = 64;
+				for (std::size_t offset = 0; offset < BlockSize; offset += LineBytes) {
+					__builtin_prefetch(bytes + offset);
+				}
+			}
+		}
+	};
+	// Prime batches A and B; when applying A, hint C, then D while applying B.
+	prefetchWriteLeaves(0);
+	prefetchWriteLeaves(LG);
+	uint32_t nextPrefetchBoundary = 0;
+	// Stream accepted begins in endpoint order while traversing prepared leaves.
+	// Union uses indices only; key bytes are fetched when emitting an interval.
+	// Adjacent equal-key endpoints may remain separate. The first begin owns
+	// the prepared destination of the combined interval.
 	for (uint32_t g = 0; g < writeLeaves.size(); ++g) {
+		if constexpr (LG != 0) {
+			if (g == nextPrefetchBoundary) {
+				prefetchWriteLeaves(g + 2 * LG);
+				nextPrefetchBoundary += LG;
+			}
+		}
 		const WriteLeaf& group = writeLeaves[g];
 		for (uint32_t w = group.firstWrite; w < group.end(); w = nextBegin[w]) {
 			const RangeEntry& entry = readWriteBegins[w];
@@ -59,19 +99,20 @@ void TempConflictBTree::addWrites(
 				 reinterpret_cast<const char*>(info.writeRanges.begin())) /
 				sizeof(*info.writeRanges.begin());
 			const auto& range = info.writeRanges[r];
-			const StringRef& begin = point.key;
-			const StringRef& end = points[range.second].key;
-			if (begin.compare(end) >= 0) continue;
-			if (hasPending && begin.compare(pending.second) > 0) {
+			const uint32_t beginIndex = entry.index();
+			const uint32_t endIndex = static_cast<uint32_t>(range.second);
+			if (beginIndex >= endIndex) continue;
+			if (hasPending && beginIndex > pendingEnd) {
 				applyPending();
 				hasPending = false;
 			}
 			if (!hasPending) {
-				pending = {begin, end};
+				pendingBegin = beginIndex;
+				pendingEnd = endIndex;
 				pendingGroup = g;
 				hasPending = true;
-			} else if (end.compare(pending.second) > 0) {
-				pending.second = end;
+			} else if (endIndex > pendingEnd) {
+				pendingEnd = endIndex;
 			}
 		}
 	}

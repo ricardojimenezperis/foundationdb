@@ -8,7 +8,8 @@
 // Provides block allocation and release, and counts the free blocks, so
 // that callers can reclaim history until enough blocks are available.
 // History reclamation is handled by the caller.
-#pragma once
+#ifndef RESOLVER1_PAGEPOOL_H
+#define RESOLVER1_PAGEPOOL_H
 
 #include <cstddef>
 #include <cstdint>
@@ -26,6 +27,9 @@ static_assert(sizeof(Page) == PageSize);
 
 class PagePool {
 public:
+	enum class Backing { Legacy, BasePages, TransparentHugePages, HugeTLB };
+	// RESOLVER1_PAGE_MODE: legacy (default), base, thp, or hugetlb (2 MiB).
+	// Explicit modes fail on allocation/advice errors; there is no fallback.
 	PagePool(std::size_t budget, std::size_t blockSize);
 	~PagePool();
 
@@ -40,6 +44,9 @@ public:
 	std::size_t allocatedBytes() const { return numPages_ * PageSize; }
 	// Free blocks, whichever store released them.
 	std::size_t availableBlocks() const { return availableBlocks_; }
+	Backing backing() const { return backing_; }
+	const void* backingAddress() const { return pages_; }
+	std::size_t backingBytes() const { return mappedBytes_ == 0 ? allocatedBytes() : mappedBytes_; }
 
 private:
 	std::size_t budget_;
@@ -51,4 +58,8 @@ private:
 	FreeBlock* freeBlocks_ = nullptr;
 	std::size_t availableBlocks_ = 0;
 	Page* pages_ = nullptr;
+	Backing backing_ = Backing::Legacy;
+	std::size_t mappedBytes_ = 0;
 };
+
+#endif
