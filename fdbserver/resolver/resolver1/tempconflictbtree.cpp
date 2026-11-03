@@ -10,7 +10,7 @@
 #define RESOLVER1_WRITE_PENDING (4 * RESOLVER1_WRITE_LG)
 #endif
 #ifdef RESOLVER1_WRITE_GROUPS
-#error "v3.11 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
+#error "v3.12 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
 #endif
 
 TempConflictBTree::TempConflictBTree(std::size_t budget)
@@ -484,7 +484,9 @@ void TempConflictBTree::addWrites(
 			maxLength = std::max({maxLength, std::size_t(points[e.index()].key.size()),
 				std::size_t(points[e.transaction].key.size())});
 			++count;
-			if (count > leaf->freeSlotCount() / 2) return 0;
+			// Local writers must not create a new pending-child split. Two
+			// remaining slots keep the leaf below needsSplit throughout the group.
+			if (leaf->freeSlotCount() < 2 || count > (leaf->freeSlotCount() - 2) / 2) return 0;
 		}
 		const auto slot = leaf->order[leaf->header.count - 1];
 		if (leaf->cv[slot] <= reclaimCV_ || keyStore_.compareBegin(
