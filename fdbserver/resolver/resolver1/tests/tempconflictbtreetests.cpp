@@ -4428,3 +4428,230 @@ TEST_CASE("/resolver/TempConflictBTree/AddWritesKeepsTheReserveOfALongKeyAfterRe
 		}
 	}
 }
+
+namespace {
+
+std::size_t countLeaves(TestTree& t) {
+	BNodeHeader* node = Access::root(t.tree);
+	if (node == nullptr) {
+		return 0;
+	}
+	while (node->kind == BNodeKind::Internal) {
+		node = childAt(reinterpret_cast<InternalBlock*>(node), 0);
+	}
+	std::size_t count = 0;
+	for (const LeafBlock* leaf = reinterpret_cast<LeafBlock*>(node); leaf != nullptr; leaf = leaf->right) {
+		++count;
+	}
+	return count;
+}
+
+void checkWriteBatch(TestTree& t, std::vector<Entry>& model,
+					 const std::vector<std::pair<Bytes, Bytes>>& writes, Version cv) {
+	for (const auto& w : writes) {
+		model = applyWrite(model, w.first, w.second, cv);
+	}
+	checkBatch<16>(t, {BatchTransaction{}}, writes, cv);
+	checkSameEntries(checkTree(t), model);
+}
+
+unsigned spacedBegin(unsigned leaf, unsigned perLeaf, unsigned entry) {
+	return 100 + 20 * (leaf * perLeaf + entry);
+}
+
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireInteriorLeavesUnderSeveralParents") {
+	TestTree t;
+	std::vector<Entry> model = spacedRanges(t, 12, 3, 3);
+	checkWrite(t, model, wideKey(spacedBegin(1, 3, 0) + 5), wideKey(spacedBegin(9, 3, 0) + 5), 1000);
+	ASSERT_EQ(countLeaves(t), 5u);
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireInteriorLeavesEmptiesParentsAndGrandparent") {
+	TestTree t;
+	std::vector<Entry> model = spacedRanges(t, 27, 2, 3);
+	checkWrite(t, model, wideKey(spacedBegin(1, 2, 0) + 5), wideKey(spacedBegin(25, 2, 1) + 5), 1000);
+	ASSERT_EQ(countLeaves(t), 4u);
+	checkWrite(t, model, wideKey(spacedBegin(0, 2, 0) + 5), wideKey(spacedBegin(26, 2, 1) + 5), 1001);
+	ASSERT_EQ(countLeaves(t), 2u);
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireInteriorLeafLastChildOfParent") {
+	for (unsigned first : {0u, 1u, 2u, 3u}) {
+		for (unsigned last : {first + 2, first + 3, first + 4, first + 5}) {
+			TestTree t;
+			std::vector<Entry> model = spacedRanges(t, 9, 3, 3);
+			checkWrite(t, model, wideKey(spacedBegin(first, 3, 1) + 5), wideKey(spacedBegin(last, 3, 1) + 5), 1000);
+			ASSERT_EQ(countLeaves(t), 9u - (last - first - 1));
+		}
+	}
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireInteriorLeafEmptiedByCleaning") {
+	for (unsigned live : {0u, 1u, 2u}) {
+		TestTree t;
+		const unsigned perLeaf = 3;
+		std::vector<std::vector<Entry>> leaves(5);
+		for (unsigned i = 0; i < 5; ++i) {
+			for (unsigned n = 0; n < perLeaf; ++n) {
+				const unsigned b = spacedBegin(i, perLeaf, n);
+				const Version cv = i == 2 && n >= live ? 5 : 100;
+				leaves[i].push_back({wideKey(b), wideKey(b + 10), cv});
+			}
+		}
+		std::vector<std::vector<RangeRef>> ranges(5, std::vector<RangeRef>(perLeaf));
+		for (Version pass : {Version{5}, Version{100}}) {
+			for (unsigned i = 0; i < 5; ++i) {
+				for (unsigned n = 0; n < perLeaf; ++n) {
+					const Entry& e = leaves[i][n];
+					if (e.cv != pass) {
+						continue;
+					}
+					const std::optional<RangeRef> range = t.keys().appendRange(asRef(e.begin), asRef(e.end), e.cv);
+					ASSERT(range.has_value());
+					ranges[i][n] = *range;
+				}
+			}
+		}
+		for (unsigned i = 0; i < 5; ++i) {
+			t.addLeaf(i == 0 ? Bytes{} : leaves[i].front().begin, leaves[i], ranges[i]);
+		}
+		t.build(2);
+		Access::setReclaimCV(t.tree, 50);
+		std::vector<Entry> model;
+		for (const Entry& e : modelEntries(t)) {
+			if (e.cv > 50) {
+				model.push_back(e);
+			}
+		}
+		model = applyWrite(model, wideKey(spacedBegin(1, perLeaf, 0) + 5), wideKey(spacedBegin(3, perLeaf, 0) + 5), 1000);
+		Access::addWrite(t.tree, asRef(wideKey(spacedBegin(1, perLeaf, 0) + 5)),
+						 asRef(wideKey(spacedBegin(3, perLeaf, 0) + 5)), 1000);
+		std::vector<Entry> live2;
+		for (const Entry& e : checkStructure(t)) {
+			if (e.cv > 50) {
+				live2.push_back(e);
+			}
+		}
+		checkSameEntries(live2, model);
+		ASSERT_EQ(countLeaves(t), 4u);
+	}
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireInteriorLeavesAfterSplitOfInsertionLeaf") {
+	const unsigned perLeaf = LeafCapacity - 1;
+	for (unsigned entry : {0u, 1u, perLeaf / 2, perLeaf - 2, perLeaf - 1}) {
+		for (unsigned last : {2u, 3u, 4u}) {
+			TestTree t(64 * PageSize);
+			std::vector<Entry> model = spacedRanges(t, 6, perLeaf, 3);
+			checkWrite(t, model, wideKey(spacedBegin(1, perLeaf, entry) + 15),
+					   wideKey(spacedBegin(last, perLeaf, 1) + 5), 1000);
+		}
+	}
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireInteriorLeavesBeforeFullLastLeaf") {
+	const unsigned perLeaf = LeafCapacity - 1;
+	for (unsigned entry : {0u, 1u, perLeaf / 2, perLeaf - 1}) {
+		TestTree t(64 * PageSize);
+		std::vector<Entry> model = spacedRanges(t, 6, perLeaf, 3);
+		checkWrite(t, model, wideKey(spacedBegin(1, perLeaf, 1) + 5),
+				   wideKey(spacedBegin(4, perLeaf, entry) + 5), 1000);
+		ASSERT_EQ(countLeaves(t), 4u);
+	}
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireInteriorLeavesNeighbouringWritesShareEndLeaf") {
+	const unsigned p = 3;
+	struct Case {
+		unsigned aBegin, aEnd, bBegin, bEnd;
+	};
+	const Case cases[] = {
+		{spacedBegin(1, p, 0) + 5, spacedBegin(4, p, 0) + 5, spacedBegin(4, p, 1) + 5, spacedBegin(7, p, 0) + 5},
+		{spacedBegin(1, p, 0) + 5, spacedBegin(4, p, 0) + 5, spacedBegin(4, p, 0) + 7, spacedBegin(4, p, 2) + 5},
+		{spacedBegin(1, p, 0) + 5, spacedBegin(3, p, 2) + 12, spacedBegin(3, p, 2) + 15, spacedBegin(6, p, 1) + 5},
+		{spacedBegin(1, p, 0) + 5, spacedBegin(3, p, 2) + 12, spacedBegin(4, p, 0) - 3, spacedBegin(4, p, 0) + 5},
+		{spacedBegin(0, p, 1) + 5, spacedBegin(2, p, 2) + 10, spacedBegin(3, p, 0), spacedBegin(8, p, 2) + 10},
+		{spacedBegin(0, p, 2) + 15, spacedBegin(5, p, 0), spacedBegin(5, p, 0) + 2, spacedBegin(9, p, 0) + 1},
+	};
+	for (const Case& c : cases) {
+		TestTree t;
+		std::vector<Entry> model = spacedRanges(t, 10, p, 2);
+		checkWriteBatch(t, model, {{wideKey(c.aBegin), wideKey(c.aEnd)}, {wideKey(c.bBegin), wideKey(c.bEnd)}}, 1000);
+	}
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireInteriorLeavesInBatchesAgainstModel") {
+	for (std::uint32_t seed : {11u, 29u, 4093u}) {
+		TestTree t(256 * PageSize);
+		std::vector<Entry> model;
+		std::uint32_t state = seed;
+		auto next = [&state]() {
+			state = state * 1103515245u + 12345u;
+			return state >> 8;
+		};
+		for (unsigned n = 0; n < 1500; ++n) {
+			const unsigned begin = next() % 30000;
+			const unsigned length = 1 + next() % 6;
+			model = applyWrite(model, wideKey(begin), wideKey(begin + length), 1 + n);
+			Access::addWrite(t.tree, asRef(wideKey(begin)), asRef(wideKey(begin + length)), 1 + n);
+		}
+		checkSameEntries(checkStructure(t), model);
+		for (unsigned b = 0; b < 60; ++b) {
+			std::vector<std::pair<unsigned, unsigned>> spans;
+			const unsigned count = 1 + next() % 6;
+			for (unsigned i = 0; i < count; ++i) {
+				const unsigned begin = next() % 30000;
+				spans.push_back({begin, begin + 1 + next() % 3000});
+			}
+			std::sort(spans.begin(), spans.end());
+			std::vector<std::pair<Bytes, Bytes>> writes;
+			unsigned previousEnd = 0;
+			for (const auto& span : spans) {
+				if (writes.empty() || span.first > previousEnd + 1) {
+					writes.push_back({wideKey(span.first), wideKey(span.second)});
+					previousEnd = span.second;
+				}
+			}
+			if (writes.empty()) {
+				continue;
+			}
+			for (const auto& w : writes) {
+				model = applyWrite(model, w.first, w.second, 2000 + 100 * b);
+			}
+			checkBatch<16>(t, {BatchTransaction{}}, writes, 2000 + 100 * b);
+			if (b % 10 == 9) {
+				checkSameEntries(checkTree(t), model);
+			} else {
+				checkSameEntries(checkStructure(t), model);
+			}
+			for (unsigned n = 0; n < 40; ++n) {
+				const unsigned begin = next() % 30000;
+				const unsigned length = 1 + next() % 6;
+				model = applyWrite(model, wideKey(begin), wideKey(begin + length), 2001 + 100 * b + n);
+				Access::addWrite(t.tree, asRef(wideKey(begin)), asRef(wideKey(begin + length)), 2001 + 100 * b + n);
+			}
+		}
+	}
+}
+
+TEST_CASE("/resolver/TempConflictBTree/RetireEmptyInteriorLeaf") {
+	for (unsigned empty : {2u, 3u}) {
+		TestTree t;
+		std::vector<Entry> model = spacedRanges(t, 6, 3, 2);
+		LeafBlock* leaf = t.leaves[empty].leaf;
+		while (leaf->header.count > 0) {
+			t.nodes().eraseAt(0, leaf);
+		}
+		std::vector<Entry> kept;
+		for (const Entry& e : model) {
+			if (e.begin < wideKey(spacedBegin(empty, 3, 0)) || !(e.begin < wideKey(spacedBegin(empty + 1, 3, 0)))) {
+				kept.push_back(e);
+			}
+		}
+		model = kept;
+		checkWrite(t, model, wideKey(spacedBegin(1, 3, 1) + 5), wideKey(spacedBegin(4, 3, 1) + 5), 1000);
+		ASSERT_EQ(countLeaves(t), 4u);
+	}
+}

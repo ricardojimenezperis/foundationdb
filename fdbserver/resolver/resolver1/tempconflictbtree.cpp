@@ -326,7 +326,7 @@ void TempConflictBTree::addWrites(
 		// Buckets run in enum order; continuations still wait for the next round.
 		PrepareInput, KeyMore,
 		Inspect, Route, InspectRight, CompareRight, Search, CompareSearch,
-		SearchReady, Previous, InspectPrevious, Insert, Scan, CompareEnd, Erase, Done
+		SearchReady, Previous, InspectPrevious, Insert, Scan, InspectCover, CompareCover, CompareEnd, Erase, Done
 	};
 	struct WriteTask {
 		WriteCursor cursor;
@@ -335,7 +335,7 @@ void TempConflictBTree::addWrites(
 		LeafBlock* lastLeaf = nullptr;
 		const KeyBlockHeader* keyBlock = nullptr;
 		std::size_t keyOffset = 0, keyLeft = 0;
-		std::size_t lo = 0, hi = 0, rank = 0, scanRank = 0;
+		std::size_t lo = 0, hi = 0, rank = 0, scanRank = 0, coverRank = 0;
 		uint32_t group = 0, entry = 0, endEntry = 0;
 		Step step = Step::Done, afterKey = Step::Done, afterPrepare = Step::Inspect;
 		bool found = false;
@@ -468,6 +468,8 @@ void TempConflictBTree::addWrites(
 		if (Entry == Step::InspectPrevious) goto inspectPrevious;
 		if (Entry == Step::Insert) goto insert;
 		if (Entry == Step::Scan) goto scan;
+		if (Entry == Step::InspectCover) goto inspectCover;
+		if (Entry == Step::CompareCover) goto compareCover;
 		if (Entry == Step::CompareEnd) goto compareEnd;
 		if (Entry == Step::Erase) goto erase;
 		if (Entry == Step::KeyMore) goto keyMore;
@@ -599,9 +601,7 @@ void TempConflictBTree::addWrites(
 			if (t.scan == t.lastLeaf) goto finish;
 			t.scan = t.scan->right;
 			t.scanRank = 0;
-			t.step = Step::Scan;
-			if (hintLeaf(t.scan)) return Visit::Prefetched;
-			goto scan;
+			goto enter;
 		} else {
 			const auto slot = t.scan->order[t.scanRank];
 			if (t.scan->cv[slot] > reclaimCV_) {
@@ -611,6 +611,35 @@ void TempConflictBTree::addWrites(
 		}
 		if (prepareErase(t)) return Visit::Prefetched;
 		goto erase;
+	enter:
+		if (t.scan == nullptr || t.scan == t.lastLeaf) {
+			t.step = Step::Scan;
+			if (hintLeaf(t.scan)) return Visit::Prefetched;
+			goto scan;
+		}
+		t.step = Step::InspectCover;
+		if (hintLeaf(t.scan)) return Visit::Prefetched;
+		goto inspectCover;
+	inspectCover:
+		assert(t.scan != nullptr && t.scan != t.lastLeaf && t.scan != t.cursor.leaf);
+		assert(t.scanRank == 0);
+		t.coverRank = t.scan->header.count;
+		if (t.coverRank == 0) goto retire;
+		--t.coverRank;
+		assert(t.scan->cv[t.scan->order[t.coverRank]] > reclaimCV_);
+		if (hintKey(t, t.scan->ranges[t.scan->order[t.coverRank]], true, Step::CompareCover)) return Visit::Prefetched;
+		goto compareCover;
+	compareCover:
+		if (keyStore_.compareEnd(t.write.second, t.scan->ranges[t.scan->order[t.coverRank]]) < 0) goto scan;
+		goto retire;
+	retire: {
+		assert(t.scan->parent() != nullptr);
+		LeafBlock* const next = t.scan->right;
+		removeSubtree(&t.scan->header);
+		t.scan = next;
+		t.scanRank = 0;
+		goto enter;
+	}
 	compareEnd:
 		if (keyStore_.compareEnd(t.write.second, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
 			preserveRightExterior(t.write.second, t.scan, t.scanRank);
@@ -620,8 +649,13 @@ void TempConflictBTree::addWrites(
 		goto erase;
 	erase: {
 		const bool last = t.scan == t.lastLeaf && t.scanRank + 1 == t.scan->header.count;
+		LeafBlock* const before = t.scan;
 		eraseAt(t.scanRank, t.scan);
 		if (last) goto finish;
+		if (t.scan != before && t.scan != nullptr && t.scan != t.lastLeaf && t.scanRank == 0) {
+			t.step = Step::InspectCover;
+			goto inspectCover;
+		}
 		goto scan;
 	}
 	keyMore:
@@ -680,6 +714,8 @@ void TempConflictBTree::addWrites(
 			case Step::InspectPrevious: serveState.template operator()<Step::InspectPrevious>(round[state]); break;
 			case Step::Insert: serveState.template operator()<Step::Insert>(round[state]); break;
 			case Step::Scan: serveState.template operator()<Step::Scan>(round[state]); break;
+			case Step::InspectCover: serveState.template operator()<Step::InspectCover>(round[state]); break;
+			case Step::CompareCover: serveState.template operator()<Step::CompareCover>(round[state]); break;
 			case Step::CompareEnd: serveState.template operator()<Step::CompareEnd>(round[state]); break;
 			case Step::Erase: serveState.template operator()<Step::Erase>(round[state]); break;
 			case Step::KeyMore: serveState.template operator()<Step::KeyMore>(round[state]); break;
