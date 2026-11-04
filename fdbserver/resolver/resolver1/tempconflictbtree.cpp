@@ -1,6 +1,7 @@
 #include "tempconflictbtree.h"
 #include "bnodestore.h"
 #include <numeric>
+#include <bit>
 #include <stdexcept>
 
 #ifndef RESOLVER1_WRITE_LG
@@ -10,7 +11,7 @@
 #define RESOLVER1_WRITE_PENDING (4 * RESOLVER1_WRITE_LG)
 #endif
 #ifdef RESOLVER1_WRITE_GROUPS
-#error "v3.14 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
+#error "v3.15 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
 #endif
 
 TempConflictBTree::TempConflictBTree(std::size_t budget)
@@ -339,20 +340,27 @@ void TempConflictBTree::addWrites(
 		bool found = false;
 		bool runnable = false;
 	};
-	// Fixed slots hold independent components and are reused on completion.
-	// Neither queue allocates or moves a live cursor.
+	// State buckets contain slot bits, never movable cursors or heap nodes.
+	// Ready belongs to the next round: each live slot runs at most once per
+	// round, even when it yields back into the state currently being serviced.
+	constexpr uint32_t StateCount = static_cast<uint32_t>(Step::Done);
+	constexpr uint32_t MaskWords = (RunnableTarget + 63) / 64;
+	static_assert(StateCount <= 32);
+	using StateMask = std::array<uint64_t, MaskWords>;
 	std::array<WriteTask, RunnableTarget> tasks;
-	std::array<uint32_t, RunnableTarget> ready;
+	std::array<StateMask, StateCount> ready{};
+	uint32_t readyStates = 0;
 	uint32_t pendingTasks = 0;
-	uint32_t readyFirst = 0, readyCount = 0;
 	uint32_t nextGroup = 0;
 	auto enqueue = [&](uint32_t slot) {
-		assert(readyCount < RunnableTarget && !tasks[slot].runnable);
-		uint32_t tail = readyFirst + readyCount;
-		if (tail >= RunnableTarget) tail -= RunnableTarget;
-		ready[tail] = slot;
-		++readyCount;
-		tasks[slot].runnable = true;
+		auto& task = tasks[slot];
+		assert(!task.runnable && task.step != Step::Done);
+		const auto state = static_cast<uint32_t>(task.step);
+		const uint64_t bit = uint64_t{1} << (slot % 64);
+		assert((ready[state][slot / 64] & bit) == 0);
+		ready[state][slot / 64] |= bit;
+		readyStates |= uint32_t{1} << state;
+		task.runnable = true;
 	};
 	auto setInput = [&](WriteTask& t) {
 		const auto& entry = readWriteBegins[t.entry];
@@ -436,9 +444,10 @@ void TempConflictBTree::addWrites(
 		if (t.scan->right != nullptr) return hintLeaf(t.scan->right);
 		return t.scan->header.count == 1 && hintLeaf(t.scan->left);
 	};
-	// Keep scheduler variables out of the register allocation of the step machine.
-	auto advance = [&](WriteTask& t) __attribute__((noinline)) -> Visit {
-		assert(t.step != Step::Done);
+	// Entry is a compile-time state chosen once per bucket. All transitions
+	// inside a visit are direct branches; no per-task switch/function pointer.
+	auto advance = [&]<Step Entry>(WriteTask& t) __attribute__((always_inline)) -> Visit {
+		assert(t.step == Entry);
 		struct CursorGuard {
 			TempConflictBTree& tree;
 			~CursorGuard() { tree.activeWriteCursor_ = nullptr; tree.activeWriteLimit_ = nullptr; }
@@ -446,222 +455,239 @@ void TempConflictBTree::addWrites(
 		assert(activeWriteCursor_ == nullptr);
 		activeWriteCursor_ = &t.cursor;
 		activeWriteLimit_ = &t.lastLeaf;
-		for (;;) {
-			auto* leaf = t.cursor.leaf;
-			switch (t.step) {
-			case Step::PrepareInput: {
-				// Enter once on ownership acquisition and once per next interval.
-				// No reserve/input checks on search or scan continuations.
-				if (t.write.first.compare(t.write.second) >= 0) {
-					t.rank = t.lo;
-					if (finishInterval(t)) return Visit::Prefetched;
-					continue;
-				}
-				t.step = t.afterPrepare;
-				continue;
+		LeafBlock* leaf = nullptr;
+		if (Entry == Step::Inspect) goto inspect;
+		if (Entry == Step::Route) goto route;
+		if (Entry == Step::InspectRight) goto inspectRight;
+		if (Entry == Step::CompareRight) goto compareRight;
+		if (Entry == Step::Search) goto search;
+		if (Entry == Step::CompareSearch) goto compareSearch;
+		if (Entry == Step::SearchReady) goto searchReady;
+		if (Entry == Step::Previous) goto previous;
+		if (Entry == Step::InspectPrevious) goto inspectPrevious;
+		if (Entry == Step::Insert) goto insert;
+		if (Entry == Step::Scan) goto scan;
+		if (Entry == Step::CompareEnd) goto compareEnd;
+		if (Entry == Step::Erase) goto erase;
+		if (Entry == Step::KeyMore) goto keyMore;
+		if (Entry == Step::PrepareInput) goto prepareInput;
+	prepareInput:
+		if (t.write.first.compare(t.write.second) >= 0) {
+			t.rank = t.lo;
+			goto finish;
+		}
+		t.step = Step::Inspect;
+		goto inspect;
+	inspect:
+		leaf = t.cursor.leaf;
+		if (leaf == nullptr) {
+			t.rank = 0;
+			t.found = false;
+			goto searchReady;
+		}
+		if (cleanExpired(leaf)) t.lo = 0;
+		if (t.cursor.rightCheckRequired) goto route;
+		t.hi = leaf->header.count;
+		goto search;
+	route:
+		leaf = t.cursor.leaf;
+		if (leaf == t.lastLeaf) {
+			t.hi = leaf->header.count;
+			goto search;
+		}
+		t.scan = leaf->right;
+		t.step = Step::InspectRight;
+		if (hintLeaf(t.scan)) return Visit::Prefetched;
+		goto inspectRight;
+	inspectRight:
+		leaf = t.cursor.leaf;
+		if (t.scan == nullptr) {
+			t.hi = leaf->header.count;
+			goto search;
+		}
+		t.scanRank = 0;
+		while (t.scanRank < t.scan->header.count &&
+			t.scan->cv[t.scan->order[t.scanRank]] <= reclaimCV_) ++t.scanRank;
+		if (t.scanRank == t.scan->header.count) {
+			t.scan = t.scan->right;
+			t.step = Step::InspectRight;
+			if (hintLeaf(t.scan)) return Visit::Prefetched;
+			goto inspectRight;
+		}
+		if (hintKey(t, t.scan->ranges[t.scan->order[t.scanRank]], false, Step::CompareRight)) return Visit::Prefetched;
+		goto compareRight;
+	compareRight:
+		leaf = t.cursor.leaf;
+		if (keyStore_.compareBegin(t.write.first, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
+			t.hi = leaf->header.count;
+			goto search;
+		}
+		t.cursor.leaf = t.scan;
+		if (leaf->header.count == 0) removeIfEmpty(&leaf->header);
+		cleanExpired(t.cursor.leaf);
+		t.cursor.splitEpoch = writeSplitEpoch_ - 1;
+		t.lo = 0;
+		goto route;
+	search:
+		leaf = t.cursor.leaf;
+		if (t.lo == t.hi) {
+			t.rank = t.lo;
+			t.found = false;
+			goto searchReady;
+		}
+		assert(t.lo < t.hi);
+		t.rank = t.lo + (t.hi - t.lo) / 2;
+		if (hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch)) return Visit::Prefetched;
+		goto compareSearch;
+	compareSearch: {
+		leaf = t.cursor.leaf;
+		const int compare = keyStore_.compareBegin(t.write.first, leaf->ranges[leaf->order[t.rank]]);
+		if (compare == 0) {
+			t.found = true;
+			goto searchReady;
+		}
+		if (compare < 0) t.hi = t.rank; else t.lo = t.rank + 1;
+		goto search;
+	}
+	searchReady:
+		// Split preparation and mutation remain contiguous, without yielding.
+		goto previous;
+	previous:
+		if (t.cursor.leaf == nullptr || t.found) goto insert;
+		if (t.rank > 0) {
+			t.scan = t.cursor.leaf;
+			t.scanRank = t.rank - 1;
+			const auto slot = t.scan->order[t.scanRank];
+			if (t.scan->cv[slot] > reclaimCV_ && hintKey(t, t.scan->ranges[slot], true, Step::Insert)) return Visit::Prefetched;
+			goto insert;
+		}
+		t.scan = t.cursor.leaf->left;
+		t.step = Step::InspectPrevious;
+		if (hintLeaf(t.scan)) return Visit::Prefetched;
+		goto inspectPrevious;
+	inspectPrevious:
+		if (t.scan == nullptr) goto insert;
+		if (t.scan->header.count == 0) {
+			t.scan = t.scan->left;
+			t.step = Step::InspectPrevious;
+			if (hintLeaf(t.scan)) return Visit::Prefetched;
+			goto inspectPrevious;
+		} else {
+			t.scanRank = t.scan->header.count - 1;
+			const auto slot = t.scan->order[t.scanRank];
+			if (t.scan->cv[slot] > reclaimCV_ && hintKey(t, t.scan->ranges[slot], true, Step::Insert)) return Visit::Prefetched;
+		}
+		goto insert;
+	insert: {
+		prepareWriteSplit(t.cursor, t.rank, t.found, cv);
+		auto range = keyStore_.appendRange(t.write.first, t.write.second, cv);
+		assert(range.has_value());
+		if (t.cursor.leaf == nullptr) {
+			t.cursor.leaf = createRootLeaf(cv);
+			insertAt(t.rank, *range, cv, t.cursor.leaf);
+			goto finish;
+		}
+		if (insertWithLeftExterior(t.write, *range, cv, t.found, t.cursor.leaf, t.rank)) goto finish;
+		t.scan = t.cursor.leaf;
+		t.scanRank = t.rank + 1;
+		goto scan;
+	}
+	scan:
+		if (t.scan == nullptr) goto finish;
+		if (t.scanRank >= t.scan->header.count) {
+			if (t.scan == t.lastLeaf) goto finish;
+			t.scan = t.scan->right;
+			t.scanRank = 0;
+			t.step = Step::Scan;
+			if (hintLeaf(t.scan)) return Visit::Prefetched;
+			goto scan;
+		} else {
+			const auto slot = t.scan->order[t.scanRank];
+			if (t.scan->cv[slot] > reclaimCV_) {
+				if (hintKey(t, t.scan->ranges[slot], true, Step::CompareEnd)) return Visit::Prefetched;
+				goto compareEnd;
 			}
-			case Step::Inspect:
-				if (leaf == nullptr) {
-					t.rank = 0;
-					t.found = false;
-					t.step = Step::SearchReady;
-					continue;
-				}
-				if (cleanExpired(leaf)) t.lo = 0;
-				if (t.cursor.rightCheckRequired) {
-					t.step = Step::Route;
+		}
+		if (prepareErase(t)) return Visit::Prefetched;
+		goto erase;
+	compareEnd:
+		if (keyStore_.compareEnd(t.write.second, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
+			preserveRightExterior(t.write.second, t.scan, t.scanRank);
+			goto finish;
+		}
+		if (prepareErase(t)) return Visit::Prefetched;
+		goto erase;
+	erase: {
+		const bool last = t.scan == t.lastLeaf && t.scanRank + 1 == t.scan->header.count;
+		eraseAt(t.scanRank, t.scan);
+		if (last) goto finish;
+		goto scan;
+	}
+	keyMore:
+		t.keyBlock = t.keyBlock->nextBlock;
+		assert(t.keyBlock != nullptr);
+		t.keyOffset = sizeof(KeyBlockHeader);
+		hintKeyChunk(t);
+		return Visit::Prefetched;
+	finish:
+		if (finishInterval(t)) return Visit::Prefetched;
+		if (t.step == Step::Done) return Visit::Done;
+		goto prepareInput;
+	};
+	// Specialization places a direct entry path inside each bucket's loop.
+	auto serveState = [&]<Step Entry>(const StateMask& mask) {
+		for (uint32_t word = 0; word < MaskWords; ++word) {
+			auto slots = mask[word];
+			while (slots != 0) {
+				const uint32_t slot = word * 64 + std::countr_zero(slots);
+				slots &= slots - 1;
+				auto& task = tasks[slot];
+				assert(task.runnable && task.step == Entry);
+				task.runnable = false;
+				const Visit visit = advance.template operator()<Entry>(task);
+				if (visit == Visit::Prefetched) {
+					enqueue(slot);
 				} else {
-					t.hi = leaf->header.count;
-					t.step = Step::Search;
+					--pendingTasks;
+					fillSlot(slot);
 				}
-				continue;
-			case Step::Route:
-				if (leaf == t.lastLeaf) {
-					t.hi = leaf->header.count;
-					t.step = Step::Search;
-					continue;
-				}
-				t.scan = leaf->right;
-				t.step = Step::InspectRight;
-				if (hintLeaf(t.scan)) return Visit::Prefetched;
-				continue;
-			case Step::InspectRight:
-				if (t.scan == nullptr) {
-					t.hi = leaf->header.count;
-					t.step = Step::Search;
-					continue;
-				}
-				t.scanRank = 0;
-				while (t.scanRank < t.scan->header.count &&
-					t.scan->cv[t.scan->order[t.scanRank]] <= reclaimCV_) ++t.scanRank;
-				if (t.scanRank == t.scan->header.count) {
-					t.scan = t.scan->right;
-					if (hintLeaf(t.scan)) return Visit::Prefetched;
-				} else if (hintKey(t, t.scan->ranges[t.scan->order[t.scanRank]], false, Step::CompareRight)) {
-					return Visit::Prefetched;
-				}
-				continue;
-			case Step::CompareRight:
-				if (keyStore_.compareBegin(t.write.first, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
-					t.hi = leaf->header.count;
-					t.step = Step::Search;
-				} else {
-					t.cursor.leaf = t.scan;
-					if (leaf->header.count == 0) removeIfEmpty(&leaf->header);
-					cleanExpired(t.cursor.leaf);
-					t.cursor.splitEpoch = writeSplitEpoch_ - 1;
-					t.lo = 0;
-					t.step = Step::Route;
-				}
-				continue;
-			case Step::Search:
-			search:
-				if (t.lo == t.hi) {
-					t.rank = t.lo;
-					t.found = false;
-					t.step = Step::SearchReady;
-					goto searchReady;
-				} else {
-					assert(t.lo < t.hi);
-					t.rank = t.lo + (t.hi - t.lo) / 2;
-					if (hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch)) {
-						return Visit::Prefetched;
-					}
-				}
-				continue;
-			case Step::CompareSearch: {
-				const int compare = keyStore_.compareBegin(t.write.first, leaf->ranges[leaf->order[t.rank]]);
-				if (compare == 0) {
-					t.found = true;
-					t.step = Step::SearchReady;
-					goto searchReady;
-				} else {
-					if (compare < 0) t.hi = t.rank; else t.lo = t.rank + 1;
-					t.step = Step::Search;
-					goto search;
-				}
-			}
-			case Step::SearchReady:
-			searchReady:
-				// Prepare the split only at Insert, with no yield before mutation.
-				t.step = Step::Previous;
-				goto previous;
-			case Step::Previous:
-			previous:
-				if (t.cursor.leaf == nullptr || t.found) {
-					t.step = Step::Insert;
-				} else if (t.rank > 0) {
-					t.scan = t.cursor.leaf;
-					t.scanRank = t.rank - 1;
-					const auto slot = t.scan->order[t.scanRank];
-					t.step = Step::Insert;
-					if (t.scan->cv[slot] > reclaimCV_ && hintKey(t, t.scan->ranges[slot], true, Step::Insert)) {
-						return Visit::Prefetched;
-					}
-				} else {
-					t.scan = t.cursor.leaf->left;
-					t.step = Step::InspectPrevious;
-					if (hintLeaf(t.scan)) return Visit::Prefetched;
-				}
-				continue;
-			case Step::InspectPrevious:
-				if (t.scan == nullptr) { t.step = Step::Insert; continue; }
-				if (t.scan->header.count == 0) {
-					t.scan = t.scan->left;
-					if (hintLeaf(t.scan)) return Visit::Prefetched;
-				} else {
-					t.scanRank = t.scan->header.count - 1;
-					const auto slot = t.scan->order[t.scanRank];
-					t.step = Step::Insert;
-					if (t.scan->cv[slot] > reclaimCV_ && hintKey(t, t.scan->ranges[slot], true, Step::Insert)) {
-						return Visit::Prefetched;
-					}
-				}
-				continue;
-			case Step::Insert: {
-				prepareWriteSplit(t.cursor, t.rank, t.found, cv);
-				auto range = keyStore_.appendRange(t.write.first, t.write.second, cv);
-				assert(range.has_value());
-				if (t.cursor.leaf == nullptr) {
-					t.cursor.leaf = createRootLeaf(cv);
-					insertAt(t.rank, *range, cv, t.cursor.leaf);
-					if (finishInterval(t)) return Visit::Prefetched;
-				} else if (insertWithLeftExterior(t.write, *range, cv, t.found, t.cursor.leaf, t.rank)) {
-					if (finishInterval(t)) return Visit::Prefetched;
-				} else {
-					t.scan = t.cursor.leaf;
-					t.scanRank = t.rank + 1;
-					t.step = Step::Scan;
-				}
-				continue;
-			}
-			case Step::Scan:
-			scan:
-				if (t.scan == nullptr) {
-					if (finishInterval(t)) return Visit::Prefetched;
-					continue;
-				}
-				if (t.scanRank >= t.scan->header.count) {
-					if (t.scan == t.lastLeaf) {
-						if (finishInterval(t)) return Visit::Prefetched;
-						continue;
-					}
-					t.scan = t.scan->right;
-					t.scanRank = 0;
-					if (hintLeaf(t.scan)) return Visit::Prefetched;
-				} else {
-					const auto slot = t.scan->order[t.scanRank];
-					if (t.scan->cv[slot] > reclaimCV_) {
-						if (hintKey(t, t.scan->ranges[slot], true, Step::CompareEnd)) return Visit::Prefetched;
-					} else if (prepareErase(t)) return Visit::Prefetched;
-				}
-				continue;
-			case Step::CompareEnd:
-				if (keyStore_.compareEnd(t.write.second, t.scan->ranges[t.scan->order[t.scanRank]]) < 0) {
-					preserveRightExterior(t.write.second, t.scan, t.scanRank);
-					if (finishInterval(t)) return Visit::Prefetched;
-				} else if (prepareErase(t)) return Visit::Prefetched;
-				continue;
-			case Step::Erase: {
-				const bool last = t.scan == t.lastLeaf && t.scanRank + 1 == t.scan->header.count;
-				eraseAt(t.scanRank, t.scan);
-				if (last) {
-					if (finishInterval(t)) return Visit::Prefetched;
-					continue;
-				}
-				// Its possible successor was hinted before eraseAt. The current
-				// leaf needs no second full-block prefetch after deleting one entry.
-				t.step = Step::Scan;
-				goto scan;
-			}
-			case Step::KeyMore:
-				t.keyBlock = t.keyBlock->nextBlock;
-				assert(t.keyBlock != nullptr);
-				t.keyOffset = sizeof(KeyBlockHeader);
-				hintKeyChunk(t);
-				return Visit::Prefetched;
-			case Step::Done: return Visit::Done;
 			}
 		}
 	};
 
 	for (uint32_t slot = 0; slot < RunnableTarget; ++slot) fillSlot(slot);
 	while (pendingTasks != 0) {
-		const uint32_t slot = ready[readyFirst];
-		readyFirst = readyFirst + 1 == RunnableTarget ? 0 : readyFirst + 1;
-		--readyCount;
-		auto& task = tasks[slot];
-		assert(task.runnable);
-		task.runnable = false;
-		const Visit visit = advance(task);
-		if (visit == Visit::Prefetched) {
-			enqueue(slot);
-		} else {
-			--pendingTasks;
-			fillSlot(slot);
+		// Freeze all buckets before executing any state. A newly prefetched
+		// continuation cannot enter a later bucket of this same round.
+		auto round = ready;
+		uint32_t states = readyStates;
+		ready = {};
+		readyStates = 0;
+		assert(states != 0);
+		while (states != 0) {
+			const auto state = std::countr_zero(states);
+			states &= states - 1;
+			switch (static_cast<Step>(state)) {
+			case Step::Inspect: serveState.template operator()<Step::Inspect>(round[state]); break;
+			case Step::Route: serveState.template operator()<Step::Route>(round[state]); break;
+			case Step::InspectRight: serveState.template operator()<Step::InspectRight>(round[state]); break;
+			case Step::CompareRight: serveState.template operator()<Step::CompareRight>(round[state]); break;
+			case Step::Search: serveState.template operator()<Step::Search>(round[state]); break;
+			case Step::CompareSearch: serveState.template operator()<Step::CompareSearch>(round[state]); break;
+			case Step::SearchReady: serveState.template operator()<Step::SearchReady>(round[state]); break;
+			case Step::Previous: serveState.template operator()<Step::Previous>(round[state]); break;
+			case Step::InspectPrevious: serveState.template operator()<Step::InspectPrevious>(round[state]); break;
+			case Step::Insert: serveState.template operator()<Step::Insert>(round[state]); break;
+			case Step::Scan: serveState.template operator()<Step::Scan>(round[state]); break;
+			case Step::CompareEnd: serveState.template operator()<Step::CompareEnd>(round[state]); break;
+			case Step::Erase: serveState.template operator()<Step::Erase>(round[state]); break;
+			case Step::KeyMore: serveState.template operator()<Step::KeyMore>(round[state]); break;
+			case Step::PrepareInput: serveState.template operator()<Step::PrepareInput>(round[state]); break;
+			case Step::Done: assert(false); break;
+			}
 		}
-		assert(readyCount == pendingTasks);
 	}
+
 
 }
 
