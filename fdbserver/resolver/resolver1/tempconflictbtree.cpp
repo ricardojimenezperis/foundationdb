@@ -11,7 +11,7 @@
 #define RESOLVER1_WRITE_PENDING (4 * RESOLVER1_WRITE_LG)
 #endif
 #ifdef RESOLVER1_WRITE_GROUPS
-#error "v3.15 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
+#error "v3.16 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
 #endif
 
 TempConflictBTree::TempConflictBTree(std::size_t budget)
@@ -323,9 +323,10 @@ void TempConflictBTree::addWrites(
 	}
 
 	enum class Step : uint8_t {
+		// Buckets run in enum order; continuations still wait for the next round.
+		PrepareInput, KeyMore,
 		Inspect, Route, InspectRight, CompareRight, Search, CompareSearch,
-		SearchReady, Previous, InspectPrevious, Insert, Scan, CompareEnd, Erase,
-		KeyMore, PrepareInput, Done
+		SearchReady, Previous, InspectPrevious, Insert, Scan, CompareEnd, Erase, Done
 	};
 	struct WriteTask {
 		WriteCursor cursor;
