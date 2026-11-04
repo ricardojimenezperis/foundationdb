@@ -10,7 +10,7 @@
 #define RESOLVER1_WRITE_PENDING (4 * RESOLVER1_WRITE_LG)
 #endif
 #ifdef RESOLVER1_WRITE_GROUPS
-#error "v3.13 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
+#error "v3.14 has no write groups: use WRITE_LG and WRITE_PENDING, not WRITE_GROUPS"
 #endif
 
 TempConflictBTree::TempConflictBTree(std::size_t budget)
@@ -116,46 +116,184 @@ void TempConflictBTree::addWrites(
 		return;
 	}
 	maxKeyLength_ = keyLength;
-	// Find each ordered group's leaf footprint, including the predecessor
-	// actually used by an exterior and the scan's stopping entry. No root walk.
-	for (uint32_t g = 0; g < writeLeaves.size(); ++g) {
-		auto& prep = writePreparation_[g];
-		if (prep.firstAccepted == endWrites) continue;
-		uint32_t last = prep.firstAccepted;
-		for (uint32_t w = nextBegin[last]; w < writeLeaves[g].end(); w = nextBegin[w]) last = w;
-		const auto& d = writeLeaves[resolveWriteGroup(g)];
-		auto* leaf = d.leaf != nullptr ? d.leaf : rightmostLeaf_;
-		const auto begin = points[readWriteBegins[prep.firstAccepted].index()].key;
-		const auto end = points[readWriteBegins[last].transaction].key;
-		if (leaf != nullptr) {
-			cleanExpired(leaf);
-			if (d.needsRightCheck()) {
-				for (auto* right = leaf->right; right != nullptr; right = right->right) {
-					cleanExpired(right);
-					if (right->header.count == 0) continue;
-					if (keyStore_.compareBegin(begin, right->ranges[right->order[0]]) < 0) break;
-					leaf = right;
+	auto hintBytes = [](const void* address, std::size_t length) {
+		if (length == 0) return;
+		const auto* bytes = static_cast<const char*>(address);
+		__builtin_prefetch(bytes);
+		// Short keys touch at most two lines. Hint both endpoints without a
+		// variable-trip loop; a duplicate hint to the same line is harmless.
+		if (length <= 64) {
+			__builtin_prefetch(bytes + length - 1);
+			return;
+		}
+		const std::size_t first = 64 - (reinterpret_cast<std::uintptr_t>(bytes) & 63);
+		for (std::size_t off = first; off < length; off += 64) __builtin_prefetch(bytes + off);
+	};
+	auto hintLeaf = [&](const LeafBlock* leaf) {
+		if (leaf == nullptr) return false;
+		hintBytes(leaf, BlockSize);
+		return true;
+	};
+	// Prepare up to 2G footprints in flight. Each cold leaf/key access yields
+	// to the other walkers; no writer starts until all footprints are closed.
+	// Cleanup is idempotent within this batch and does not unlink leaf nodes.
+	{
+		enum class FootStep : uint8_t { Start, Right, CompareRight, Begin, CompareBegin, Left, High, CompareHigh, KeyMore, Done };
+		struct FootTask {
+			StringRef begin, end;
+			LeafBlock* leaf = nullptr;
+			LeafBlock* scan = nullptr;
+			const KeyBlockHeader* block = nullptr;
+			std::size_t offset = 0, left = 0;
+			uint32_t group = 0;
+			FootStep step = FootStep::Done, afterKey = FootStep::Done;
+			bool rightCheck = false;
+		};
+		std::array<FootTask, RunnableTarget> walkers;
+		uint32_t next = 0, live = 0;
+		auto chunk = [&](FootTask& t) {
+			const auto bytes = std::min(t.left, BlockSize - t.offset);
+			if (bytes != 0) hintBytes(reinterpret_cast<const char*>(t.block) + t.offset, bytes);
+			t.left -= bytes;
+			if (t.left != 0) hintBytes(t.block, sizeof(KeyBlockHeader));
+			t.step = t.left != 0 ? FootStep::KeyMore : t.afterKey;
+		};
+		auto key = [&](FootTask& t, const RangeRef& range, bool end, FootStep after) {
+			t.block = range.firstBlock;
+			t.offset = range.keyOffset;
+			t.left = end ? std::max<std::size_t>(range.beginLength,
+				std::size_t(range.endStart) + range.endLength) : range.beginLength;
+			t.afterKey = after;
+			chunk(t);
+		};
+		auto fill = [&](FootTask& t) {
+			while (next < writeLeaves.size() && writePreparation_[next].firstAccepted == endWrites) ++next;
+			if (next == writeLeaves.size()) return;
+			t = FootTask{};
+			t.group = next++;
+			auto& prep = writePreparation_[t.group];
+			uint32_t last = prep.firstAccepted;
+			for (uint32_t w = nextBegin[last]; w < writeLeaves[t.group].end(); w = nextBegin[w]) last = w;
+			const auto& d = writeLeaves[resolveWriteGroup(t.group)];
+			t.leaf = d.leaf != nullptr ? d.leaf : rightmostLeaf_;
+			t.rightCheck = d.needsRightCheck();
+			t.begin = points[readWriteBegins[prep.firstAccepted].index()].key;
+			t.end = points[readWriteBegins[last].transaction].key;
+			prep.componentEnd = writeLeaves[t.group].end();
+			hintBytes(t.begin.begin(), t.begin.size());
+			hintBytes(t.end.begin(), t.end.size());
+			hintLeaf(t.leaf);
+			t.step = FootStep::Start;
+			++live;
+		};
+		auto advanceFootprint = [&](FootTask& t) {
+			auto& prep = writePreparation_[t.group];
+			for (;;) {
+				switch (t.step) {
+				case FootStep::Start:
+					if (t.leaf != nullptr) {
+						cleanExpired(t.leaf);
+						if (t.rightCheck) {
+							t.scan = t.leaf->right;
+							t.step = FootStep::Right;
+							if (hintLeaf(t.scan)) return;
+							continue;
+						}
+					}
+					t.step = FootStep::Begin;
+					continue;
+				case FootStep::Right:
+					if (t.scan == nullptr) { t.step = FootStep::Begin; continue; }
+					cleanExpired(t.scan);
+					if (t.scan->header.count != 0) {
+						key(t, t.scan->ranges[t.scan->order[0]], false, FootStep::CompareRight);
+						return;
+					}
+					t.scan = t.scan->right;
+					if (hintLeaf(t.scan)) return;
+					continue;
+				case FootStep::CompareRight:
+					if (keyStore_.compareBegin(t.begin, t.scan->ranges[t.scan->order[0]]) < 0) {
+						t.step = FootStep::Begin;
+						continue;
+					}
+					t.leaf = t.scan;
+					t.scan = t.scan->right;
+					t.step = FootStep::Right;
+					if (hintLeaf(t.scan)) return;
+					continue;
+				case FootStep::Begin:
+					prep.start = prep.low = prep.high = t.leaf;
+					if (t.leaf == nullptr) { t.step = FootStep::Done; return; }
+					if (t.leaf->header.count != 0) {
+						key(t, t.leaf->ranges[t.leaf->order[0]], false, FootStep::CompareBegin);
+						return;
+					}
+					t.scan = t.leaf->left;
+					t.step = FootStep::Left;
+					if (hintLeaf(t.scan)) return;
+					continue;
+				case FootStep::CompareBegin:
+					if (keyStore_.compareBegin(t.begin, t.leaf->ranges[t.leaf->order[0]]) < 0) {
+						t.scan = t.leaf->left;
+						t.step = FootStep::Left;
+						if (hintLeaf(t.scan)) return;
+						continue;
+					}
+					t.scan = t.leaf;
+					t.step = FootStep::High;
+					continue;
+				case FootStep::Left:
+					if (t.scan != nullptr) {
+						cleanExpired(t.scan);
+						prep.low = t.scan;
+						if (t.scan->header.count == 0) {
+							t.scan = t.scan->left;
+							if (hintLeaf(t.scan)) return;
+							continue;
+						}
+					}
+					t.scan = t.leaf;
+					t.step = FootStep::High;
+					continue;
+				case FootStep::High:
+					if (t.scan == nullptr) { t.step = FootStep::Done; return; }
+					cleanExpired(t.scan);
+					prep.high = t.scan;
+					if (t.scan->header.count != 0) {
+						key(t, t.scan->ranges[t.scan->order[t.scan->header.count - 1]], true, FootStep::CompareHigh);
+						return;
+					}
+					t.scan = t.scan->right;
+					if (hintLeaf(t.scan)) return;
+					continue;
+				case FootStep::CompareHigh:
+					if (keyStore_.compareEnd(t.end, t.scan->ranges[t.scan->order[t.scan->header.count - 1]]) < 0) {
+						t.step = FootStep::Done;
+						return;
+					}
+					t.scan = t.scan->right;
+					t.step = FootStep::High;
+					if (hintLeaf(t.scan)) return;
+					continue;
+				case FootStep::KeyMore:
+					t.block = t.block->nextBlock;
+					assert(t.block != nullptr);
+					t.offset = sizeof(KeyBlockHeader);
+					chunk(t);
+					return;
+				case FootStep::Done: return;
 				}
 			}
-		}
-		prep.start = leaf;
-		prep.low = leaf;
-		if (leaf != nullptr && (leaf->header.count == 0 ||
-			keyStore_.compareBegin(begin, leaf->ranges[leaf->order[0]]) < 0)) {
-			for (auto* left = leaf->left; left != nullptr; left = left->left) {
-				cleanExpired(left);
-				prep.low = left;
-				if (left->header.count != 0) break;
+		};
+		for (auto& t : walkers) fill(t);
+		while (live != 0) {
+			for (auto& t : walkers) {
+				if (t.step == FootStep::Done) continue;
+				advanceFootprint(t);
+				if (t.step == FootStep::Done) { --live; fill(t); }
 			}
 		}
-		prep.high = leaf;
-		for (auto* right = leaf; right != nullptr; right = right->right) {
-			cleanExpired(right);
-			prep.high = right;
-			if (right->header.count != 0 && keyStore_.compareEnd(end,
-				right->ranges[right->order[right->header.count - 1]]) < 0) break;
-		}
-		prep.componentEnd = writeLeaves[g].end();
 	}
 	// Ordered disjoint unions have monotone footprints. Walk each component
 	// until its last leaf; encountering the next group's first leaf absorbs
@@ -215,24 +353,6 @@ void TempConflictBTree::addWrites(
 		ready[tail] = slot;
 		++readyCount;
 		tasks[slot].runnable = true;
-	};
-	auto hintBytes = [](const void* address, std::size_t length) {
-		if (length == 0) return;
-		const auto* bytes = static_cast<const char*>(address);
-		__builtin_prefetch(bytes);
-		// Short keys touch at most two lines. Hint both endpoints without a
-		// variable-trip loop; a duplicate hint to the same line is harmless.
-		if (length <= 64) {
-			__builtin_prefetch(bytes + length - 1);
-			return;
-		}
-		const std::size_t first = 64 - (reinterpret_cast<std::uintptr_t>(bytes) & 63);
-		for (std::size_t off = first; off < length; off += 64) __builtin_prefetch(bytes + off);
-	};
-	auto hintLeaf = [&](const LeafBlock* leaf) {
-		if (leaf == nullptr) return false;
-		hintBytes(leaf, BlockSize);
-		return true;
 	};
 	auto setInput = [&](WriteTask& t) {
 		const auto& entry = readWriteBegins[t.entry];
