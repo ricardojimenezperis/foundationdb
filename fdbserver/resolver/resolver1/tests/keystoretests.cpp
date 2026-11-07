@@ -51,6 +51,8 @@ TEST_CASE("/resolver/KeyStore/AppendAfterReclaimingAllBlocks") {
 	const KeyBlockHeader* header = ref->firstBlock;
 
 	ASSERT_EQ(header->generation, ref->blockGen);
+	ASSERT(header->generation != 0);
+	ASSERT((header->generation & 1) == 0);
 	ASSERT(header->nextBlock == nullptr);
 
 	// The new block must be reachable from the list, so it is reclaimed

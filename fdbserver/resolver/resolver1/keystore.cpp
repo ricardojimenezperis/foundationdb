@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstring>
 #include <new>
+#include <stdexcept>
 #include <vector>
 
 KeyStore::KeyStore(PagePool& pool)
@@ -79,6 +80,12 @@ std::optional<KeyStore::RecordStart> KeyStore::appendRecord(
 	const std::size_t firstNewBlock = needsOpenBlock ? 0 : 1;
 
 	for (std::size_t i = firstNewBlock; i < neededBlocks; ++i) {
+		if (nextGeneration_ > std::numeric_limits<std::uint64_t>::max() - 2) {
+			for (std::size_t j = firstNewBlock; j < i; ++j) {
+				pool_.releaseBlock(blocks[j]);
+			}
+			throw std::overflow_error("KeyStore generation exhausted");
+		}
 		std::byte* block = pool_.allocateBlock();
 		if (block == nullptr) {
 			for (std::size_t j = firstNewBlock; j < i; ++j) {
@@ -89,7 +96,8 @@ std::optional<KeyStore::RecordStart> KeyStore::appendRecord(
 
 		blocks[i] = ::new (block) KeyBlockHeader{};
 		blocks[i]->nextBlock = nullptr;
-		blocks[i]->generation = nextGeneration_++;
+		blocks[i]->generation = nextGeneration_;
+		nextGeneration_ += 2;
 	}
 
 	if (needsOpenBlock) {
@@ -161,21 +169,26 @@ std::optional<KeyStore::RecordStart> KeyStore::appendRecord(
 
 	// Keep an open block with free space whenever the pool allows it.
 	if (openKeyBlockUsedBytes_ == blockSize_) {
-		std::byte* block = pool_.allocateBlock();
-
-		if (block == nullptr) {
+		if (nextGeneration_ > std::numeric_limits<std::uint64_t>::max() - 2) {
 			openKeyBlock_ = nullptr;
 		} else {
-			auto* header =
-				::new (block) KeyBlockHeader{};
+			std::byte* block = pool_.allocateBlock();
 
-			header->nextBlock = nullptr;
-			header->generation = nextGeneration_++;
+			if (block == nullptr) {
+				openKeyBlock_ = nullptr;
+			} else {
+				auto* header =
+					::new (block) KeyBlockHeader{};
 
-			newestKeyBlock_->nextBlock = header;
-			newestKeyBlock_ = header;
-			openKeyBlock_ = header;
-			openKeyBlockUsedBytes_ = sizeof(KeyBlockHeader);
+				header->nextBlock = nullptr;
+				header->generation = nextGeneration_;
+				nextGeneration_ += 2;
+
+				newestKeyBlock_->nextBlock = header;
+				newestKeyBlock_ = header;
+				openKeyBlock_ = header;
+				openKeyBlockUsedBytes_ = sizeof(KeyBlockHeader);
+			}
 		}
 	}
 

@@ -134,6 +134,6 @@ class KeyStore {
 		std::size_t openKeyBlockUsedBytes_ = 0;
 		KeyBlockHeader* newestKeyBlock_ = nullptr;  // used to link the last block to a new block 
 													// when openKeyBlock_ is nullptr and a new block is allocated
-		std::uint64_t nextGeneration_ = 1;
+		std::uint64_t nextGeneration_ = 2;
 		std::uint64_t lastReclaimedKeyGeneration_ = 0;
 };

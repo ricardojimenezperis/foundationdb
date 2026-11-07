@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <string_view>
 #include <optional>
 #include <type_traits>
@@ -200,6 +201,7 @@ struct LeafBlockLayout {
 	// While addWrites applies a batch, the representative of the write groups prepared for this
 	// leaf; UINT32_MAX when none.
 	std::uint32_t firstWrite = UINT32_MAX;
+	std::uint32_t mutationEpoch = 0;
 
 	InternalBlock* parent() const {
 		return header.parent;
@@ -352,10 +354,14 @@ private:
 
 inline LeafBlock* BNodeStore::allocateLeaf(Version cv) {
 	assert(newestNode_ == nullptr || cv >= newestNode_->maxCV);
+	if (nextGeneration_ > std::numeric_limits<std::uint64_t>::max() - 2) {
+		throw std::overflow_error("BNodeStore generation exhausted");
+	}
 	std::byte* block= pool_.allocateBlock();
 	if (block==nullptr) return nullptr;
 	LeafBlock* leaf = ::new(block) LeafBlock{};
-	leaf->header.generation= nextGeneration_++;
+	leaf->header.generation= nextGeneration_;
+	nextGeneration_ += 2;
 	leaf->header.kind= BNodeKind::Leaf;
 	leaf->header.maxCV=cv;
 	insertLast(&leaf->header);
@@ -364,10 +370,14 @@ inline LeafBlock* BNodeStore::allocateLeaf(Version cv) {
 
 inline InternalBlock* BNodeStore::allocateInternal(Version cv) {
 	assert(newestNode_ == nullptr || cv >= newestNode_->maxCV);
+	if (nextGeneration_ > std::numeric_limits<std::uint64_t>::max() - 2) {
+		throw std::overflow_error("BNodeStore generation exhausted");
+	}
 	std::byte* block= pool_.allocateBlock();
 	if (block==nullptr) return nullptr;
 	InternalBlock* internal = ::new(block) InternalBlock{};
-	internal->header.generation= nextGeneration_++;
+	internal->header.generation= nextGeneration_;
+	nextGeneration_ += 2;
 	internal->header.kind= BNodeKind::Internal;
 	internal->header.maxCV=cv;
 	insertLast(&internal->header);

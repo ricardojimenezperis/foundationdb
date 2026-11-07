@@ -847,7 +847,9 @@ TEST_CASE("/resolver/TempConflictBTree/CleanExpiredRemovesOnlyExpiredEntries") {
 	t.build(3);
 
 	Access::setReclaimCV(t.tree, 10);
+	const uint32_t before = leaf->mutationEpoch;
 	ASSERT(Access::cleanExpired(t.tree, leaf));
+	ASSERT_EQ(leaf->mutationEpoch, before + 3);
 
 	const std::vector<Entry> left = leafEntries(t, leaf);
 	ASSERT_EQ(left.size(), 2);
@@ -1501,6 +1503,8 @@ TEST_CASE("/resolver/TempConflictBTree/SplitRootLeaf") {
 	ASSERT_EQ(root->header.maxCV, SplitCV);
 	ASSERT(childAt(root, 0) == &old->header);
 	auto* sibling = reinterpret_cast<LeafBlock*>(childAt(root, 1));
+	ASSERT_EQ(old->mutationEpoch, 1);
+	ASSERT_EQ(sibling->mutationEpoch, 1);
 	ASSERT_EQ(old->header.count, LeafCapacity / 2);
 	ASSERT_EQ(sibling->header.count, LeafCapacity - LeafCapacity / 2);
 	ASSERT(old->left == nullptr && old->right == sibling);
@@ -1870,10 +1874,12 @@ TEST_CASE("/resolver/TempConflictBTree/InsertAtFillsRootLeaf") {
 	std::vector<unsigned> inserted;
 	for (unsigned k : fillOrder()) {
 		const Version cv = 100 + static_cast<Version>(inserted.size());
+		const uint32_t before = leaf->mutationEpoch;
 		insertEntry(t, 0, rankAmong(inserted, k), wideKey(10 + 2 * k),
 					keyAfter(wideKey(10 + 2 * k)), cv);
 		inserted.push_back(k);
 
+		ASSERT_EQ(leaf->mutationEpoch, before + 1);
 		ASSERT_EQ(leaf->header.count, inserted.size());
 		ASSERT_EQ(leaf->header.maxCV, cv);
 		ASSERT(t.nodes().oldestNode() == &leaf->header);
@@ -2467,7 +2473,9 @@ TEST_CASE("/resolver/TempConflictBTree/EraseAtKeepsLeaf") {
 		LeafBlock* leaf = t.leaves[c.leaf].leaf;
 		LeafBlock* const erasedFrom = leaf;
 		std::size_t rank = c.rank;
+		const uint32_t before = erasedFrom->mutationEpoch;
 		eraseAndCheck(t, model, leaf, rank);
+		ASSERT_EQ(erasedFrom->mutationEpoch, before + 1);
 		if (c.rank == 0) {
 			const auto first = erasedFrom->order[0];
 			ASSERT_EQ(t.keys().compareBegin(

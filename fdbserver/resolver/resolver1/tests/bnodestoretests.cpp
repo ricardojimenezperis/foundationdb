@@ -117,6 +117,7 @@ TEST_CASE("/resolver/BNodeStore/AllocateLeafInitializesNode") {
 
 	ASSERT(leaf->header.kind == BNodeKind::Leaf);
 	ASSERT_EQ(leaf->header.generation, 1);
+	ASSERT_EQ(leaf->mutationEpoch, 0);
 	ASSERT_EQ(leaf->header.maxCV, Version{7});
 	ASSERT_EQ(leaf->header.count, 0);
 	ASSERT(leaf->header.parent == nullptr);
@@ -167,8 +168,11 @@ TEST_CASE("/resolver/BNodeStore/GenerationsIncreaseAcrossKinds") {
 	LeafBlock* c = store.allocateLeaf(2);
 
 	ASSERT_EQ(a->header.generation, 1);
-	ASSERT_EQ(b->header.generation, 2);
-	ASSERT_EQ(c->header.generation, 3);
+	ASSERT_EQ(b->header.generation, 3);
+	ASSERT_EQ(c->header.generation, 5);
+	ASSERT((a->header.generation & 1) != 0);
+	ASSERT((b->header.generation & 1) != 0);
+	ASSERT((c->header.generation & 1) != 0);
 }
 
 TEST_CASE("/resolver/BNodeStore/AgeListFollowsAllocationOrder") {
@@ -214,7 +218,7 @@ TEST_CASE("/resolver/BNodeStore/AllocationFailsWhenPoolExhausted") {
 
 	InternalBlock* internal = store.allocateInternal(1);
 	ASSERT(internal != nullptr);
-	ASSERT_EQ(internal->header.generation, blocks + 1);
+	ASSERT_EQ(internal->header.generation, 2 * blocks + 1);
 	ASSERT(internal->header.agePrevious == nodes.back());
 }
 
@@ -229,6 +233,7 @@ TEST_CASE("/resolver/BNodeStore/ReleaseReturnsBlockToPool") {
 
 	const auto oldGeneration = leaf->header.generation;
 	store.releaseNode(&leaf->header);
+	ASSERT_EQ(leaf->header.generation, 0);
 
 	// The block is reused for a node of the other kind.
 	InternalBlock* internal = store.allocateInternal(2);
@@ -240,6 +245,27 @@ TEST_CASE("/resolver/BNodeStore/ReleaseReturnsBlockToPool") {
 
 	store.releaseNode(&internal->header);
 	ASSERT_EQ(freeBlockCount(pool), freeBefore);
+}
+
+TEST_CASE("/resolver/BNodeStore/NodeBlockReusedForKeyHasDifferentParity") {
+	PagePool pool(PageSize, BlockSize);
+	KeyStore keys(pool);
+	BNodeStore store(pool, keys);
+
+	LeafBlock* leaf = store.allocateLeaf(1);
+	ASSERT(leaf != nullptr);
+	const auto nodeGeneration = leaf->header.generation;
+	ASSERT((nodeGeneration & 1) != 0);
+	store.releaseNode(&leaf->header);
+	ASSERT_EQ(leaf->header.generation, 0);
+
+	const std::byte value[] = {std::byte{'k'}};
+	const auto ref = keys.appendKey(value, 1, 2);
+	ASSERT(ref.has_value());
+	ASSERT(reinterpret_cast<const void*>(ref->firstBlock) ==
+		   reinterpret_cast<const void*>(leaf));
+	ASSERT(ref->blockGen != 0 && (ref->blockGen & 1) == 0);
+	ASSERT(ref->blockGen != nodeGeneration);
 }
 
 TEST_CASE("/resolver/BNodeStore/ReleaseOnlyNode") {
@@ -362,7 +388,7 @@ TEST_CASE("/resolver/BNodeStore/UpdateCVMovesNodeToNewest") {
 
 	// Generations keep their allocation order.
 	ASSERT_EQ(a->generation, 1);
-	ASSERT_EQ(c->generation, 3);
+	ASSERT_EQ(c->generation, 5);
 }
 
 TEST_CASE("/resolver/BNodeStore/OldestCV") {

@@ -88,15 +88,18 @@ void TempConflictBTree::addWrites(
 		WriteCursor cursor;
 		std::pair<StringRef, StringRef> write;
 		LeafBlock* anchor = nullptr;
+		LeafBlock* savedLeaf = nullptr;
 		LeafBlock* scan = nullptr;
 		const KeyBlockHeader* keyBlock = nullptr;
 		std::size_t keyOffset = 0, keyLeft = 0;
 		std::size_t lo = 0, hi = 0, rank = 0, scanRank = 0;
+		uint64_t savedLeafGeneration = 0;
 		uint64_t mutation = 0;
+		uint32_t savedLeafEpoch = 0;
 		Version cutoff = 0;
 		uint32_t group = 0, representative = 0, entry = 0;
 		Step step = Step::Done, afterKey = Step::Done, afterPrepare = Step::Inspect;
-		bool found = false, owned = false;
+		bool found = false, owned = false, hasSavedLeaf = false;
 	};
 	struct Group {
 		std::array<WriteTask, TaskCapacity> tasks;
@@ -130,6 +133,18 @@ void TempConflictBTree::addWrites(
 		hintBytes(t.write.second.begin(), t.write.second.size());
 		return t.write.first.size() != 0 || t.write.second.size() != 0;
 	};
+	auto saveLeafRevision = [&](WriteTask& t, LeafBlock* leaf) {
+		t.savedLeaf = leaf;
+		t.savedLeafGeneration = leaf == nullptr ? 0 : leaf->header.generation;
+		t.savedLeafEpoch = leaf == nullptr ? 0 : leaf->mutationEpoch;
+		t.hasSavedLeaf = true;
+	};
+	auto savedLeafIsCurrent = [&](const WriteTask& t) {
+		if (!t.hasSavedLeaf || t.savedLeaf == nullptr) return true;
+		const uint64_t generation = t.savedLeaf->header.generation;
+		return (generation & 1) != 0 && generation == t.savedLeafGeneration &&
+			t.savedLeaf->mutationEpoch == t.savedLeafEpoch;
+	};
 	auto resetSearch = [&](WriteTask& t) {
 		t.representative = resolveWriteGroup(t.group);
 		const auto& destination = writeLeaves[t.representative];
@@ -141,6 +156,7 @@ void TempConflictBTree::addWrites(
 		t.lo = 0;
 		t.found = false;
 		t.step = Step::Inspect;
+		saveLeafRevision(t, t.cursor.leaf);
 		hintLeaf(t.cursor.leaf);
 	};
 	auto fill = [&](Group& g) {
@@ -197,6 +213,7 @@ void TempConflictBTree::addWrites(
 		}
 		// rank identifies the insertion or its right exterior, both <= the
 		// next accepted begin. Search only the remaining suffix of this leaf.
+		saveLeafRevision(t, t.cursor.leaf);
 		t.lo = t.rank;
 		t.found = false;
 		t.afterPrepare = Step::Inspect;
@@ -226,7 +243,8 @@ void TempConflictBTree::addWrites(
 			const auto& d = writeLeaves[representative];
 			const LeafBlock* anchor = d.leaf != nullptr ? d.leaf : rightmostLeaf_;
 			if (representative != t.representative || anchor != t.anchor ||
-				writePreparation_[representative].mutation != t.mutation || reclaimCV_ != t.cutoff) {
+				writePreparation_[representative].mutation != t.mutation || reclaimCV_ != t.cutoff ||
+				!savedLeafIsCurrent(t)) {
 				// Do not repeatedly redo a search while older writes keep changing
 				// its destination. Park without dereferencing the saved pointers.
 				if (!head) return Visit::Parked;
@@ -265,7 +283,8 @@ void TempConflictBTree::addWrites(
 				reserveWrite(t.write);
 				if (t.cursor.leaf == nullptr) t.cursor.leaf = rightmostLeaf_;
 				t.step = t.afterPrepare;
-				if (before != t.cursor.leaf || cutoff != reclaimCV_) {
+				if (before != t.cursor.leaf || cutoff != reclaimCV_ ||
+					!savedLeafIsCurrent(t)) {
 					t.lo = 0;
 					t.found = false;
 					t.step = Step::Inspect;
@@ -277,6 +296,7 @@ void TempConflictBTree::addWrites(
 				if (leaf == nullptr) {
 					t.rank = 0;
 					t.found = false;
+					saveLeafRevision(t, nullptr);
 					t.step = Step::SearchReady;
 					continue;
 				}
@@ -296,6 +316,7 @@ void TempConflictBTree::addWrites(
 			case Step::Route:
 				t.scan = leaf->right;
 				t.step = Step::InspectRight;
+				saveLeafRevision(t, t.scan);
 				if (hintLeaf(t.scan)) return Visit::Prefetched;
 				continue;
 			case Step::InspectRight:
@@ -309,9 +330,12 @@ void TempConflictBTree::addWrites(
 					t.scan->cv[t.scan->order[t.scanRank]] <= reclaimCV_) ++t.scanRank;
 				if (t.scanRank == t.scan->header.count) {
 					t.scan = t.scan->right;
+					saveLeafRevision(t, t.scan);
 					if (hintLeaf(t.scan)) return Visit::Prefetched;
-				} else if (hintKey(t, t.scan->ranges[t.scan->order[t.scanRank]], false, Step::CompareRight)) {
-					return Visit::Prefetched;
+				} else {
+					saveLeafRevision(t, t.scan);
+					if (hintKey(t, t.scan->ranges[t.scan->order[t.scanRank]], false,
+							Step::CompareRight)) return Visit::Prefetched;
 				}
 				continue;
 			case Step::CompareRight:
@@ -332,11 +356,13 @@ void TempConflictBTree::addWrites(
 				if (t.lo == t.hi) {
 					t.rank = t.lo;
 					t.found = false;
+					saveLeafRevision(t, leaf);
 					t.step = Step::SearchReady;
 					goto searchReady;
 				} else {
 					assert(t.lo < t.hi);
 					t.rank = t.lo + (t.hi - t.lo) / 2;
+					saveLeafRevision(t, leaf);
 					if (hintKey(t, leaf->ranges[leaf->order[t.rank]], false, Step::CompareSearch)) {
 						return Visit::Prefetched;
 					}
@@ -346,6 +372,7 @@ void TempConflictBTree::addWrites(
 				const int compare = keyStore_.compareBegin(t.write.first, leaf->ranges[leaf->order[t.rank]]);
 				if (compare == 0) {
 					t.found = true;
+					saveLeafRevision(t, leaf);
 					t.step = Step::SearchReady;
 					goto searchReady;
 				} else {
@@ -357,11 +384,16 @@ void TempConflictBTree::addWrites(
 			case Step::SearchReady:
 			searchReady:
 				if (!head) return Visit::Parked;
+				assert(t.savedLeaf == t.cursor.leaf);
+				assert(savedLeafIsCurrent(t));
 				prepareWriteSplit(t.cursor, t.rank, t.found, cv);
+				saveLeafRevision(t, t.cursor.leaf);
 				t.step = Step::Previous;
 				goto previous;
 			case Step::Previous:
 			previous:
+				assert(t.savedLeaf == t.cursor.leaf);
+				assert(savedLeafIsCurrent(t));
 				if (t.cursor.leaf == nullptr || t.found) {
 					t.step = Step::Insert;
 				} else if (t.rank > 0) {
@@ -393,15 +425,20 @@ void TempConflictBTree::addWrites(
 				}
 				continue;
 			case Step::Insert: {
+				assert(t.savedLeaf == t.cursor.leaf);
+				assert(savedLeafIsCurrent(t));
 				auto range = keyStore_.appendRange(t.write.first, t.write.second, cv);
 				assert(range.has_value());
 				if (t.cursor.leaf == nullptr) {
 					t.cursor.leaf = createRootLeaf(cv);
 					insertAt(t.rank, *range, cv, t.cursor.leaf);
+					saveLeafRevision(t, t.cursor.leaf);
 					if (finishInterval(t)) return Visit::Prefetched;
 				} else if (insertWithLeftExterior(t.write, *range, cv, t.found, t.cursor.leaf, t.rank)) {
+					saveLeafRevision(t, t.cursor.leaf);
 					if (finishInterval(t)) return Visit::Prefetched;
 				} else {
+					saveLeafRevision(t, t.cursor.leaf);
 					t.scan = t.cursor.leaf;
 					t.scanRank = t.rank + 1;
 					t.step = Step::Scan;
@@ -492,6 +529,7 @@ void TempConflictBTree::addWrites(
 }
 
 void TempConflictBTree::noteWriteLeafMutation(LeafBlock* leaf) {
+	++leaf->mutationEpoch;
 	if (!writePreparation_.empty() && leaf->firstWrite != UINT32_MAX) {
 		++writePreparation_[leaf->firstWrite].mutation;
 	}
@@ -1502,6 +1540,7 @@ LeafBlock* TempConflictBTree::splitLeaf(
 		++newNode->header.count;
 	}
 	oldNode->header.count = static_cast<std::uint8_t>(cutRank);
+	++newNode->mutationEpoch;
 
 	newNode->lastCleanReadBatch = oldNode->lastCleanReadBatch;
 	newNode->left = oldNode;
