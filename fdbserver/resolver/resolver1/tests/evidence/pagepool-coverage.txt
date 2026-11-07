@@ -1,7 +1,13 @@
 File 'pagepool.cpp'
-Lines executed:100.00% of 32
-Branches executed:100.00% of 14
-Taken at least once:71.43% of 14
+Lines executed:82.00% of 50
+Branches executed:76.47% of 34
+Taken at least once:38.24% of 34
 No calls
 Creating 'pagepool.cpp.gcov'
+
+File '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/stdexcept'
+Lines executed:0.00% of 1
+No branches
+No calls
+Creating 'stdexcept.gcov'
 

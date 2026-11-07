@@ -7,6 +7,7 @@ PASS /resolver/BNodeStore/GenerationsIncreaseAcrossKinds
 PASS /resolver/BNodeStore/AgeListFollowsAllocationOrder
 PASS /resolver/BNodeStore/AllocationFailsWhenPoolExhausted
 PASS /resolver/BNodeStore/ReleaseReturnsBlockToPool
+PASS /resolver/BNodeStore/NodeBlockReusedForKeyHasDifferentParity
 PASS /resolver/BNodeStore/ReleaseOnlyNode
 PASS /resolver/BNodeStore/ReleaseOldestNode
 PASS /resolver/BNodeStore/ReleaseMiddleNode
@@ -228,4 +229,5 @@ PASS /resolver/TempConflictBTree/CheckReadsPastSeparatorsInReusedKeyBlock
 PASS /resolver/TempConflictBTree/AddWritesReclaimsRoomForLongKeys
 PASS /resolver/TempConflictBTree/AddWritesThrowsWhenThePoolCannotHoldAWrite
 PASS /resolver/TempConflictBTree/AddWritesKeepsTheReserveOfALongKeyAfterReclaimingIt
-228 passed, 0 failed
+PASS /resolver/TempConflictBTree/AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf
+230 passed, 0 failed

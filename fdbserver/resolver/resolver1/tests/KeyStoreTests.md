@@ -61,17 +61,17 @@ the copies.
 
   | File | SHA-256 |
   |---|---|
-  | `keystore.cpp` | `b09886264fe0237c` |
-  | `keystore.h` | `5669791aadb07001` |
-  | `fdbcompat.h` | `2e57a5fd8b1629ea` |
+  | `keystore.cpp` | `1e1f08d5dc1e8f49` |
+  | `keystore.h` | `7923ad926d27acfc` |
+  | `fdbcompat.h` | `50bf041b46640d1d` |
   | `../ResolverBatchTypes.h` | `44e93cb91d982c40` |
   | `common.h` | `a815af89662b3a73` |
-  | `pagepool.cpp` | `1b463f87266e646f` |
-  | `pagepool.h` | `54456873974dbb8f` |
+  | `pagepool.cpp` | `66d0fa33d5e1b771` |
+  | `pagepool.h` | `86f8dee90b69e43e` |
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `2a8173902bc33339` |
-  | `tests/keystoretests.cpp` | `4490adc5be7f9623` |
+  | `tests/keystoretests.cpp` | `f3c274cf80f60567` |
   | `tests/pagepooltests.cpp` | `059580ab0c6dff71` |
 
 - Working tree: the files listed above
@@ -149,7 +149,7 @@ Unless stated otherwise, tests use 64-byte blocks: a 24-byte
 
 | Test case | Property checked | Result |
 |---|---|---|
-| `/resolver/KeyStore/AppendAfterReclaimingAllBlocks` | With one block in the pool: after filling it and reclaiming it, a new key starts a new list at offset 24 with a correct header, and its block can be reclaimed and returned to the pool. | PASS |
+| `/resolver/KeyStore/AppendAfterReclaimingAllBlocks` | With one block in the pool: after filling it and reclaiming it, a new key starts a new list at offset 24 with a correct header and a nonzero even generation, and its block can be reclaimed and returned to the pool. | PASS |
 | `/resolver/KeyStore/AppendAfterReclaimingOldestBlock` | With every block full and only the oldest reclaimed, a new key's block is linked after the last full block; reclamation follows the list to it and both blocks return to the pool. | PASS |
 | `/resolver/KeyStore/DestructorReturnsAllBlocks` | After storing single- and multi-block keys, destroying the store returns every block to the pool. | PASS |
 | `/resolver/KeyStore/ReusedBlockDoesNotReviveOldReferences` | When a reclaimed block is reused for a new key at the same block address and offset, the new key gets a higher generation, the old reference stays invalid, and the new one is valid with the new bytes. | PASS |
@@ -207,8 +207,8 @@ checked through both views, and its `endStart` is 0 when it is a point
 and the length of its begin otherwise.
 
 41 KeyStore tests passed, 0 failed. The full run, including the 15
-PagePool tests, the 47 BNodeStore tests and the 124 TempConflictBTree
-tests, reports 228 passed and 0 failed.
+PagePool tests, the 48 BNodeStore tests and the 126 TempConflictBTree
+tests, reports 230 passed and 0 failed.
 
 These preconditions are checked with `assert`, which terminates the
 process when it fails and is removed when `NDEBUG` is defined. The
@@ -245,18 +245,20 @@ gcov:
 
 | Metric | Result |
 |---|---|
-| Lines executed | 100.00% of 310 |
-| Branches executed | 100.00% of 160 |
-| Taken at least once | 84.38% of 160 |
+| Lines executed | 98.13% of 321 |
+| Branches executed | 95.35% of 172 |
+| Taken at least once | 79.65% of 172 |
 
 llvm-cov source-based coverage:
 
 | Metric | Result |
 |---|---|
-| Regions | 100.00% of 179 |
+| Regions | 97.34% of 188 |
 | Functions | 100.00% of 26 |
-| Lines | 100.00% of 355 |
-| Branches | 100.00% of 120 |
+| Lines | 98.37% of 367 |
+| Branches | 96.83% of 126 |
+
+Coverage classification scope. The coverage totals above are derived from the Apple clang 15 evidence regenerated for the v3.8 tree `2b62382a` and are authoritative for this revision. The detailed classification below was produced for Resolver v2 at `491d3f5a6`; its file-and-line references and branch inventory have not been reclassified for v3.8 and must not be interpreted as a complete analysis of the current uncovered branches. The current evidence reports 35 branch elements not taken. Reclassification of those elements is tracked as separate follow-up work.
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
@@ -509,7 +511,7 @@ other outcome is taken on every execution of the line.
 ## Evidence
 
 - [Test output](evidence/keystore-tests.txt): output of `make -B test`
-  for the full suite (228 tests, PagePool, KeyStore, BNodeStore and
+  for the full suite (230 tests, PagePool, KeyStore, BNodeStore and
   TempConflictBTree). It is the same run as `pagepool-tests.txt`,
   `bnodestore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/keystore-coverage.txt): gcov output after

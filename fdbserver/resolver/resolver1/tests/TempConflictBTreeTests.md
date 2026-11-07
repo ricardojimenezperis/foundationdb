@@ -115,24 +115,24 @@ key bytes are being accessed.
 
   | File | SHA-256 |
   |---|---|
-  | `tempconflictbtree.cpp` | `879b0d901a776403` |
-  | `tempconflictbtree.h` | `5973f13897edf55a` |
+  | `tempconflictbtree.cpp` | `d8d125cf0808140c` |
+  | `tempconflictbtree.h` | `836d53adee100a14` |
   | `bnodestore.cpp` | `a945a23136d881e9` |
-  | `bnodestore.h` | `4ff857dd23b118d6` |
-  | `keystore.cpp` | `b09886264fe0237c` |
-  | `keystore.h` | `5669791aadb07001` |
-  | `pagepool.cpp` | `1b463f87266e646f` |
-  | `pagepool.h` | `54456873974dbb8f` |
-  | `fdbcompat.h` | `2e57a5fd8b1629ea` |
+  | `bnodestore.h` | `c80b90d423d97de6` |
+  | `keystore.cpp` | `1e1f08d5dc1e8f49` |
+  | `keystore.h` | `7923ad926d27acfc` |
+  | `pagepool.cpp` | `66d0fa33d5e1b771` |
+  | `pagepool.h` | `86f8dee90b69e43e` |
+  | `fdbcompat.h` | `50bf041b46640d1d` |
   | `common.h` | `a815af89662b3a73` |
   | `../ResolverBatchTypes.h` | `44e93cb91d982c40` |
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `2a8173902bc33339` |
-  | `tests/tempconflictbtreetests.cpp` | `8c30706df0e9ea8c` |
+  | `tests/tempconflictbtreetests.cpp` | `3e76fd7f2b6c0a99` |
   | `tests/pagepooltests.cpp` | `059580ab0c6dff71` |
-  | `tests/keystoretests.cpp` | `4490adc5be7f9623` |
-  | `tests/bnodestoretests.cpp` | `eba26821ec6756c6` |
+  | `tests/keystoretests.cpp` | `f3c274cf80f60567` |
+  | `tests/bnodestoretests.cpp` | `a08ffdb64836e858` |
   | `tests/coverage.sh` | `6efaddf0828ff825` |
 
 - Working tree: the files listed above
@@ -268,7 +268,7 @@ Expiry, separator refresh and deferred cleanup:
 
 | Test case | Property checked | Result |
 |---|---|---|
-| `/resolver/TempConflictBTree/CleanExpiredRemovesOnlyExpiredEntries` | With `reclaimCV` 10, cleaning a leaf with CVs 5, 15, 3, 20 and 10 keeps exactly the entries with CVs 15 and 20, frees exactly the other slots and reports a change; a second cleaning reports none. | PASS |
+| `/resolver/TempConflictBTree/CleanExpiredRemovesOnlyExpiredEntries` | With `reclaimCV` 10, cleaning a leaf with CVs 5, 15, 3, 20 and 10 keeps exactly the entries with CVs 15 and 20, frees exactly the other slots, raises the leaf's mutation epoch by 3 and reports a change; a second cleaning reports none. | PASS |
 | `/resolver/TempConflictBTree/RefreshSeparatorKeepsFreshSeparator` | A separator whose CV is above `reclaimCV` is not changed, and its leaf is not cleaned. | PASS |
 | `/resolver/TempConflictBTree/RefreshSeparatorFromLeaf` | An expired separator becomes the begin of the first entry left after cleaning the leaf, with its CV and a valid key. | PASS |
 | `/resolver/TempConflictBTree/RefreshSeparatorRemovesEmptyLeaf` | A full leaf left empty by the refresh is removed; its neighbours are linked and the parent no longer counts it as needing a split. | PASS |
@@ -298,7 +298,7 @@ Splits:
 |---|---|---|
 | `/resolver/TempConflictBTree/NeedsSplitOfHeaderMatchesNodeKind` | For many free-slot patterns, a leaf needs a split with at most one free slot and an internal node when its free slots equal its children needing a split; the header overload agrees with the typed ones. | PASS |
 | `/resolver/TempConflictBTree/FindKeyReturnsDeepestNodeNeedingSplit` | In a layout of 25 leaves under a first internal node that needs a split, 15 of them full, and 5 leaves under a second node, `findKey` returns the full leaf, otherwise the internal node needing a split, otherwise none. | PASS |
-| `/resolver/TempConflictBTree/SplitRootLeaf` | A full root leaf splits into halves of 29 and 30 entries under a new root with CV 500, linked to each other; the new separator is the first begin of the sibling with its CV. For every begin, every key after a begin and a key before the first, the leaf and rank returned by the split are those `findKey` returns on the split tree, and no entry is lost. | PASS |
+| `/resolver/TempConflictBTree/SplitRootLeaf` | A full root leaf splits into halves of 29 and 30 entries under a new root with CV 500, linked to each other, each with mutation epoch 1; the new separator is the first begin of the sibling with its CV. For every begin, every key after a begin and a key before the first, the leaf and rank returned by the split are those `findKey` returns on the split tree, and no entry is lost. | PASS |
 | `/resolver/TempConflictBTree/SplitLeafUnderParent` | A full leaf under a parent: the sibling is linked between the leaf and its right neighbour and inserted after it in the parent, which stops counting the leaf; positions are kept as above. | PASS |
 | `/resolver/TempConflictBTree/SplitLeafUnderParentNeedingSplit` | Splitting a full leaf whose parent needs a split uses the reserved slot: the parent becomes full, counts no child, and is now the node `findKey` returns as needing a split. | PASS |
 | `/resolver/TempConflictBTree/SplitRootInternal` | Five layouts of an internal root needing a split (full without counted children; counted children first, last and spread; all counted): the cut is the shortest prefix reaching half the weight, both halves stop needing a split, children keep their order, the sibling's slots are filled in rank order, and leaf and rank are unchanged. | PASS |
@@ -310,7 +310,7 @@ Insertion, erasure, detachment and propagation:
 
 | Test case | Property checked | Result |
 |---|---|---|
-| `/resolver/TempConflictBTree/InsertAtFillsRootLeaf` | An empty root leaf is filled in a scattered order: each insertion raises the leaf's maximum CV, the leaf stays the oldest node, and it needs a split from its 58th entry on. | PASS |
+| `/resolver/TempConflictBTree/InsertAtFillsRootLeaf` | An empty root leaf is filled in a scattered order: each insertion raises the leaf's maximum CV and its mutation epoch by 1, the leaf stays the oldest node, and it needs a split from its 58th entry on. | PASS |
 | `/resolver/TempConflictBTree/InsertAtFillsLeafUnderParent` | A leaf between two others is filled in a scattered order: its separator follows its first key, the parent's CVs follow the leaf's, and the parent counts the leaf from its 58th entry on. | PASS |
 | `/resolver/TempConflictBTree/InsertAtUpdateCombinations` | All eight combinations of the updates an insertion may cause in the parent: the leaf starts needing a split, the separator changes because the entry goes first, the maximum CV rises because the entry is newer. | PASS |
 | `/resolver/TempConflictBTree/InsertAtPropagatesSeparator` | An entry inserted first in a leaf changes the separators up to the first ancestor where the subtree is not the first child, for first and non-first leaves of both internal nodes. | PASS |
@@ -318,7 +318,7 @@ Insertion, erasure, detachment and propagation:
 | `/resolver/TempConflictBTree/InsertAtPropagatesMaxCV` | A newer entry raises the maximum CVs up to the root; a second one with the same CV under the same parent stops at the parent. | PASS |
 | `/resolver/TempConflictBTree/PropagateUpdatesSeparator` | After removing the first entry of a leaf, propagating the separator copies the new first key and its CV into the parent, and further up while the node is a first child. | PASS |
 | `/resolver/TempConflictBTree/PropagateUpdatesSeparatorOfInternalNode` | The same for an internal node's first separator; on the root, and on a root leaf, nothing changes. | PASS |
-| `/resolver/TempConflictBTree/EraseAtKeepsLeaf` | Erasing entries that leave their leaf non-empty (middle; first, with the separators following across levels; last with a leaf to the right; last of the last leaf): the cursor identifies the next entry or the end position, and the tree matches the model. | PASS |
+| `/resolver/TempConflictBTree/EraseAtKeepsLeaf` | Erasing entries that leave their leaf non-empty (middle; first, with the separators following across levels; last with a leaf to the right; last of the last leaf): each erase raises the leaf's mutation epoch by 1, the cursor identifies the next entry or the end position, and the tree matches the model. | PASS |
 | `/resolver/TempConflictBTree/EraseAtPropagatesSplitCleared` | A leaf that stops needing a split by an erasure is no longer counted, through a parent with one free slot. | PASS |
 | `/resolver/TempConflictBTree/EraseAtKeepsSplitOfFullLeaf` | A full leaf still needs a split after losing one entry, and the counts above do not change. | PASS |
 | `/resolver/TempConflictBTree/EraseAtRemovesLeaf` | Erasing the only entry of a leaf removes it: neighbours linked, parent count reduced, cursor at the next leaf or at the end of the previous one, separators above following the parent's new first key. | PASS |
@@ -383,6 +383,7 @@ cannot keep working by accident.
 | `/resolver/TempConflictBTree/AddWritesReclaimsRoomForLongKeys` | In a pool of 9 pages filled with point writes until history is reclaimed, a range of 30,001-byte keys, then a write of 30,001-byte keys inside it, which needs 92 blocks for itself and its two exteriors, more than the 35 reserved for short keys: `addWrites` reclaims room for all of it, the cut stays below the range's CV, and `checkReads` finds the left exterior, the write and the right exterior with their CVs. | PASS |
 | `/resolver/TempConflictBTree/AddWritesThrowsWhenThePoolCannotHoldAWrite` | In a pool of 64 blocks, which holds the reserve for short keys but not the 197 blocks of one write of 65,000-byte keys: that write throws `std::length_error` after reclaiming everything (the cut reaches the CV of the earlier write), and the tree then takes an ordinary write, which `checkReads` finds. | PASS |
 | `/resolver/TempConflictBTree/AddWritesKeepsTheReserveOfALongKeyAfterReclaimingIt` | In a pool of 12 pages (384 blocks), one range of 30,001-byte keys and then 20,000 point writes of distinct short keys, against the same point writes alone: the long range is reclaimed, yet the first tree keeps the 92-block reserve and ends with a higher `reclaimCV` (12,413 against 10,905); reads at each tree's `reclaimCV` of 207 written keys, one in 97, and of the six around the cut, give the outcomes the write CVs determine, none too old. | PASS |
+| `/resolver/TempConflictBTree/AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | With the production geometry, 2 KiB blocks in a pool of two 64 KiB pages (64 blocks), batches at CV 1 to 37 each write the distinct point keys drawn by a fixed generator at one CV, then read every key at the previous version. Reclamation frees the prepared destination of a write group while another task holds a rank. After every batch the structure is valid and every write of the batch is in the tree; the 4,645 reads give exactly 0 too-old transactions and 4,645 conflicts, with FNV-1a hash `0xe4379ac1a8a77428` of the decisions, at least one admitted read, and a conflict for every admitted read. With other block sizes the body is skipped. | PASS |
 
 Batch read check. Unless stated otherwise, the batch is checked with
 G = 16 and against the batch reference.
@@ -413,9 +414,9 @@ G = 16 and against the batch reference.
 | `/resolver/TempConflictBTree/CheckReadsWithRangeEndInLaterKeyBlock` | A stored general range with a 2,100-byte begin, so that its 140-byte end starts in a later key block: a read beginning inside it conflicts and a read beginning past it does not. | PASS |
 | `/resolver/TempConflictBTree/CheckReadsPastSeparatorsInReusedKeyBlock` | Nine leaves, three per internal node, with the subtree in the middle, and in a second tree the first subtree, expired; the separators leading to it, in its parent and in itself, point into the oldest key block, which is reclaimed and handed out again, so they point at other bytes. Reads from the expired subtree into live history, inside it, into it from before, elsewhere, and newer than every entry give outcomes {1, 0, 0, 1, 0} as the reference, and the queue is empty afterwards. | PASS |
 
-125 TempConflictBTree tests passed, 0 failed. The full run, including the
-15 PagePool tests, the 41 KeyStore tests and the 47 BNodeStore tests,
-reports 228 passed and 0 failed.
+126 TempConflictBTree tests passed, 0 failed. The full run, including the
+15 PagePool tests, the 41 KeyStore tests and the 48 BNodeStore tests,
+reports 230 passed and 0 failed.
 
 The tree checks its internal invariants, the results of its block
 allocations and the results of the key records a write stores with
@@ -489,16 +490,18 @@ gcov, `tempconflictbtree.cpp`:
 
 | Metric | Result |
 |---|---|
-| Lines executed | 99.20% of 1128 |
-| Branches executed | 100.00% of 826 |
-| Taken at least once | 84.38% of 826 |
+| Lines executed | 89.56% of 1906 |
+| Branches executed | 90.79% of 1911 |
+| Taken at least once | 58.77% of 1911 |
 
 llvm-cov source-based coverage:
 
 | File | Regions | Functions | Lines | Branches |
 |---|---|---|---|---|
-| `tempconflictbtree.cpp` | 99.17% of 719 | 100.00% of 71 | 99.01% of 1812 | 97.23% of 506 |
-| `tempconflictbtree.h` | 91.67% of 12 | 88.89% of 9 | 52.17% of 46 | 100.00% of 2 |
+| `tempconflictbtree.cpp` | 88.32% of 1370 | 93.20% of 103 | 91.81% of 3151 | 84.58% of 992 |
+| `tempconflictbtree.h` | 88.89% of 18 | 86.67% of 15 | 55.77% of 52 | 100.00% of 2 |
+
+Coverage classification scope. The coverage totals above are derived from the Apple clang 15 evidence regenerated for the v3.8 tree `2b62382a` and are authoritative for this revision. The detailed classification below was produced for Resolver v2 at `491d3f5a6`; its file-and-line references and branch inventory have not been reclassified for v3.8 and must not be interpreted as a complete analysis of the current uncovered branches. The current evidence reports 788 branch elements not taken. Reclassification of those elements is tracked as separate follow-up work.
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage would not show that the code is free of errors.
@@ -1114,7 +1117,7 @@ correspondence with the cases comes from the llvm-cov counts, which report
 ## Evidence
 
 - [Test output](evidence/tempconflictbtree-tests.txt): output of
-  `make -B test` for the full suite (228 tests: PagePool, KeyStore,
+  `make -B test` for the full suite (230 tests: PagePool, KeyStore,
   BNodeStore and TempConflictBTree). It is the same run as
   `pagepool-tests.txt`, `keystore-tests.txt` and `bnodestore-tests.txt`.
 - [Coverage summary](evidence/tempconflictbtree-coverage.txt): gcov output

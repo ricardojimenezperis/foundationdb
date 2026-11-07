@@ -49,18 +49,18 @@ component.
   | File | SHA-256 |
   |---|---|
   | `bnodestore.cpp` | `a945a23136d881e9` |
-  | `bnodestore.h` | `4ff857dd23b118d6` |
-  | `keystore.cpp` | `b09886264fe0237c` |
-  | `keystore.h` | `5669791aadb07001` |
-  | `fdbcompat.h` | `2e57a5fd8b1629ea` |
+  | `bnodestore.h` | `c80b90d423d97de6` |
+  | `keystore.cpp` | `1e1f08d5dc1e8f49` |
+  | `keystore.h` | `7923ad926d27acfc` |
+  | `fdbcompat.h` | `50bf041b46640d1d` |
   | `../ResolverBatchTypes.h` | `44e93cb91d982c40` |
   | `common.h` | `a815af89662b3a73` |
-  | `pagepool.cpp` | `1b463f87266e646f` |
-  | `pagepool.h` | `54456873974dbb8f` |
+  | `pagepool.cpp` | `66d0fa33d5e1b771` |
+  | `pagepool.h` | `86f8dee90b69e43e` |
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `2a8173902bc33339` |
-  | `tests/bnodestoretests.cpp` | `eba26821ec6756c6` |
+  | `tests/bnodestoretests.cpp` | `a08ffdb64836e858` |
 
 - Working tree: the files listed above
 - Platform: macOS 27.0.1 (build 26A434), arm64 (Apple M3 Pro)
@@ -151,13 +151,14 @@ Capacity, free-slot maps and node lifecycle:
 | `/resolver/BNodeStore/CapacityForBlock` | Called at run time, `capacityForBlock` returns `InternalCapacity` and `LeafCapacity`; each is the largest capacity whose layout fits in `BlockSize`, since one more entry does not fit. A layout of one byte per entry is capped at `MaxNodeCapacity` (255), and a layout that does not fit even one entry gives 0. | PASS |
 | `/resolver/BNodeStore/FreeSlots` | For capacities 1, 40, 59, 64, 65, 121, 128, 165, 245 and 255, a map has `(C + 63) / 64` words; a new map has exactly the `C` lowest bits set, word by word, and `fullWord(w)` equals each word; `any` is true and `count` is `C`. Taking the slots in order, `first` returns each one, `isFree` turns false and `count` goes down by one, until `any` is false and every word is 0. Unsetting a used slot, and setting a free slot twice, change nothing. For `C > 1`, `first` returns the lowest free slot, also when the lower words are empty. | PASS |
 | `/resolver/BNodeStore/FreeSlotsSize` | `FreeSlots<64>` is one `std::uint64_t`, `FreeSlots<65>` two and `FreeSlots<255>` four. | PASS |
-| `/resolver/BNodeStore/AllocateLeafInitializesNode` | A new leaf has kind `Leaf`, generation 1, the given `maxCV`, no entries, no parent and parent slot 0, no age links, a free-slot map equal to a new `FreeSlots<LeafCapacity>`, no left or right neighbour and a zeroed order. | PASS |
+| `/resolver/BNodeStore/AllocateLeafInitializesNode` | A new leaf has kind `Leaf`, generation 1, mutation epoch 0, the given `maxCV`, no entries, no parent and parent slot 0, no age links, a free-slot map equal to a new `FreeSlots<LeafCapacity>`, no left or right neighbour and a zeroed order. | PASS |
 | `/resolver/BNodeStore/AllocateInternalInitializesNode` | A new internal node has kind `Internal`, generation 1, the given `maxCV`, no entries, no parent and parent slot 0, no age links, a free-slot map equal to a new `FreeSlots<InternalCapacity>` and a zeroed order. | PASS |
 | `/resolver/BNodeStore/AllocatedNodesHaveAllSlotsFree` | A new leaf and a new internal node report `freeSlotCount` equal to their capacity and `firstFree` 0. | PASS |
-| `/resolver/BNodeStore/GenerationsIncreaseAcrossKinds` | Leaves and internal nodes share one generation sequence: 1, 2, 3. | PASS |
+| `/resolver/BNodeStore/GenerationsIncreaseAcrossKinds` | Leaves and internal nodes share one generation sequence of odd numbers: 1, 3, 5. | PASS |
 | `/resolver/BNodeStore/AgeListFollowsAllocationOrder` | Three nodes of both kinds are linked in allocation order through `agePrevious` and `ageNext`, with no link before the first or after the last. | PASS |
-| `/resolver/BNodeStore/AllocationFailsWhenPoolExhausted` | With every block of a one-page pool used, allocating a leaf or an internal node returns `nullptr`, consumes no generation and leaves the age list unchanged; after a release, the next node gets the next generation and follows the newest remaining node. | PASS |
-| `/resolver/BNodeStore/ReleaseReturnsBlockToPool` | Releasing a leaf returns its block to the pool; the same address is reused for an internal node, initialized as such, with every slot free and with a generation higher than the leaf's, read before the release; releasing it restores the free-block count. | PASS |
+| `/resolver/BNodeStore/AllocationFailsWhenPoolExhausted` | With every block of a one-page pool used, allocating a leaf or an internal node returns `nullptr`, consumes no generation and leaves the age list unchanged; after a release, the next node gets the next odd generation, 2 × blocks + 1, and follows the newest remaining node. | PASS |
+| `/resolver/BNodeStore/ReleaseReturnsBlockToPool` | Releasing a leaf clears its generation to 0 and returns its block to the pool; the same address is reused for an internal node, initialized as such, with every slot free and with a generation higher than the leaf's, read before the release; releasing it restores the free-block count. | PASS |
+| `/resolver/BNodeStore/NodeBlockReusedForKeyHasDifferentParity` | A released leaf, whose generation was odd and is cleared to 0, is reused by the key store for a key block: the key reference points at the same block, and its generation is nonzero, even and different from the leaf's. | PASS |
 | `/resolver/BNodeStore/ReleaseOnlyNode` | After releasing the only node, the age list is empty: the next node has no predecessor. | PASS |
 | `/resolver/BNodeStore/ReleaseOldestNode` | Releasing the oldest of three nodes leaves the other two linked, the second one first. | PASS |
 | `/resolver/BNodeStore/ReleaseMiddleNode` | Releasing the middle node links its neighbours to each other. | PASS |
@@ -215,9 +216,9 @@ The counts of full and empty nodes reached by the interleaved tests come
 from replaying their random decisions with the same seeds and the
 capacities above, not from the test output.
 
-47 BNodeStore tests passed, 0 failed. The full run, including the 15
-PagePool tests, the 41 KeyStore tests and the 124 TempConflictBTree
-tests, reports 228 passed and 0 failed.
+48 BNodeStore tests passed, 0 failed. The full run, including the 15
+PagePool tests, the 41 KeyStore tests and the 126 TempConflictBTree
+tests, reports 230 passed and 0 failed.
 
 The store has these preconditions, checked with `assert`, which
 terminates the process when it fails and is removed when `NDEBUG` is
@@ -282,7 +283,9 @@ llvm-cov source-based coverage:
 | File | Regions | Functions | Lines | Branches |
 |---|---|---|---|---|
 | `bnodestore.cpp` | 100.00% of 4 | 100.00% of 2 | 100.00% of 10 | 100.00% of 2 |
-| `bnodestore.h` | 94.52% of 146 | 100.00% of 42 | 100.00% of 303 | 100.00% of 44 |
+| `bnodestore.h` | 93.42% of 152 | 100.00% of 42 | 98.71% of 311 | 95.83% of 48 |
+
+Coverage classification scope. The coverage totals above are derived from the Apple clang 15 evidence regenerated for the v3.8 tree `2b62382a` and are authoritative for this revision. The detailed classification below was produced for Resolver v2 at `491d3f5a6`; its file-and-line references and branch inventory have not been reclassified for v3.8 and must not be interpreted as a complete analysis of the current uncovered branches. The current evidence reports 2 branch elements not taken. Reclassification of those elements is tracked as separate follow-up work.
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
@@ -451,7 +454,7 @@ header.
 ## Evidence
 
 - [Test output](evidence/bnodestore-tests.txt): output of `make -B test`
-  for the full suite (228 tests, PagePool, KeyStore, BNodeStore and
+  for the full suite (230 tests, PagePool, KeyStore, BNodeStore and
   TempConflictBTree). It is the same run as `pagepool-tests.txt`,
   `keystore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/bnodestore-coverage.txt): gcov output

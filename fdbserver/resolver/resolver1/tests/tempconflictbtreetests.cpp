@@ -4436,3 +4436,57 @@ TEST_CASE("/resolver/TempConflictBTree/AddWritesKeepsTheReserveOfALongKeyAfterRe
 		}
 	}
 }
+
+TEST_CASE("/resolver/TempConflictBTree/AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf") {
+	if (BlockSize != 2048) {
+		return;
+	}
+	TestTree t(2 * PageSize);
+	std::uint32_t state = 1;
+	std::size_t readCount = 0, tooOld = 0, conflicts = 0, admitted = 0;
+	std::uint64_t hash = 14695981039346656037ull;
+	for (Version cv = 1; cv <= 37; ++cv) {
+		std::vector<unsigned> values;
+		for (unsigned i = 0; i < 128; ++i) {
+			state = state * 1664525u + 1013904223u;
+			values.push_back((state >> 8) % 3000);
+		}
+		std::sort(values.begin(), values.end());
+		values.erase(std::unique(values.begin(), values.end()), values.end());
+		std::vector<std::pair<Bytes, Bytes>> writes;
+		std::vector<BatchTransaction> reads;
+		for (const unsigned value : values) {
+			const Bytes k = wideKey(value);
+			writes.push_back({k, keyAfter(k)});
+			reads.push_back({{{k, keyAfter(k)}}, cv - 1, false, false});
+		}
+		checkBatch<16>(t, {BatchTransaction{}}, writes, cv);
+		ASSERT(t.tree.reclaimCV() < cv);
+		std::size_t kept = 0;
+		for (const Entry& e : checkStructure(t)) {
+			if (e.cv == cv) {
+				++kept;
+			}
+		}
+		ASSERT_EQ(kept, writes.size());
+		const BatchResult result = checkBatch<16>(t, reads);
+		for (std::size_t i = 0; i < reads.size(); ++i) {
+			++readCount;
+			if (result.tooOld[i]) {
+				++tooOld;
+			} else {
+				++admitted;
+				if (result.status[i]) {
+					++conflicts;
+				}
+			}
+			hash = (hash ^ (static_cast<std::uint64_t>(result.tooOld[i]) * 2 + result.status[i])) * 1099511628211ull;
+		}
+	}
+	ASSERT_EQ(readCount, 4645);
+	ASSERT(admitted > 0);
+	ASSERT_EQ(conflicts, admitted);
+	ASSERT_EQ(tooOld, 0);
+	ASSERT_EQ(conflicts, 4645);
+	ASSERT_EQ(hash, 0xe4379ac1a8a77428ull);
+}

@@ -19,8 +19,8 @@ the scope of this component. Their use of the pool is validated in
 
   | File | SHA-256 |
   |---|---|
-  | `pagepool.cpp` | `1b463f87266e646f` |
-  | `pagepool.h` | `54456873974dbb8f` |
+  | `pagepool.cpp` | `66d0fa33d5e1b771` |
+  | `pagepool.h` | `86f8dee90b69e43e` |
   | `common.h` | `a815af89662b3a73` |
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
@@ -115,8 +115,8 @@ bash tests/coverage.sh
 | `/resolver/PagePool/AvailableBlocksOfEmptyPool` | A pool with a budget of `PageSize - 1` reports 0 available blocks, before and after a failed allocation. | PASS |
 
 15 PagePool tests passed, 0 failed. The full run, including the 41
-KeyStore tests, the 47 BNodeStore tests and the 124 TempConflictBTree
-tests, reports 228 passed and 0 failed.
+KeyStore tests, the 48 BNodeStore tests and the 126 TempConflictBTree
+tests, reports 230 passed and 0 failed.
 
 The constructor requires a block size of at least `sizeof(FreeBlock)`,
 at most `PageSize`, and a multiple of `alignof(FreeBlock)`. It checks
@@ -138,16 +138,18 @@ gcov, `pagepool.cpp`:
 
 | Metric | Result |
 |---|---|
-| Lines executed | 100.00% of 32 |
-| Branches executed | 100.00% of 14 |
-| Taken at least once | 71.43% of 14 |
+| Lines executed | 82.00% of 50 |
+| Branches executed | 76.47% of 34 |
+| Taken at least once | 38.24% of 34 |
 
 llvm-cov source-based coverage:
 
 | File | Regions | Functions | Lines | Branches |
 |---|---|---|---|---|
-| `pagepool.cpp` | 100.00% of 12 | 100.00% of 4 | 100.00% of 32 | 100.00% of 6 |
-| `pagepool.h` | 100.00% of 4 | 100.00% of 4 | 100.00% of 4 | no branches |
+| `pagepool.cpp` | 61.11% of 36 | 100.00% of 4 | 78.85% of 52 | 40.91% of 22 |
+| `pagepool.h` | 57.14% of 7 | 57.14% of 7 | 57.14% of 7 | no branches |
+
+Coverage classification scope. The coverage totals above are derived from the Apple clang 15 evidence regenerated for the v3.8 tree `2b62382a` and are authoritative for this revision. The detailed classification below was produced for Resolver v2 at `491d3f5a6`; its file-and-line references and branch inventory have not been reclassified for v3.8 and must not be interpreted as a complete analysis of the current uncovered branches. The current evidence reports 21 branch elements not taken. Reclassification of those elements is tracked as separate follow-up work.
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
@@ -226,7 +228,7 @@ source.
 ## Evidence
 
 - [Test output](evidence/pagepool-tests.txt): output of `make -B test`
-  for the full suite (228 tests, PagePool, KeyStore, BNodeStore and
+  for the full suite (230 tests, PagePool, KeyStore, BNodeStore and
   TempConflictBTree). It is the same run as `keystore-tests.txt`,
   `bnodestore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/pagepool-coverage.txt): gcov output after

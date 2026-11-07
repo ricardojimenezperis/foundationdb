@@ -64,7 +64,7 @@ make -B test BLOCK_SIZE=4096  # the suite at another block size
 bash tests/coverage.sh     # gcov and llvm-cov coverage of every component
 ```
 
-The suite has 228 tests (15 PagePool, 41 KeyStore, 47 BNodeStore and 125 TempConflictBTree) and
+The suite has 230 tests (15 PagePool, 41 KeyStore, 48 BNodeStore and 126 TempConflictBTree) and
 passes at 1, 2, 4 and 8 KiB blocks. Among them, `CheckReadsPastSeparatorsInReusedKeyBlock` forces
 the reclamation and reuse of the key block that expired separators point into, and fails if the
 refresh of expired separators in `checkReads` is reverted. The validation reports of the
