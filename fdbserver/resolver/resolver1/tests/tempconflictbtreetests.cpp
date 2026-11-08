@@ -110,6 +110,18 @@ struct TempConflictBTreeTestAccess {
 	static void removeSubtree(TempConflictBTree& t, BNodeHeader* node) {
 		t.removeSubtree(node);
 	}
+	// The begin records of the last checkReads, as (tagged range index,
+	// transaction), in the order of the batch's endpoints.
+	static std::vector<std::pair<std::uint32_t, std::uint32_t>> beginRecords(
+		const TempConflictBTree& t) {
+		std::vector<std::pair<std::uint32_t, std::uint32_t>> records;
+		for (const auto& entry : t.readWriteBegins) {
+			records.push_back({entry.rangeIndex, entry.transaction});
+		}
+		return records;
+	}
+	static constexpr std::uint32_t WriteBeginFlag =
+		TempConflictBTree::RangeEntry::WriteFlag;
 	static PagePool& pool(TempConflictBTree& t) { return t.pool_; }
 	static BNodeHeader* detach(TempConflictBTree& t, std::size_t rank,
 							   InternalBlock* node) {
@@ -4489,4 +4501,356 @@ TEST_CASE("/resolver/TempConflictBTree/AddWritesKeepsWritesAfterReclamationFrees
 	ASSERT_EQ(tooOld, 0);
 	ASSERT_EQ(conflicts, 4645);
 	ASSERT_EQ(hash, 0xe4379ac1a8a77428ull);
+}
+
+namespace {
+
+// One transaction of a mixed batch: its read ranges, all at its read
+// version, and its write ranges.
+struct MixedTransaction {
+	std::vector<std::pair<Bytes, Bytes>> reads;
+	std::vector<std::pair<Bytes, Bytes>> writes;
+	Version version = 0;
+};
+
+// How the endpoints of equal keys are ordered: as ConflictSet.cpp sorts
+// them, read ends, write ends, write begins, then read begins; or with
+// every begin before every end.
+enum class EqualKeys { EndsFirst, BeginsFirst };
+
+struct MixedResult {
+	std::vector<uint8_t> status;     // per transaction
+	std::vector<uint8_t> conflicts;  // per read, in transaction order
+	std::vector<bool> tooOld;        // per transaction
+	int64_t tooOldWithinWindow = 0;
+	// Begin records after checkReads, and the ones the batch should give.
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> begins;
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> expectedBegins;
+};
+
+int equalKeyRank(const KeyInfo& point) {
+	return point.begin * 2 + (point.write ^ point.begin);
+}
+
+// Resolves a batch whose transactions may have both reads and writes, laid
+// out as FDB's ConflictBatch lays it out: the reads of each transaction
+// consecutive, and the begin and end of every read and write range in
+// points sorted by key, each point's slot holding its position. Calls
+// checkReads<G>, then addWrites at cv with the decisions of the batch.
+template<uint8_t G>
+MixedResult resolveMixedBatch(TestTree& t, const std::vector<MixedTransaction>& batch,
+							  Version cv, EqualKeys equalKeys) {
+	const std::size_t T = batch.size();
+	std::vector<std::vector<std::pair<int, int>>> readSlots(T), writeSlots(T);
+	std::vector<TransactionInfo> infos(T);
+	std::vector<TransactionInfo*> infoPointers(T);
+	std::vector<ReadConflictRange> reads;
+	std::vector<int> offsets(T);
+	for (std::size_t tx = 0; tx < T; ++tx) {
+		offsets[tx] = static_cast<int>(reads.size());
+		readSlots[tx].resize(batch[tx].reads.size());
+		writeSlots[tx].resize(batch[tx].writes.size());
+		for (std::size_t r = 0; r < batch[tx].reads.size(); ++r) {
+			reads.emplace_back(asRef(batch[tx].reads[r].first),
+							   asRef(batch[tx].reads[r].second),
+							   batch[tx].version, static_cast<int>(tx),
+							   static_cast<int>(r));
+		}
+		infos[tx].readRanges = VectorRef<std::pair<int, int>>(
+			readSlots[tx].data(), static_cast<int>(readSlots[tx].size()));
+		infos[tx].writeRanges = VectorRef<std::pair<int, int>>(
+			writeSlots[tx].data(), static_cast<int>(writeSlots[tx].size()));
+		infos[tx].tooOld = false;
+		infos[tx].reportConflictingKeys = false;
+		infoPointers[tx] = &infos[tx];
+	}
+
+	std::vector<KeyInfo> points;
+	for (std::size_t tx = 0; tx < T; ++tx) {
+		for (std::size_t r = 0; r < batch[tx].reads.size(); ++r) {
+			points.emplace_back(asRef(batch[tx].reads[r].first), true, false,
+								static_cast<int>(tx), &readSlots[tx][r].first);
+			points.emplace_back(asRef(batch[tx].reads[r].second), false, false,
+								static_cast<int>(tx), &readSlots[tx][r].second);
+		}
+		for (std::size_t w = 0; w < batch[tx].writes.size(); ++w) {
+			points.emplace_back(asRef(batch[tx].writes[w].first), true, true,
+								static_cast<int>(tx), &writeSlots[tx][w].first);
+			points.emplace_back(asRef(batch[tx].writes[w].second), false, true,
+								static_cast<int>(tx), &writeSlots[tx][w].second);
+		}
+	}
+	std::stable_sort(points.begin(), points.end(),
+					 [equalKeys](const KeyInfo& a, const KeyInfo& b) {
+						 const int c = a.key.compare(b.key);
+						 if (c != 0) {
+							 return c < 0;
+						 }
+						 if (equalKeys == EqualKeys::EndsFirst) {
+							 return equalKeyRank(a) < equalKeyRank(b);
+						 }
+						 return a.begin && !b.begin;
+					 });
+	for (std::size_t p = 0; p < points.size(); ++p) {
+		*points[p].pIndex = static_cast<int>(p);
+	}
+
+	// A transaction is too old when its first read is below the cut; its
+	// endpoints and empty reads give no begin record.
+	MixedResult result;
+	const Version cut = t.tree.reclaimCV();
+	for (std::size_t p = 0; p < points.size(); ++p) {
+		const KeyInfo& point = points[p];
+		if (!point.begin) {
+			continue;
+		}
+		const std::size_t tx = static_cast<std::size_t>(point.transaction);
+		if (!batch[tx].reads.empty() && batch[tx].version < cut) {
+			continue;
+		}
+		if (point.write) {
+			result.expectedBegins.push_back(
+				{static_cast<std::uint32_t>(p) | Access::WriteBeginFlag,
+				 static_cast<std::uint32_t>(tx)});
+			continue;
+		}
+		std::size_t r = 0;
+		while (readSlots[tx][r].first != static_cast<int>(p)) {
+			++r;
+		}
+		if (!(batch[tx].reads[r].first < batch[tx].reads[r].second)) {
+			continue;
+		}
+		result.expectedBegins.push_back(
+			{static_cast<std::uint32_t>(offsets[tx] + r),
+			 static_cast<std::uint32_t>(tx)});
+	}
+
+	result.status.assign(T, 0);
+	t.tree.checkReads<G>(points, infoPointers.data(), reads, offsets,
+						 reinterpret_cast<bool*>(result.status.data()),
+						 result.conflicts, result.tooOldWithinWindow);
+	result.begins = Access::beginRecords(t.tree);
+	t.tree.addWrites(points, infoPointers.data(),
+					 reinterpret_cast<const bool*>(result.status.data()), cv);
+	for (const TransactionInfo& info : infos) {
+		result.tooOld.push_back(info.tooOld);
+	}
+	return result;
+}
+
+constexpr Version HistoryCV = 10;
+constexpr Version MixedCV = 50;
+// Above the history and below the mixed batch.
+constexpr Version LaterReadVersion = 45;
+
+// Point entries [wideKey(4 i), wideKey(4 i) + \0) at HistoryCV, one write
+// batch each, so that the tree has several leaves at every block size; the
+// gap [wideKey(4 i + 1), wideKey(4 i + 3)) between two of them holds no key.
+unsigned historyCount() {
+	return static_cast<unsigned>(4 * LeafCapacity);
+}
+
+Bytes historyKey(unsigned i) { return wideKey(4 * i); }
+std::pair<Bytes, Bytes> historyPoint(unsigned i) {
+	return {historyKey(i), keyAfter(historyKey(i))};
+}
+std::pair<Bytes, Bytes> gap(unsigned i) {
+	return {wideKey(4 * i + 1), wideKey(4 * i + 3)};
+}
+
+std::vector<Entry> addPointHistory(TestTree& t) {
+	std::vector<Entry> history;
+	for (unsigned i = 0; i < historyCount(); ++i) {
+		const auto [begin, end] = historyPoint(i);
+		Access::addWrite(t.tree, asRef(begin), asRef(end), HistoryCV);
+		history.push_back({begin, end, HistoryCV});
+	}
+	ASSERT(Access::root(t.tree)->kind == BNodeKind::Internal);
+	return history;
+}
+
+void sortEntries(std::vector<Entry>& entries) {
+	std::sort(entries.begin(), entries.end(),
+			  [](const Entry& a, const Entry& b) { return a.begin < b.begin; });
+}
+
+// Single-read transactions at one version, checked after the batch: the
+// status of each is whether its read conflicts.
+template<uint8_t G>
+std::vector<uint8_t> laterReads(TestTree& t,
+								const std::vector<std::pair<Bytes, Bytes>>& ranges,
+								Version version) {
+	std::vector<BatchTransaction> batch;
+	for (const auto& range : ranges) {
+		batch.push_back({{range}, version, false, false});
+	}
+	const BatchResult result = checkBatch<G>(t, batch);
+	for (const bool tooOld : result.tooOld) {
+		ASSERT(!tooOld);
+	}
+	return result.status;
+}
+
+// A batch of interleaved transactions with reads only, writes only, both
+// admitted, a read that conflicts and a read that is too old.
+template<uint8_t G>
+void checkMixedBatch() {
+	TestTree t;
+	std::vector<Entry> expected = addPointHistory(t);
+	Access::setReclaimCV(t.tree, 5);
+	const unsigned n = historyCount();
+	// Ten positions in key order, spread over the leaves.
+	auto at = [n](unsigned k) { return 1 + k * (n - 2) / 9; };
+
+	// In key order of the begins: T0 read, T1 write, T2 read, T3 write,
+	// T2 write, T4 read, T3 read, T4 write, T1 write, T0 read.
+	std::vector<MixedTransaction> batch(5);
+	batch[0] = {{historyPoint(at(0)), gap(at(9))}, {}, 40};  // reads only
+	batch[1] = {{}, {gap(at(1)), gap(at(8))}, 0};             // writes only
+	batch[2] = {{historyPoint(at(2))}, {gap(at(4))}, 40};    // admitted
+	batch[3] = {{historyPoint(at(6))}, {gap(at(3))}, 5};     // read conflicts
+	batch[4] = {{gap(at(5))}, {gap(at(7))}, 3};              // too old
+	const MixedResult result = resolveMixedBatch<G>(t, batch, MixedCV, EqualKeys::EndsFirst);
+
+	ASSERT(result.status == (std::vector<uint8_t>{0, 0, 0, 1, 1}));
+	ASSERT(result.conflicts == (std::vector<uint8_t>{0, 0, 0, 1, 0}));
+	ASSERT(result.tooOld == (std::vector<bool>{false, false, false, false, true}));
+	ASSERT_EQ(result.tooOldWithinWindow, 1);
+
+	// Only the writes of T1 and T2 are stored, at the batch's CV.
+	for (const unsigned k : {1u, 4u, 8u}) {
+		const auto [begin, end] = gap(at(k));
+		expected.push_back({begin, end, MixedCV});
+	}
+	sortEntries(expected);
+	checkSameEntries(checkStructure(t), expected);
+
+	// Later reads between the history and the batch conflict exactly with
+	// the stored writes; the history still conflicts with older reads.
+	std::vector<std::pair<Bytes, Bytes>> ranges;
+	std::vector<uint8_t> expectedLater;
+	for (unsigned k = 0; k < 10; ++k) {
+		const bool written = k == 1 || k == 4 || k == 8;
+		const unsigned i = at(k);
+		ranges.push_back(gap(i));
+		expectedLater.push_back(written);
+		ranges.push_back({wideKey(4 * i + 1), keyAfter(wideKey(4 * i + 1))});
+		expectedLater.push_back(written);
+		ranges.push_back({keyAfter(historyKey(i)), wideKey(4 * i + 1)});
+		expectedLater.push_back(0);
+		ranges.push_back({wideKey(4 * i + 3), historyKey(i + 1)});
+		expectedLater.push_back(0);
+		ranges.push_back(historyPoint(i));
+		expectedLater.push_back(0);
+	}
+	ASSERT(laterReads<G>(t, ranges, LaterReadVersion) == expectedLater);
+	std::vector<std::pair<Bytes, Bytes>> older;
+	for (unsigned k = 0; k < 10; ++k) {
+		older.push_back(historyPoint(at(k)));
+	}
+	ASSERT(laterReads<G>(t, older, 6) == std::vector<uint8_t>(10, 1));
+	checkSameEntries(checkStructure(t), expected);
+
+	// Each begin record of the batch names its own read range or write
+	// endpoint and its transaction; T4's are dropped as too old.
+	ASSERT_EQ(result.expectedBegins.size(), 8u);
+	ASSERT(result.begins == result.expectedBegins);
+}
+
+// A mixed batch whose admitted transaction writes overlapping ranges, a
+// range adjacent to them and an empty range, and whose conflicting
+// transaction writes a range over all of them.
+template<uint8_t G>
+void checkOverlappingAndEmptyWrites(EqualKeys equalKeys) {
+	TestTree t;
+	const std::vector<Entry> history = addPointHistory(t);
+	Access::setReclaimCV(t.tree, 5);
+	const unsigned n = historyCount();
+	const unsigned a = n / 4, c = a + 3, b = a + 6, d = a + 9, e = a + 12;
+	const unsigned emptyAt = 3 * n / 4;
+	const Bytes unionBegin = wideKey(4 * a + 1), unionEnd = wideKey(4 * e + 1);
+	const Bytes discardedEnd = wideKey(4 * (e + 5) + 1);
+
+	std::vector<MixedTransaction> batch(3);
+	batch[0] = {{historyPoint(1)},
+				{{wideKey(4 * a + 1), wideKey(4 * b + 1)},
+				 {wideKey(4 * c + 1), wideKey(4 * d + 1)},
+				 {wideKey(4 * d + 1), wideKey(4 * e + 1)},
+				 {wideKey(4 * emptyAt + 1), wideKey(4 * emptyAt + 1)}},
+				40};                                       // admitted
+	batch[1] = {{historyPoint(a - 2)}, {}, 40};            // reads only
+	batch[2] = {{historyPoint(n / 2)},
+				{{wideKey(4 * (a + 2) + 1), discardedEnd}},
+				5};                                        // read conflicts
+	const MixedResult result = resolveMixedBatch<G>(t, batch, MixedCV, equalKeys);
+	ASSERT(result.status == (std::vector<uint8_t>{0, 0, 1}));
+	ASSERT(result.conflicts == (std::vector<uint8_t>{0, 0, 1}));
+
+	// History points inside the union are replaced; the others, including
+	// those under the discarded range, keep their CV. The entries at the
+	// batch's CV cover exactly the union, without gaps or overlaps.
+	const std::vector<Entry> entries = checkStructure(t);
+	std::vector<Entry> kept, written;
+	for (const Entry& entry : entries) {
+		(entry.cv == MixedCV ? written : kept).push_back(entry);
+	}
+	std::vector<Entry> expectedKept;
+	for (const Entry& h : history) {
+		if (!(unionBegin <= h.begin && h.end <= unionEnd)) {
+			expectedKept.push_back(h);
+		}
+	}
+	checkSameEntries(kept, expectedKept);
+	ASSERT(!written.empty());
+	ASSERT(written.front().begin == unionBegin);
+	ASSERT(written.back().end == unionEnd);
+	for (std::size_t i = 1; i < written.size(); ++i) {
+		ASSERT(written[i].begin == written[i - 1].end);
+	}
+	for (const Entry& entry : entries) {
+		ASSERT(entry.cv == HistoryCV || entry.cv == MixedCV);
+	}
+
+	// Point reads on every key from before the union to past the discarded
+	// range, and reads that end at the union's begin, start at its end, or
+	// cover the empty range: only keys inside the union conflict.
+	std::vector<std::pair<Bytes, Bytes>> ranges;
+	std::vector<uint8_t> expectedLater;
+	for (unsigned v = 4 * (a - 2); v < 4 * (e + 7); ++v) {
+		const Bytes k = wideKey(v);
+		ranges.push_back({k, keyAfter(k)});
+		expectedLater.push_back(unionBegin <= k && k < unionEnd);
+	}
+	ranges.push_back({historyKey(a), unionBegin});
+	expectedLater.push_back(0);
+	ranges.push_back({keyAfter(historyKey(a)), unionBegin});
+	expectedLater.push_back(0);
+	ranges.push_back({unionEnd, wideKey(4 * e + 3)});
+	expectedLater.push_back(0);
+	ranges.push_back({unionEnd, discardedEnd});
+	expectedLater.push_back(0);
+	ranges.push_back({wideKey(4 * emptyAt + 1), keyAfter(wideKey(4 * emptyAt + 1))});
+	expectedLater.push_back(0);
+	ranges.push_back(gap(emptyAt));
+	expectedLater.push_back(0);
+	ranges.push_back({historyKey(a), keyAfter(unionBegin)});
+	expectedLater.push_back(1);
+	ASSERT(laterReads<G>(t, ranges, LaterReadVersion) == expectedLater);
+	checkSameEntries(checkStructure(t), entries);
+	ASSERT(result.begins == result.expectedBegins);
+}
+
+} // namespace
+
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsAndAddWritesResolveAMixedBatch") {
+	checkMixedBatch<16>();
+	checkMixedBatch<32>();
+}
+
+TEST_CASE("/resolver/TempConflictBTree/AddWritesMergesOverlappingWritesOfAMixedBatch") {
+	for (const EqualKeys equalKeys : {EqualKeys::EndsFirst, EqualKeys::BeginsFirst}) {
+		checkOverlappingAndEmptyWrites<16>(equalKeys);
+		checkOverlappingAndEmptyWrites<32>(equalKeys);
+	}
 }
