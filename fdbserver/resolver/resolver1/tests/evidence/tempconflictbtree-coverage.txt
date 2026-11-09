@@ -1,7 +1,7 @@
 File 'tempconflictbtree.cpp'
-Lines executed:89.56% of 1906
-Branches executed:90.79% of 1911
-Taken at least once:58.77% of 1911
+Lines executed:90.03% of 1906
+Branches executed:91.10% of 1911
+Taken at least once:60.81% of 1911
 No calls
 Creating 'tempconflictbtree.cpp.gcov'
 
@@ -27,9 +27,9 @@ No calls
 Creating 'fdbcompat.h.gcov'
 
 File '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/max.h'
-Lines executed:33.33% of 6
-Branches executed:0.00% of 6
-Taken at least once:0.00% of 6
+Lines executed:100.00% of 6
+Branches executed:100.00% of 6
+Taken at least once:16.67% of 6
 No calls
 Creating 'max.h.gcov'
 
@@ -132,7 +132,7 @@ Creating 'voidify.h.gcov'
 File '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__split_buffer'
 Lines executed:93.75% of 32
 Branches executed:100.00% of 120
-Taken at least once:41.67% of 120
+Taken at least once:43.33% of 120
 No calls
 Creating '__split_buffer.gcov'
 

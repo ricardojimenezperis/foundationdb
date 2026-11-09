@@ -230,4 +230,6 @@ PASS /resolver/TempConflictBTree/AddWritesReclaimsRoomForLongKeys
 PASS /resolver/TempConflictBTree/AddWritesThrowsWhenThePoolCannotHoldAWrite
 PASS /resolver/TempConflictBTree/AddWritesKeepsTheReserveOfALongKeyAfterReclaimingIt
 PASS /resolver/TempConflictBTree/AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf
-230 passed, 0 failed
+PASS /resolver/TempConflictBTree/CheckReadsAndAddWritesResolveAMixedBatch
+PASS /resolver/TempConflictBTree/AddWritesMergesOverlappingWritesOfAMixedBatch
+232 passed, 0 failed

@@ -8,6 +8,14 @@ actually allocated in whole pages, free-list allocation and release
 order, the count of free blocks, exhaustion and recovery. Blocks are
 handed out and returned as direct addresses.
 
+The backing is selected by the environment variable
+`RESOLVER1_PAGE_MODE`. Without it, or with `legacy`, the pool is one
+`new Page[]` array, which is what the tests use. The modes `base`, `thp`
+and `hugetlb` map the pool with `mmap` on Linux; on other platforms that
+code is not compiled and the constructor throws `std::runtime_error`, and
+an unknown mode throws `std::invalid_argument`. The mapped backings are
+outside the scope of this validation, which ran on macOS.
+
 History reclamation and key-storage lifetime management are outside
 the scope of this component. Their use of the pool is validated in
 [KeyStoreTests.md](KeyStoreTests.md).
@@ -115,13 +123,13 @@ bash tests/coverage.sh
 | `/resolver/PagePool/AvailableBlocksOfEmptyPool` | A pool with a budget of `PageSize - 1` reports 0 available blocks, before and after a failed allocation. | PASS |
 
 15 PagePool tests passed, 0 failed. The full run, including the 41
-KeyStore tests, the 48 BNodeStore tests and the 126 TempConflictBTree
-tests, reports 230 passed and 0 failed.
+KeyStore tests, the 48 BNodeStore tests and the 128 TempConflictBTree
+tests, reports 232 passed and 0 failed.
 
 The constructor requires a block size of at least `sizeof(FreeBlock)`,
 at most `PageSize`, and a multiple of `alignof(FreeBlock)`. It checks
 this precondition with `assert`, which terminates the process when it
-fails and is removed when `NDEBUG` is defined. The tested builds do not
+fails and is removed when `NDEBUG` is defined. The assertion builds do not
 define `NDEBUG`. Block sizes that do not meet the precondition are
 outside the interface and are not tested. `MinimumBlockSize` and
 `MaximumBlockSize` use the smallest and largest accepted sizes; they
@@ -149,7 +157,9 @@ llvm-cov source-based coverage:
 | `pagepool.cpp` | 61.11% of 36 | 100.00% of 4 | 78.85% of 52 | 40.91% of 22 |
 | `pagepool.h` | 57.14% of 7 | 57.14% of 7 | 57.14% of 7 | no branches |
 
-Coverage classification scope. The coverage totals above are derived from the Apple clang 15 evidence regenerated for the v3.8 tree `2b62382a` and are authoritative for this revision. The detailed classification below was produced for Resolver v2 at `491d3f5a6`; its file-and-line references and branch inventory have not been reclassified for v3.8 and must not be interpreted as a complete analysis of the current uncovered branches. The current evidence reports 21 branch elements not taken. Reclassification of those elements is tracked as separate follow-up work.
+The classification in this section was made on the tree identified in
+[Source and environment](#source-and-environment), from the Apple clang 15
+evidence of the same run.
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
@@ -160,29 +170,56 @@ coverage equivalent to GCC's `-fcondition-coverage`.
 The two tools count different things. gcov counts branches between
 the basic blocks of the generated code, including branches the
 compiler adds. llvm-cov counts the true and false outcomes of each
-condition written in the source, so its 6 branches are the 3
-conditions of `pagepool.cpp` outside the `assert`, each taken in both
-directions. llvm-cov reports no branch for the `assert` in the
-constructor, whose condition comes from a macro in a system header;
-gcov does report it.
+condition written in the source, so its 22 branches are the 11
+conditions of `pagepool.cpp` outside the `assert`. llvm-cov reports no
+branch for the `assert` in the constructor, whose condition comes from
+a macro in a system header; gcov does report it. The Linux code of the
+constructor and the destructor (lines 42-81 and 98-100) is not compiled
+on the tested platform, so neither tool counts it.
 
-The functions defined in `pagepool.h` (`blockSize`, `budget`,
-`allocatedBytes` and `availableBlocks`) are inline. They
-are measured with llvm-cov only. With `--coverage`, each translation
-unit keeps its own counters for an inline function, and the linker
-keeps one copy. Reading `pagepool.h` through one object file can
-therefore report a function as not executed although the tests call
-it. llvm-cov merges the counters of all copies. Its execution counts
-are `blockSize` 7, `budget` 5, `allocatedBytes` 10 and
-`availableBlocks` 264.
+The functions defined in `pagepool.h` are inline. They are measured
+with llvm-cov only. With `--coverage`, each translation unit keeps its
+own counters for an inline function, and the linker keeps one copy.
+Reading `pagepool.h` through one object file can therefore report a
+function as not executed although the tests call it. llvm-cov merges
+the counters of all copies. Its execution counts are `blockSize` 7,
+`budget` 5, `allocatedBytes` 10 and `availableBlocks` 264. The other
+three, `backing`, `backingAddress` and `backingBytes`, are not executed:
+no test and no other code in the tree calls them.
 
 ### Decisions
 
-The decisions in `pagepool.cpp` outside the `assert` have a single
-condition: the two constructor loops and the empty free list in
-`allocateBlock`. llvm-cov reports both outcomes covered for each of
-them: `pagepool.cpp:19` (true 29, false 21), `pagepool.cpp:21` (true
-9.26k, false 29) and `pagepool.cpp:33` (true 23, false 9.17k).
+Outside the `assert`, `pagepool.cpp` has two compound decisions, both in
+the selection of the backing, and seven single conditions: the modes
+compared on lines 30, 32 and 34, the two constructor loops (lines 87 and
+89), the mapped backing in the destructor (line 97) and the empty free
+list in `allocateBlock` (line 107). llvm-cov reports both outcomes
+covered for the loops and for line 107: `pagepool.cpp:87` (true 29,
+false 21), `pagepool.cpp:89` (true 9.26k, false 29) and
+`pagepool.cpp:107` (true 23, false 9.17k). Every other outcome that
+depends on `RESOLVER1_PAGE_MODE` is not covered, because no test sets
+it; line 97 is false on every execution (see below).
+
+`mode == nullptr || std::strcmp(mode, "legacy") == 0` (line 28):
+
+| Condition | Input | Other conditions | Decision | Test |
+|---|---|---|---|---|
+| Variable not set | `RESOLVER1_PAGE_MODE` unset | Not evaluated | Legacy | Every test |
+| Mode `legacy` | `RESOLVER1_PAGE_MODE=legacy` | Variable set | Legacy | Not exercised |
+| Another mode | `RESOLVER1_PAGE_MODE=base` | Variable set | Not legacy | Not exercised |
+
+`backing_ == Backing::Legacy || numPages_ == 0` (line 39):
+
+| Condition | Input | Other conditions | Decision | Test |
+|---|---|---|---|---|
+| Legacy backing | `RESOLVER1_PAGE_MODE` unset | Not evaluated | `new Page[]` | Every test |
+| No whole page | A mapped mode and a budget below `PageSize` | Not legacy | `new Page[]` | Not exercised |
+| Mapped backing with pages | A mapped mode and a budget of one page or more | Not legacy | Mapping, or the `std::runtime_error` on this platform | Not exercised |
+
+llvm-cov counts: `pagepool.cpp:28` `mode == nullptr` true 21, false 0;
+`strcmp(mode, "legacy") == 0` true 0, false 0. `pagepool.cpp:39`
+`backing_ == Backing::Legacy` true 21, false 0; `numPages_ == 0` true 0,
+false 0.
 
 `releaseBlock` has the precondition that the address must be the start
 of a block allocated by this pool and not already released. The tests
@@ -191,25 +228,42 @@ not meet the precondition are outside the interface and are not tested.
 
 ### Uncovered generated branches
 
-gcov reports 4 untaken branches. Their origin was checked in the LLVM
-IR that Apple clang 15 generates for `pagepool.cpp` at `-O0`.
+gcov reports 21 untaken branches: 14 never executed and 7 taken 0
+times. Each was matched to its edge in the LLVM IR that Apple clang 15
+generates for `pagepool.cpp` at `-O0` with `-g`: llvm-cov gcov lists the
+out-edges of a block at the last source line of the block, and on each
+of the 13 lines with branch items the number of items equals the number
+of edges of the conditional branches and `invoke` instructions whose
+block ends on that line.
 
-**Precondition violation.** The `assert` in the constructor evaluates
-its three conditions with short-circuit branches. Each untaken item is
-the path to `__assert_rtn` taken when one of them is false, which
-happens only when the block-size precondition described in
+**Precondition violation (3 items).** The `assert` in the constructor
+evaluates its three conditions with short-circuit branches. Each
+untaken item is the path to `__assert_rtn` taken when one of them is
+false, which happens only when the block-size precondition described in
 [Test cases](#test-cases) does not hold.
 
-| Location | gcov item |
+| Location | gcov items |
 |---|---|
-| `pagepool.cpp:10` | branches 1, 2 and 4 |
+| `pagepool.cpp:20` | branches 1, 2 and 5 |
 
-**Unreachable.** It does not correspond to a condition written in the
-source.
+**Backing selection not exercised (16 items).** Reachable through the
+environment: no test sets `RESOLVER1_PAGE_MODE`.
+
+| Location | gcov items | Outcome |
+|---|---|---|
+| `pagepool.cpp:28` | branch 0; branches 2 and 3 never executed | Variable set, and its comparison with `legacy` |
+| `pagepool.cpp:30`, `32`, `34` | branches 0 and 1 of each, never executed | Comparison with `base`, `thp` and `hugetlb` |
+| `pagepool.cpp:37` | branches 0 and 1, never executed | `invoke` of the `std::invalid_argument` constructor for an unknown mode |
+| `pagepool.cpp:39` | branch 0; branches 2 and 3 never executed | A backing other than `Legacy`, and the test for no whole page |
+| `pagepool.cpp:83` | branches 0 and 1, never executed | `invoke` of the `std::runtime_error` constructor: a mapped mode on a platform other than Linux |
+
+**Unreachable on the tested platform (2 items).** They do not
+correspond to an outcome that can occur in this build.
 
 | Location | gcov item | Origin and reason |
 |---|---|---|
-| `pagepool.cpp:29` | branch 1 | Null check before the call to the array `operator delete` in `delete[] pages_`. The throwing form of `new[]` used by the constructor never returns null, even for zero pages, and the constructor either assigns its result or throws before the object exists. |
+| `pagepool.cpp:97` | branch 0 | Mapped pool in the destructor. Only the Linux code sets `mappedBytes_`, and it is not compiled here. |
+| `pagepool.cpp:102` | branch 1 | Null check before the call to the array `operator delete` in `delete[] pages_`. The throwing form of `new[]` used by the constructor never returns null, even for zero pages, and the constructor either assigns its result or throws before the object exists. |
 
 ## Limitations
 
@@ -217,8 +271,18 @@ source.
   system cannot satisfy is reported by `new Page[numPages_]` with
   `std::bad_alloc`; this was not tested.
 - No allocation-failure injection was performed.
-- A build with `NDEBUG` defined removes the block-size check; such a
-  build was not tested.
+- The backings selected by `RESOLVER1_PAGE_MODE` (`base`, `thp`,
+  `hugetlb`), the exceptions for an unknown mode and for a mapped mode on
+  a platform other than Linux, and the accessors `backing`,
+  `backingAddress` and `backingBytes` are not tested. The mapped backings
+  are compiled only on Linux.
+- Release-style `-O2 -DNDEBUG` builds were tested with LG 8×2 and LG 4×2,
+  using block sizes of 1, 2, 4 and 8 KiB. All eight configurations passed
+  232 of 232 tests. The runs are recorded in `matrix/summary.txt` (SHA-256
+  `073fa663a89a839eeebb92c7bdf587030618c3d9be76d7ed09aec3a851a7dd4f`) of the
+  external package
+  `mac-to-hetzner/2026-11-08-v3-mac-mixed-batch-tests-and-final-catalogs`
+  (by5-exchange commit `b0778c0365`).
 - Releasing an invalid or already-free block is undefined behaviour in
   this interface and is not tested.
 - No condition coverage was measured: the toolchain does not provide
@@ -228,7 +292,7 @@ source.
 ## Evidence
 
 - [Test output](evidence/pagepool-tests.txt): output of `make -B test`
-  for the full suite (230 tests, PagePool, KeyStore, BNodeStore and
+  for the full suite (232 tests, PagePool, KeyStore, BNodeStore and
   TempConflictBTree). It is the same run as `keystore-tests.txt`,
   `bnodestore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/pagepool-coverage.txt): gcov output after

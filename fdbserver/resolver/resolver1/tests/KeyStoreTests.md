@@ -207,12 +207,12 @@ checked through both views, and its `endStart` is 0 when it is a point
 and the length of its begin otherwise.
 
 41 KeyStore tests passed, 0 failed. The full run, including the 15
-PagePool tests, the 48 BNodeStore tests and the 126 TempConflictBTree
-tests, reports 230 passed and 0 failed.
+PagePool tests, the 48 BNodeStore tests and the 128 TempConflictBTree
+tests, reports 232 passed and 0 failed.
 
 These preconditions are checked with `assert`, which terminates the
 process when it fails and is removed when `NDEBUG` is defined. The
-tested builds do not define `NDEBUG`. Inputs that do not meet them are
+assertion builds do not define `NDEBUG`. Inputs that do not meet them are
 outside the interface and are not tested.
 
 - The constructor requires a pool block size larger than
@@ -258,7 +258,9 @@ llvm-cov source-based coverage:
 | Lines | 98.37% of 367 |
 | Branches | 96.83% of 126 |
 
-Coverage classification scope. The coverage totals above are derived from the Apple clang 15 evidence regenerated for the v3.8 tree `2b62382a` and are authoritative for this revision. The detailed classification below was produced for Resolver v2 at `491d3f5a6`; its file-and-line references and branch inventory have not been reclassified for v3.8 and must not be interpreted as a complete analysis of the current uncovered branches. The current evidence reports 35 branch elements not taken. Reclassification of those elements is tracked as separate follow-up work.
+The classification in this section was made on the tree identified in
+[Source and environment](#source-and-environment), from the Apple clang 15
+evidence of the same run.
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
@@ -279,7 +281,7 @@ There are ten compound decisions. llvm-cov reports every one of their
 conditions taken in both directions.
 
 `isKeyValid(RangeRef)`: `ref.beginLength == 0 || ref.blockGen >
-lastReclaimedKeyGeneration_` (lines 221-222).
+lastReclaimedKeyGeneration_` (lines 234-235).
 
 | Condition | Input | Other condition | Decision | Test |
 |---|---|---|---|---|
@@ -289,9 +291,9 @@ lastReclaimedKeyGeneration_` (lines 221-222).
 
 Comparison of two stored keys, `compareKeys(const RangeRef&, const
 RangeRef&)`. The loop runs while both keys have bytes left, `rem1 != 0 &&
-rem2 != 0` (line 245), and each key moves to its next block when its
+rem2 != 0` (line 258), and each key moves to its next block when its
 fragment is used up and bytes remain, `bytes1 == 0 && rem1 != 0`
-(line 257) and the same for the second key (line 262).
+(line 270) and the same for the second key (line 275).
 
 | Condition | Input | Other condition | Decision | Test |
 |---|---|---|---|---|
@@ -306,10 +308,10 @@ Comparison of an external key with stored bytes, `compareFrom`, used by
 `compareKeys(const StringRef&, const RangeRef&)`, `compareBegin`,
 `compareEnd` and the point detection of the overloads that take a stored
 source. Only the stored side moves between blocks. The loop condition
-`rem1 != 0 && rem2 != 0` (line 297) and the move condition
-`bytes2 == 0 && rem2 != 0` (line 308) have the cases of the tables
+`rem1 != 0 && rem2 != 0` (line 310) and the move condition
+`bytes2 == 0 && rem2 != 0` (line 321) have the cases of the tables
 above. After the loop, the keys are equal when both are exhausted,
-`rem1 == 0 && rem2 == 0` (line 314):
+`rem1 == 0 && rem2 == 0` (line 327):
 
 | Condition | Input | Other condition | Decision | Test |
 |---|---|---|---|---|
@@ -320,13 +322,13 @@ above. After the loop, the keys are equal when both are exhausted,
 Detection of a point range. Each `appendRange` overload decides whether
 `[begin, end)` is a point with the same three conditions: `endLength ==
 beginLength + 1 && the last byte of end is 0 && (beginLength == 0 ||
-begin is a prefix of end)`. With two external keys (lines 335-338), the
+begin is a prefix of end)`. With two external keys (lines 348-351), the
 prefix check is a `memcmp`. With the begin of a stored source,
-`appendWithStoredBegin` (lines 368-372), it compares the bytes of end
+`appendWithStoredBegin` (lines 381-384), it compares the bytes of end
 with the stored begin through `compareFrom`. With the end of a stored
-source, `appendWithStoredEnd` checks the length first (line 390) and
+source, `appendWithStoredEnd` checks the length first (line 403) and
 then, reading end from the store, its last byte and the prefix through
-`compareFrom` (lines 394-396).
+`compareFrom` (lines 407-409).
 
 Two external keys:
 
@@ -363,43 +365,46 @@ llvm-cov counts for the compound decisions:
 
 | Location | Condition | True | False |
 |---|---|---|---|
-| `keystore.cpp:221` | `beginLength == 0` | 194 | 30.0k |
-| `keystore.cpp:222` | `blockGen > lastReclaimedKeyGeneration_` | 30.0k | 6 |
-| `keystore.cpp:245` | `rem1 != 0` | 18.9k | 1.07k |
-| `keystore.cpp:245` | `rem2 != 0` | 17.9k | 981 |
-| `keystore.cpp:257` | `bytes1 == 0` | 7.00k | 6.57k |
-| `keystore.cpp:257` | `rem1 != 0` | 5.93k | 1.07k |
-| `keystore.cpp:262` | `bytes2 == 0` | 7.00k | 6.57k |
-| `keystore.cpp:262` | `rem2 != 0` | 5.93k | 1.07k |
-| `keystore.cpp:297` | `rem1 != 0` | 74.6k | 6.88k |
-| `keystore.cpp:297` | `rem2 != 0` | 68.4k | 6.28k |
-| `keystore.cpp:308` | `bytes2 == 0` | 36.4k | 5.52k |
-| `keystore.cpp:308` | `rem2 != 0` | 29.5k | 6.90k |
-| `keystore.cpp:314` | `rem1 == 0` | 6.88k | 6.28k |
-| `keystore.cpp:314` | `rem2 == 0` | 986 | 5.89k |
-| `keystore.cpp:335` | `endLength == beginLength + 1` | 189 | 112 |
-| `keystore.cpp:336` | `end[beginLength] == 0` | 182 | 7 |
-| `keystore.cpp:337` | `beginLength == 0` | 3 | 179 |
-| `keystore.cpp:338` | Begin is a prefix of end | 177 | 2 |
-| `keystore.cpp:368` | `endLength == beginLength + 1` | 8 | 61 |
-| `keystore.cpp:369` | `end[beginLength] == 0` | 3 | 5 |
-| `keystore.cpp:370` | `beginLength == 0` | 1 | 2 |
-| `keystore.cpp:371` | Stored begin is a prefix of end | 1 | 1 |
-| `keystore.cpp:390` | `endLength == beginLength + 1` | 8 | 62 |
-| `keystore.cpp:394` | Stored last byte of end is 0 | 5 | 3 |
-| `keystore.cpp:395` | `beginLength == 0` | 1 | 4 |
-| `keystore.cpp:396` | Begin is a prefix of the stored end | 3 | 1 |
+| `keystore.cpp:234` | `beginLength == 0` | 194 | 30.0k |
+| `keystore.cpp:235` | `blockGen > lastReclaimedKeyGeneration_` | 30.0k | 6 |
+| `keystore.cpp:258` | `rem1 != 0` | 18.9k | 1.07k |
+| `keystore.cpp:258` | `rem2 != 0` | 17.9k | 981 |
+| `keystore.cpp:270` | `bytes1 == 0` | 7.00k | 6.57k |
+| `keystore.cpp:270` | `rem1 != 0` | 5.93k | 1.07k |
+| `keystore.cpp:275` | `bytes2 == 0` | 7.00k | 6.57k |
+| `keystore.cpp:275` | `rem2 != 0` | 5.93k | 1.07k |
+| `keystore.cpp:310` | `rem1 != 0` | 74.6k | 6.88k |
+| `keystore.cpp:310` | `rem2 != 0` | 68.4k | 6.28k |
+| `keystore.cpp:321` | `bytes2 == 0` | 36.4k | 5.52k |
+| `keystore.cpp:321` | `rem2 != 0` | 29.5k | 6.90k |
+| `keystore.cpp:327` | `rem1 == 0` | 6.88k | 6.28k |
+| `keystore.cpp:327` | `rem2 == 0` | 986 | 5.89k |
+| `keystore.cpp:348` | `endLength == beginLength + 1` | 189 | 112 |
+| `keystore.cpp:349` | `end[beginLength] == 0` | 182 | 7 |
+| `keystore.cpp:350` | `beginLength == 0` | 3 | 179 |
+| `keystore.cpp:351` | Begin is a prefix of end | 177 | 2 |
+| `keystore.cpp:381` | `endLength == beginLength + 1` | 8 | 61 |
+| `keystore.cpp:382` | `end[beginLength] == 0` | 3 | 5 |
+| `keystore.cpp:383` | `beginLength == 0` | 1 | 2 |
+| `keystore.cpp:384` | Stored begin is a prefix of end | 1 | 1 |
+| `keystore.cpp:403` | `endLength == beginLength + 1` | 8 | 62 |
+| `keystore.cpp:407` | Stored last byte of end is 0 | 5 | 3 |
+| `keystore.cpp:408` | `beginLength == 0` | 1 | 4 |
+| `keystore.cpp:409` | Begin is a prefix of the stored end | 3 | 1 |
 
 `isKeyValid` is evaluated mostly by the `assert` checks of
 `compareKeys`, which is why its counts are large; the cases of its table
 are the calls made directly by the tests.
 
 The other decisions in `keystore.cpp` have a single condition, and
-llvm-cov reports both outcomes covered for each of them. They include
-the copy of a record from two sources in `appendRecord` (line 123: the
-second source starts when the first is used up), the move of a stored
-source to its next block while it is copied (line 135), and the loop in
-`locate` (line 458) that skips whole blocks to reach a position in a
+llvm-cov reports both outcomes covered for each of them except the checks
+of an exhausted generation in `appendRecord` (lines 83 and 172), never
+true, and the release loop under the first (line 84), never executed; see
+[Uncovered generated branches](#uncovered-generated-branches). They
+include the copy of a record from two sources in `appendRecord` (line 131:
+the second source starts when the first is used up), the move of a stored
+source to its next block while it is copied (line 143), and the loop in
+`locate` (line 471) that skips whole blocks to reach a position in a
 record, used by `compareBegin`, `compareEnd` and `appendWithStoredEnd`,
 including a position exactly at the first data byte of a later block.
 
@@ -409,35 +414,56 @@ start at offset 24. `sizeof(RangeRef) == 24` is checked at compile time.
 
 ### Uncovered generated branches
 
-gcov reports 25 untaken branches. Each was compared with the LLVM IR
-that Apple clang 15 generates for `keystore.cpp` at `-O0`, with and
-without `--coverage`. Line numbers refer to `keystore.cpp`.
+gcov reports 35 untaken branches: 8 never executed and 27 taken 0 times.
+Each was matched to its edge in the LLVM IR that Apple clang 15 generates
+for `keystore.cpp` at `-O0` with `-g`: llvm-cov gcov lists the out-edges
+of a block at the last source line of the block, and on 74 of the 75
+lines with branch items the number of items equals the number of edges of
+the conditional branches and `invoke` instructions whose block ends on
+that line. The other line, 195, is described at the end of this section.
+Line numbers refer to `keystore.cpp`.
 
-**Precondition violations.** The paths to `__assert_rtn` taken when an
-`assert` fails, which happens only when a precondition listed in
+**Precondition violations (13 items).** The paths to `__assert_rtn` taken
+when an `assert` fails, which happens only when a precondition listed in
 [Test cases](#test-cases) does not hold. The IR contains a call to
 `__assert_rtn` on each of these lines.
 
 | Location | gcov item | Check |
 |---|---|---|
-| `keystore.cpp:11` | branch 0 | Block size larger than the header |
-| `keystore.cpp:55` | branch 0 | A record has at least one byte |
-| `keystore.cpp:234` | branches 0 and 2 | Both keys valid (`isKeyValid`), one branch per key |
-| `keystore.cpp:279` | branch 0 | Stored key valid (`isKeyValid`) |
-| `keystore.cpp:328` | branch 1 | Begin no longer than 65,535 bytes |
-| `keystore.cpp:329` | branch 0 | End no longer than 65,535 bytes |
-| `keystore.cpp:347` | branch 0 | Source valid (`isValid`) |
-| `keystore.cpp:355` | branch 0 | Source valid (`isValid`) |
-| `keystore.cpp:363` | branch 0 | End no longer than 65,535 bytes |
-| `keystore.cpp:381` | branch 0 | Begin no longer than 65,535 bytes |
-| `keystore.cpp:433` | branch 0 | Range valid (`isValid`) |
-| `keystore.cpp:438` | branch 0 | Range valid (`isValid`) |
+| `keystore.cpp:12` | branch 0 | Block size larger than the header |
+| `keystore.cpp:56` | branch 1 | A record has at least one byte |
+| `keystore.cpp:247` | branches 0 and 2 | Both keys valid (`isKeyValid`), one branch per key |
+| `keystore.cpp:292` | branch 0 | Stored key valid (`isKeyValid`) |
+| `keystore.cpp:341` | branch 1 | Begin no longer than 65,535 bytes |
+| `keystore.cpp:342` | branch 0 | End no longer than 65,535 bytes |
+| `keystore.cpp:360` | branch 0 | Source valid (`isValid`) |
+| `keystore.cpp:368` | branch 0 | Source valid (`isValid`) |
+| `keystore.cpp:376` | branch 0 | End no longer than 65,535 bytes |
+| `keystore.cpp:394` | branch 0 | Begin no longer than 65,535 bytes |
+| `keystore.cpp:446` | branch 0 | Range valid (`isValid`) |
+| `keystore.cpp:451` | branch 0 | Range valid (`isValid`) |
 
-The check on line 55 cannot fail through the interface: `appendKey`
+The check on line 56 cannot fail through the interface: `appendKey`
 returns before it for the empty key, and a range always has stored
 bytes.
 
-**Exception paths not exercised.** Exception edges of calls to
+**Generation exhausted (10 items).** `appendRecord` throws
+`std::overflow_error` instead of letting the generation of a new key
+block wrap, and keeps no open block when the next generation would
+overflow. The generation starts at 2 and grows by 2 per block allocated;
+the checks are true only after about 2^63 block allocations, which no
+test performs, and no test can set the counter. These outcomes are
+reachable in principle and were not exercised.
+
+| Location | gcov items | Outcome |
+|---|---|---|
+| `keystore.cpp:83` | branch 1 | Generation exhausted before allocating a block of the record |
+| `keystore.cpp:84` | branches 0 and 1, never executed | Release of the blocks already allocated for the record |
+| `keystore.cpp:85` | branches 0 and 1, never executed | `invoke` of `releaseBlock` in that loop |
+| `keystore.cpp:87` | branches 0 to 3, never executed | `invoke` of the `std::overflow_error` constructor and of `__cxa_throw` |
+| `keystore.cpp:172` | branch 1 | Generation exhausted when opening a new block after the record |
+
+**Exception paths not exercised (4 items).** Exception edges of calls to
 `allocateBlock` and `releaseBlock` (`invoke` instructions). These
 functions are not declared `noexcept`, so the compiler keeps an
 exception path. Their current implementations contain no operation that
@@ -446,36 +472,37 @@ exercised.
 
 | Location | gcov item | Call |
 |---|---|---|
-| `keystore.cpp:18` | branch 1 | `releaseBlock` |
-| `keystore.cpp:82` | branch 1 | `allocateBlock` |
-| `keystore.cpp:85` | branch 1 | `releaseBlock` |
-| `keystore.cpp:164` | branch 1 | `allocateBlock` |
+| `keystore.cpp:19` | branch 1 | `releaseBlock` |
+| `keystore.cpp:89` | branch 1 | `allocateBlock` |
+| `keystore.cpp:92` | branch 1 | `releaseBlock` |
+| `keystore.cpp:175` | branch 1 | `allocateBlock` |
 
-**Exception paths not exercised in standard library calls.** Exception
-edges of calls with integer or trivially copyable arguments. No
-operation in them throws for these types, but they are not declared
+**Exception paths not exercised in standard library calls (5 items).**
+Exception edges of calls with integer or trivially copyable arguments.
+No operation in them throws for these types, but they are not declared
 `noexcept` and no fault injection was performed.
 
 | Location | gcov item | Call |
 |---|---|---|
-| `keystore.cpp:117` | branch 1 | `std::min` on `std::size_t` values |
-| `keystore.cpp:129` | branch 1 | `std::min` on `std::size_t` values |
-| `keystore.cpp:139` | branch 1 | `std::min` on `std::size_t` values |
-| `keystore.cpp:148` | branch 1 | `std::max` on `Version` values |
-| `keystore.cpp:182` | branch 1 | Constructor of `std::optional<RecordStart>` from a `RecordStart`, a struct of a pointer and integer members |
+| `keystore.cpp:125` | branch 1 | `std::min` on `std::size_t` values |
+| `keystore.cpp:137` | branch 1 | `std::min` on `std::size_t` values |
+| `keystore.cpp:147` | branch 1 | `std::min` on `std::size_t` values |
+| `keystore.cpp:156` | branch 1 | `std::max` on `Version` values |
+| `keystore.cpp:195` | branch 1 | Constructor of `std::optional<RecordStart>` from a `RecordStart`, a struct of a pointer and integer members |
 
-These are all the `invoke` instructions in the IR of `keystore.cpp`.
+These, with lines 85 and 87, are all the `invoke` instructions in the IR
+of `keystore.cpp`.
 
-**Not attributed to a single instruction.** gcov reports more
+**Not attributed to a single instruction (3 items).** gcov reports more
 two-way branches on this line than the IR has `invoke` instructions.
-The IR for lines 182 to 186 contains no conditional branch on a program
+The IR for lines 195 to 199 contains no conditional branch on a program
 value, only one `invoke` instruction and unconditional branches, so
 these items do not correspond to a source condition. In each case the
 other outcome is taken on every execution of the line.
 
 | Location | gcov item |
 |---|---|
-| `keystore.cpp:182` | branches 3, 5 and 7 |
+| `keystore.cpp:195` | branches 3, 5 and 7 |
 
 ## Limitations
 
@@ -483,6 +510,9 @@ other outcome is taken on every execution of the line.
   from the `std::vector` of reserved blocks in `appendRecord` was not
   exercised. The vector allocation is a plain call
   in the generated code, so gcov reports no branch for it.
+- The `std::overflow_error` of an exhausted generation, and the release of
+  the blocks already allocated before it, are not exercised: they need
+  about 2^63 block allocations, and the counter cannot be set from a test.
 - No fault injection was performed for the exception edges of the
   `PagePool` calls. Their current implementations contain no throwing
   operation; a change in `PagePool` would make these paths relevant.
@@ -499,8 +529,13 @@ other outcome is taken on every execution of the line.
   interface does not encapsulate fragment traversal for reading.
 - The maximum key length (65,535 bytes) was not tested. The largest key
   tested is 65,512 bytes, which fills one 64 KiB block.
-- A build with `NDEBUG` defined removes the precondition checks; such a
-  build was not tested.
+- Release-style `-O2 -DNDEBUG` builds were tested with LG 8×2 and LG 4×2,
+  using block sizes of 1, 2, 4 and 8 KiB. All eight configurations passed
+  232 of 232 tests. The runs are recorded in `matrix/summary.txt` (SHA-256
+  `073fa663a89a839eeebb92c7bdf587030618c3d9be76d7ed09aec3a851a7dd4f`) of the
+  external package
+  `mac-to-hetzner/2026-11-08-v3-mac-mixed-batch-tests-and-final-catalogs`
+  (by5-exchange commit `b0778c0365`).
 - The tests store copies of trimmed ranges directly with `appendRange`.
   Trimming itself, and the atomicity of a tree update made of several
   `appendRange` calls, belong to the tree and are not tested here.
@@ -511,7 +546,7 @@ other outcome is taken on every execution of the line.
 ## Evidence
 
 - [Test output](evidence/keystore-tests.txt): output of `make -B test`
-  for the full suite (230 tests, PagePool, KeyStore, BNodeStore and
+  for the full suite (232 tests, PagePool, KeyStore, BNodeStore and
   TempConflictBTree). It is the same run as `pagepool-tests.txt`,
   `bnodestore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/keystore-coverage.txt): gcov output after

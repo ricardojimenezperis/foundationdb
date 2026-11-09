@@ -217,12 +217,12 @@ from replaying their random decisions with the same seeds and the
 capacities above, not from the test output.
 
 48 BNodeStore tests passed, 0 failed. The full run, including the 15
-PagePool tests, the 41 KeyStore tests and the 126 TempConflictBTree
-tests, reports 230 passed and 0 failed.
+PagePool tests, the 41 KeyStore tests and the 128 TempConflictBTree
+tests, reports 232 passed and 0 failed.
 
 The store has these preconditions, checked with `assert`, which
 terminates the process when it fails and is removed when `NDEBUG` is
-defined. The tested builds do not define `NDEBUG`. Inputs that do not
+defined. The assertion builds do not define `NDEBUG`. Inputs that do not
 meet them are outside the interface and are not tested.
 
 - The pool block size equals `BlockSize`.
@@ -285,7 +285,9 @@ llvm-cov source-based coverage:
 | `bnodestore.cpp` | 100.00% of 4 | 100.00% of 2 | 100.00% of 10 | 100.00% of 2 |
 | `bnodestore.h` | 93.42% of 152 | 100.00% of 42 | 98.71% of 311 | 95.83% of 48 |
 
-Coverage classification scope. The coverage totals above are derived from the Apple clang 15 evidence regenerated for the v3.8 tree `2b62382a` and are authoritative for this revision. The detailed classification below was produced for Resolver v2 at `491d3f5a6`; its file-and-line references and branch inventory have not been reclassified for v3.8 and must not be interpreted as a complete analysis of the current uncovered branches. The current evidence reports 2 branch elements not taken. Reclassification of those elements is tracked as separate follow-up work.
+The classification in this section was made on the tree identified in
+[Source and environment](#source-and-environment), from the Apple clang 15
+evidence of the same run.
 
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
@@ -300,9 +302,11 @@ each condition written in the source outside the `assert` checks, whose
 conditions come from a macro in a system header, and reports as
 "Folded - Ignored", without counting them, the conditions that are
 constant in a template instantiation (`if constexpr` and `C % 64 == 0`).
-Its 46 branches are the 23 remaining conditions of the store, 1 in
-`bnodestore.cpp` and 22 in `bnodestore.h`, each taken in both
-directions.
+Its 50 branches are the 25 remaining conditions of the store, 1 in
+`bnodestore.cpp` and 24 in `bnodestore.h`. Each is taken in both
+directions except the two checks of an exhausted generation, in
+`allocateLeaf` and `allocateInternal` (lines 357 and 373), which are never
+true.
 
 The 42 functions in `bnodestore.h` are the 8 members of the template
 `FreeSlots` (`fullWord`, the constructor, `isFree`, `setFree`,
@@ -316,12 +320,15 @@ template function once, whatever its number of instantiations. The
 capacities appear in `bnodestore-llvm-show.txt` as unexecuted
 instantiations, because only the BNodeStore tests are run.
 
-llvm-cov reports 8 of the 146 regions of `bnodestore.h` as not covered.
-Each starts at the opening brace of a branch of an `if constexpr` that
-is not the last one: in the six `FreeSlots` members that choose between
-one word and several (`isFree`, `setFree`, `unsetFree`, `any`, `count`
-and `first`, lines 84, 91, 98, 105, 117 and 130), and in
-`capacityForBlock` (lines 227 and 229). In an instantiation that
+llvm-cov reports 10 of the 152 regions of `bnodestore.h` as not covered.
+Two are the bodies of the checks of an exhausted generation (lines 357
+and 373), whose `throw` lines (358 and 374) and closing braces are the 4
+lines of the header that are not executed. Each of the other 8 starts at
+the opening brace of a branch of an `if constexpr` that is not the last
+one: in the six `FreeSlots` members that choose between one word and
+several (`isFree`, `setFree`, `unsetFree`, `any`, `count` and `first`,
+lines 85, 92, 99, 106, 118 and 131), and in `capacityForBlock` (lines 232
+and 234). In an instantiation that
 discards such a branch, llvm-cov still maps a region for it, which has
 no code and is never executed, while an instantiation that keeps it has
 no region for the branches it discards. For a template, llvm-cov counts
@@ -345,7 +352,7 @@ with `C = 255`.
 The decisions of the store outside the `assert` checks have a single
 condition, except the choice of a word in `FreeSlots::fullWord`.
 
-`FreeSlots<C>::fullWord(w)`: `w + 1 < Words || C % 64 == 0` (line 73)
+`FreeSlots<C>::fullWord(w)`: `w + 1 < Words || C % 64 == 0` (line 74)
 selects a word with every bit set, or with only the `C % 64` lowest bits
 set. `C % 64 == 0` is a constant in each instantiation, so llvm-cov
 folds it; its two values are covered by different instantiations. The
@@ -358,41 +365,44 @@ depend on the platform.
 | Last word, `C` a multiple of 64 | `C = 64`, `w = 0`; `C = 128`, `w = 1` | `w + 1 < Words` false | Every bit set | `FreeSlots` |
 | Last word, `C` not a multiple of 64 | `C = 65`, `w = 1` (and 1, 40, 59, 121, 165, 245 and 255) | `w + 1 < Words` false | `C % 64` lowest bits set | `FreeSlots`; every node allocation (40 and 59) |
 
-llvm-cov reports both outcomes covered for every counted condition.
+llvm-cov reports both outcomes covered for every counted condition
+except the true outcome of the two generation checks.
 `llvm-cov show` lists the branches of a template once per
 instantiation; the counts below are their sums, from `llvm-cov export`
 on the same profile (see [Reproduction](#reproduction)):
 
 | Location | Condition | True | False |
 |---|---|---|---|
-| `bnodestore.cpp:11` | Destructor: nodes remain | 629 | 44 |
-| `bnodestore.h:73` | `fullWord`: not the last word | 22 | 2089 |
-| `bnodestore.h:78` | `FreeSlots` constructor: words left | 2090 | 2079 |
-| `bnodestore.h:108` | `any`, several words: words left | 2054 | 12 |
-| `bnodestore.h:109` | `any`, several words: word not empty | 1009 | 1045 |
-| `bnodestore.h:121` | `count`, several words: words left | 3174 | 997 |
-| `bnodestore.h:134` | `first`, several words: word empty | 1011 | 1003 |
-| `bnodestore.h:252` | `parentRank`: slot not at this rank | 268658 | 16740 |
-| `bnodestore.h:353` | No block for a leaf | 1 | 616 |
-| `bnodestore.h:365` | No block for an internal node | 1 | 26 |
-| `bnodestore.h:377` | Empty age list on insertion | 46 | 604 |
-| `bnodestore.h:386` | Unlinked node is the newest | 8 | 13 |
-| `bnodestore.h:391` | Unlinked node is the oldest | 17 | 4 |
-| `bnodestore.h:408` | `updateCV` with the current value | 1 | 720 |
-| `bnodestore.h:413` | Updated node is not the newest | 8 | 712 |
-| `bnodestore.h:420` | `oldestCV` on an empty store | 2 | 4 |
-| `bnodestore.h:470` | `insertAt`, leaf: entry newer than the leaf | 712 | 12 |
-| `bnodestore.h:482` | `findKey`, internal node: range not empty | 80 | 15 |
-| `bnodestore.h:484` | `findKey`, internal node: key found | 10 | 70 |
-| `bnodestore.h:488` | `findKey`, internal node: key before the middle entry | 45 | 25 |
-| `bnodestore.h:508` | `findKey`, leaf: range not empty | 80 | 15 |
-| `bnodestore.h:510` | `findKey`, leaf: key found | 10 | 70 |
-| `bnodestore.h:514` | `findKey`, leaf: key before the middle entry | 45 | 25 |
+| `bnodestore.cpp:11` | Destructor: nodes remain | 629 | 45 |
+| `bnodestore.h:74` | `fullWord`: not the last word | 22 | 2090 |
+| `bnodestore.h:79` | `FreeSlots` constructor: words left | 2091 | 2080 |
+| `bnodestore.h:109` | `any`, several words: words left | 2054 | 12 |
+| `bnodestore.h:110` | `any`, several words: word not empty | 1009 | 1045 |
+| `bnodestore.h:122` | `count`, several words: words left | 3174 | 997 |
+| `bnodestore.h:135` | `first`, several words: word empty | 1011 | 1003 |
+| `bnodestore.h:257` | `parentRank`: slot not at this rank | 268658 | 16740 |
+| `bnodestore.h:357` | No generation left for a leaf | 0 | 618 |
+| `bnodestore.h:361` | No block for a leaf | 1 | 617 |
+| `bnodestore.h:373` | No generation left for an internal node | 0 | 27 |
+| `bnodestore.h:377` | No block for an internal node | 1 | 26 |
+| `bnodestore.h:390` | Empty age list on insertion | 47 | 604 |
+| `bnodestore.h:399` | Unlinked node is the newest | 9 | 13 |
+| `bnodestore.h:404` | Unlinked node is the oldest | 18 | 4 |
+| `bnodestore.h:421` | `updateCV` with the current value | 1 | 720 |
+| `bnodestore.h:426` | Updated node is not the newest | 8 | 712 |
+| `bnodestore.h:433` | `oldestCV` on an empty store | 2 | 4 |
+| `bnodestore.h:483` | `insertAt`, leaf: entry newer than the leaf | 712 | 12 |
+| `bnodestore.h:495` | `findKey`, internal node: range not empty | 80 | 15 |
+| `bnodestore.h:497` | `findKey`, internal node: key found | 10 | 70 |
+| `bnodestore.h:501` | `findKey`, internal node: key before the middle entry | 45 | 25 |
+| `bnodestore.h:521` | `findKey`, leaf: range not empty | 80 | 15 |
+| `bnodestore.h:523` | `findKey`, leaf: key found | 10 | 70 |
+| `bnodestore.h:527` | `findKey`, leaf: key before the middle entry | 45 | 25 |
 
-The `unlinkNode` conditions on lines 386 and 391 are covered by
+The `unlinkNode` conditions on lines 399 and 404 are covered by
 releasing the only, oldest, middle and newest node, and by moving the
 oldest and a middle node in `updateCV`. The leaf entry that is not newer
-than its leaf, line 470 false, comes from `InsertAtRaisesLeafCV` and
+than its leaf, line 483 false, comes from `InsertAtRaisesLeafCV` and
 `FindKeyInLeaf`. The internal-node `insertAt` and both `eraseAt` have no
 conditions outside their `assert` checks; llvm-cov reports every one of
 their lines executed.
@@ -426,6 +436,14 @@ The failure paths of the `assert` checks in `bnodestore.h` are not
 measured: llvm-cov does not count them and gcov is not used for the
 header.
 
+**Generation exhausted (llvm-cov, `bnodestore.h`).** `allocateLeaf` and
+`allocateInternal` throw `std::overflow_error` instead of letting the
+generation of a new node wrap (lines 357-358 and 373-374). The
+generation starts at 1 and grows by 2 per node allocated; the checks are
+true only after about 2^63 node allocations, which no test performs, and
+no test can set the counter. These outcomes are reachable in principle
+and were not exercised.
+
 ## Limitations
 
 - Only the default block size, 2048 bytes, was tested. The capacities,
@@ -445,8 +463,16 @@ header.
   relevant.
 - The failure paths of the `assert` checks in `bnodestore.h` are not
   measured by either tool.
-- A build with `NDEBUG` defined removes the precondition checks; such a
-  build was not tested.
+- The `std::overflow_error` of an exhausted generation is not exercised:
+  it needs about 2^63 node allocations, and the counter cannot be set from
+  a test.
+- Release-style `-O2 -DNDEBUG` builds were tested with LG 8×2 and LG 4×2,
+  using block sizes of 1, 2, 4 and 8 KiB. All eight configurations passed
+  232 of 232 tests. The runs are recorded in `matrix/summary.txt` (SHA-256
+  `073fa663a89a839eeebb92c7bdf587030618c3d9be76d7ed09aec3a851a7dd4f`) of the
+  external package
+  `mac-to-hetzner/2026-11-08-v3-mac-mixed-batch-tests-and-final-catalogs`
+  (by5-exchange commit `b0778c0365`).
 - No condition coverage was measured: the toolchain does not provide
   it.
 - Results apply to the source and environment identified above.
@@ -454,7 +480,7 @@ header.
 ## Evidence
 
 - [Test output](evidence/bnodestore-tests.txt): output of `make -B test`
-  for the full suite (230 tests, PagePool, KeyStore, BNodeStore and
+  for the full suite (232 tests, PagePool, KeyStore, BNodeStore and
   TempConflictBTree). It is the same run as `pagepool-tests.txt`,
   `keystore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/bnodestore-coverage.txt): gcov output
