@@ -11,7 +11,8 @@ that hold the evidence too large for the repository.
 | `f866c98d8585a77280adbf44c72650f16e975f86` | the stale write rank fix: the final production code |
 | `18260afe5f80e00ae2b5cd4952f49522c07cbd0e` | its regression test, catalogs and evidence |
 | `2a68fc9b90670bea84c7a458e85d582c7f4eb816` | mixed read-write batch tests |
-| this commit | the 232-test catalogs and evidence, the consolidated evaluation and this index |
+| `dd5da2b6a40395ba46f27e3e0bd3e5dbb8be25f7` | the 232-test catalogs and evidence, the consolidated evaluation and this index |
+| this commit | the final AMD long-trace result |
 
 No commit after `f866c98d` changes a production file.
 
@@ -32,17 +33,18 @@ not an isolation of page mode from the data-structure design.
 
 ## Release assets
 
-The evidence too large for the repository is attached to the release of this commit, one archive per asset. The release
-lists each archive's size and SHA-256, and each archive carries its own `SHA256SUMS`.
+The evidence too large for the repository is attached to the `resolver-v3-final` release, one archive per asset. The
+release lists each archive's size and SHA-256, and each archive carries its own `SHA256SUMS`.
 
 | asset | contents |
 |---|---|
-| AMD evaluation | short-benchmark runs, tables and figures, the by5 replica with v3 in HugeTLB, the write-group session in HugeTLB, manifests and scripts |
+| AMD evaluation | short-benchmark runs, tables and figures, the earlier single by5 pair with v3 in HugeTLB, the write-group session in HugeTLB, manifests and scripts |
 | Intel short benchmarks | the session with v3 in HugeTLB: runs, tables, manifests and scripts |
 | Intel by5 | the by5 session with v3 in HugeTLB: runs, per-batch logs, manifests and scripts |
 | Intel integration | sanitizers, simulation, recovery and mutant runs |
 | test matrices | the macOS and Linux matrices of resolver1's 232 tests |
 | AMD fix A/B and component reproduction | the stale write rank fix against v3.8 |
+| AMD long trace | the two-pair by5 session with v3 in HugeTLB: runs, per-batch logs, HugeTLB records, manifests, scripts and a script that recomputes the results |
 | Intel fix validation | the stale write rank fix on Intel: component and `fdbserver` validation, the A/B against v3.8 in HugeTLB, and the initial end-to-end validation of v3.8 |
 
 Large data (binaries, full traces, raw per-batch logs) is not in the repository.

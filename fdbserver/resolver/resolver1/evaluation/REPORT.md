@@ -28,7 +28,7 @@ are never compared.
 
 | machine | CPU | used for |
 |---|---|---|
-| AMD | Ryzen 7 7700, core 7 with its SMT sibling idle | short benchmarks, by5 replica, fix A/B, component reproduction, Linux test matrix |
+| AMD | Ryzen 7 7700, core 7 with its SMT sibling idle | short benchmarks, by5 long trace, fix A/B, component reproduction, Linux test matrix |
 | Intel | Core Ultra 9 285K, one core, no SMT | short benchmarks, by5 long trace, FoundationDB integration: sanitizers, simulation, recovery, mutants |
 | Mac | Apple M3 Pro | resolver1's tests, coverage and catalogs, and the macOS test matrix |
 
@@ -88,9 +88,9 @@ correctness may run in any page mode (§1). The integration with v3 in HugeTLB i
 
 ### 2.4 Logical results of the long trace
 
-Intel's six by5 runs and AMD's four (§3.4, §3.5), FDB and v3 in HugeTLB, give the same results:
+Intel's six by5 runs and AMD's ten (§3.4, §3.5), FDB and v3 in HugeTLB, give the same results:
 - offered hash `11334b1aea22e641` and decisions hash `5001114085b550fb`;
-- per-batch decisions identical in all 172,800 batches, across all ten runs and both machines;
+- per-batch decisions identical in all 172,800 batches, across all sixteen runs and both machines;
 - no transaction rejected for the window or for memory;
 - v3's boundary and retained history identical, batch by batch, on both machines.
 
@@ -210,23 +210,53 @@ One session on one core: a warm-up of each arm, excluded, then two pairs, FDB �
 - FDB: window 265 s.
 - v3: no window, a pool of 98,300 pages of 64 KiB (6,442,188,800 B).
 
-### 3.5 by5 long trace, functional and retention replica (AMD)
+### 3.5 by5 long trace (AMD)
 
-One session: one warm-up of each arm, excluded, then one pair, FDB then v3. Workload as in §3.4.
+One session on one core: a warm-up of each arm, excluded, then two pairs, FDB → v3 and v3 → FDB. Workload, arms and
+binaries as in §3.4, with each binary's SHA-256 unchanged before and after the session.
 
 | check | FDB | v3 |
 |---|---|---|
-| exit; offered and decisions hashes | 0; `11334b1aea22e641`, `5001114085b550fb` | the same |
-| HugeTLB | — | the whole 6,442,188,800-byte pool in huge pages, in both v3 runs |
+| exit; `stderr`; offered and decisions hashes, all six runs | 0; empty; `11334b1aea22e641`, `5001114085b550fb` | the same |
+| HugeTLB | 0 huge pages | system-wide, 3,072 huge pages in use during each v3 run: the whole pool (see below) |
 | measured part: accepted, conflicts, target | 19,517,276; 143,524; 143,524 | the same |
 | measured part: rejected for the window or for memory; divergent | 0; 0; 0 | the same |
-| per-batch decisions, all 172,800 batches | — | equal to FDB's in every batch |
-| reclamation boundary | — | never decreases; first advances at batch 22,492; always below the commit version |
-| retained history, measured part | 265 s by configuration | 582.9 to 584.7 s, median 583.8 s |
-| `totalS`, a single-pair observation | 60.500 s | 57.061 s |
+| per-batch decisions, all 172,800 batches | — | equal to FDB's in every batch, in every run |
+| reclamation boundary | — | first advances at batch 22,492 (about 703 s); never decreases; always below the commit version |
+| retained history, measured part | 265 s by configuration | 582.9 to 584.7 s, median 583.8 s; boundary and retention identical, batch by batch, in every v3 run and to Intel's |
 
-This is a functional and retention replica. A single pair supports no precise time difference, so none is inferred from
-the two `totalS` values.
+| pair | order | FDB `totalS` | v3 `totalS` | v3/FDB | v3 takes less time |
+|---|---|---:|---:|---:|---:|
+| 1 | FDB → v3 | 60.770 s | 56.976 s | 0.937564 | 6.24% |
+| 2 | v3 → FDB | 60.648 s | 57.243 s | 0.943857 | 5.61% |
+
+- **The median is 0.940710:** v3 takes 5.93% less time. The two ratios differ by 0.67% of the median. The median rests
+  on two pairs only and carries no ±1% claim.
+- **By phase,** as a share of FDB's total in the same pair:
+  - v3's read phase adds 35.48% (pair 1) and 36.40% (pair 2);
+  - its write phase saves 29.24% and 29.44%;
+  - the absence of cleanup saves 12.20% and 12.34%;
+  - the rest saves 0.28% and 0.24%.
+- **Where the difference is.** The net difference is concentrated in the read phase. Why reads weigh more here than on
+  Intel has not been measured.
+
+**HugeTLB.** During each v3 run, the system-wide `HugePages_Free` counter, sampled every 0.2 seconds on the dedicated
+machine, fell from 3,300 to a minimum of 228 pages: exactly 3,072 allocated 2 MiB pages, equal to the complete 6 GiB
+history pool. FDB consumed no HugeTLB pages, and all pages were released after every run. This session did not record
+per-process `HugetlbPages`; attribution to the v3 process follows from the exact pool-sized allocation and the absence
+of other workloads, rather than from a per-PID measurement.
+
+**Differences from §3.4.** None of them is corrected for, so seconds are not compared between the two machines:
+- **HugeTLB evidence:** the system-wide counter above, not a per-process sample.
+- **Privileges:** AMD prepared each run with privileged `drop_caches` and compaction; Intel ran unprivileged.
+- **Samplers:** AMD recorded neither the CPU frequency nor the I/O.
+
+The runs, per-batch logs and a script that recomputes every figure above are in `resolver-v3-final-amd-long-trace.zip`.
+
+**The earlier single pair.** A session on 2026-11-08 ran a warm-up of each arm and one pair, FDB then v3. It gave the
+same decisions, boundary and retention, with `totalS` of 60.500 s (FDB) and 57.061 s (v3). It remains a historical
+observation of correctness and retention, in `resolver-v3-final-amd-evaluation.zip` (`runs/by5-pair-h/`), and is not
+pooled with the session above.
 
 **Retention over the segment.** Taken in slices of 9,600 batches, v3's median retained history is 668.6 s in the
 slice where the boundary first advances (batches 19,200 to 28,799). It then declines steadily, slice by slice, to
@@ -269,3 +299,4 @@ Median `totalS` ratio of each candidate to 2 × 8, with its interval:
 - **Page mode separated from the data structure** is not measured (§1).
 - **conflictset ranges** was not profiled, and the cause of its ratios is not established (§3.1, §3.2).
 - **Cold-cache behaviour** is not measured.
+- **Why v3's read phase weighs more on AMD than on Intel** in the long trace is not measured (§3.5).
