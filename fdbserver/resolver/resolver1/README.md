@@ -72,14 +72,24 @@ make -B test BLOCK_SIZE=4096  # the suite at another block size
 bash tests/coverage.sh     # gcov and llvm-cov coverage of every component
 ```
 
-The suite has 232 tests (15 PagePool, 41 KeyStore, 48 BNodeStore and 128 TempConflictBTree) and
+The suite has 240 tests (19 PagePool, 41 KeyStore, 48 BNodeStore and 132 TempConflictBTree) and
 passes at 1, 2, 4 and 8 KiB blocks. Among them, `CheckReadsPastSeparatorsInReusedKeyBlock` forces
 the reclamation and reuse of the key block that expired separators point into, and fails if the
-refresh of expired separators in `checkReads` is reverted. The validation reports of the
+refresh of expired separators in `checkReads` is reverted. Commit `02d354f9` adds 8 of the tests
+for MC/DC coverage and changes no production file. The suite passes 240/240 in 48 configurations:
+24 on Linux with clang 19.1.5 (AMD Ryzen 7 7700) and 24 on macOS with Apple clang 15 (Apple M3
+Pro), covering 2 groups of 8 and of 4 write tasks, the four block sizes, and builds with
+assertions, with `-O2 -DNDEBUG` and with sanitizers. The validation reports of the
 components are in `tests/*Tests.md`. `tests/coverage.sh` regenerates the annotated coverage
 reports in `tests/evidence/`. Selected test outputs and coverage summaries are tracked; raw
 `.gcov` and `*-llvm-show.txt` files are excluded by `.gitignore` and distributed with the
 external evidence.
+
+[`tests/MCDCCoverage.md`](tests/MCDCCoverage.md) reports the MC/DC coverage measured with clang
+20.1.8 on the default build, 2 groups of 8 write tasks: 153 of 210 conditions show an
+independence pair (72.86%). It classifies each of the other 57 conditions and keeps assertion
+conditions in the denominator. The build with `RESOLVER1_WRITE_LG=0` is measured separately and
+is not added to these figures.
 
 `bench/blocksizebench.cpp` measures the tree at the block size it is compiled with:
 

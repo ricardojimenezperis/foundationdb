@@ -72,7 +72,7 @@ the copies.
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `2a8173902bc33339` |
   | `tests/keystoretests.cpp` | `f3c274cf80f60567` |
-  | `tests/pagepooltests.cpp` | `059580ab0c6dff71` |
+  | `tests/pagepooltests.cpp` | `eecfd20aba2b7979` |
 
 - Working tree: the files listed above
 - Platform: macOS 27.0.1 (build 26A434), arm64 (Apple M3 Pro)
@@ -206,9 +206,9 @@ In the tests that build new ranges from a stored source, a new range is
 checked through both views, and its `endStart` is 0 when it is a point
 and the length of its begin otherwise.
 
-41 KeyStore tests passed, 0 failed. The full run, including the 15
-PagePool tests, the 48 BNodeStore tests and the 128 TempConflictBTree
-tests, reports 232 passed and 0 failed.
+41 KeyStore tests passed, 0 failed. The full run, including the 19
+PagePool tests, the 48 BNodeStore tests and the 132 TempConflictBTree
+tests, reports 240 passed and 0 failed.
 
 These preconditions are checked with `assert`, which terminates the
 process when it fails and is removed when `NDEBUG` is defined. The
@@ -266,7 +266,11 @@ These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
 errors. "Taken at least once" does not mean that every decision was
 taken in both directions. Apple clang 15 provides no condition
-coverage equivalent to GCC's `-fcondition-coverage`.
+coverage equivalent to GCC's `-fcondition-coverage`. MC/DC was measured
+separately with LLVM/clang 20 and is reported in
+[MCDCCoverage.md](MCDCCoverage.md): `keystore.cpp` has 27 instrumented
+conditions, 25 of them with an independence pair; the 2 without one are
+the conditions of the `assert` on line 247.
 
 gcov counts branches between the basic blocks of the generated code,
 including the exception edges the compiler adds and the failure paths
@@ -518,24 +522,26 @@ other outcome is taken on every execution of the line.
   operation; a change in `PagePool` would make these paths relevant.
 - Three gcov items could not be attributed to a single instruction; see
   [Uncovered generated branches](#uncovered-generated-branches).
-- No condition coverage was measured: the toolchain does not provide
-  it. The isolation of the conditions of `isKeyValid`, of both
-  `compareKeys` overloads, of `compareFrom` and of the three point
-  detections rests on the test cases listed above and on the llvm-cov
-  branch counts.
+- Condition coverage is not available with Apple clang 15. MC/DC was
+  measured with LLVM/clang 20 on the full suite and is reported in
+  [MCDCCoverage.md](MCDCCoverage.md): every condition of `keystore.cpp`
+  outside the `assert` on line 247 has an independence pair. That run
+  includes the tests of the other components, which also use `KeyStore`;
+  the tables above isolate the conditions with the KeyStore tests
+  alone.
 - Apart from the comparisons and the copies made by `appendRange` from
   a stored source, multi-block keys and records are traversed by the
   caller using the exposed block headers and block size. The current
   interface does not encapsulate fragment traversal for reading.
 - The maximum key length (65,535 bytes) was not tested. The largest key
   tested is 65,512 bytes, which fills one 64 KiB block.
-- Release-style `-O2 -DNDEBUG` builds were tested with LG 8×2 and LG 4×2,
-  using block sizes of 1, 2, 4 and 8 KiB. All eight configurations passed
-  232 of 232 tests. The runs are recorded in `matrix/summary.txt` (SHA-256
-  `073fa663a89a839eeebb92c7bdf587030618c3d9be76d7ed09aec3a851a7dd4f`) of the
-  external package
-  `mac-to-hetzner/2026-11-08-v3-mac-mixed-batch-tests-and-final-catalogs`
-  (by5-exchange commit `b0778c0365`).
+- The full suite was run on the tree identified above in two matrices of
+  24 configurations each: write tasks 2×8 and 2×4, blocks of 1, 2, 4 and
+  8 KiB, and assertions, `-O2 -DNDEBUG` and sanitizers (ASan/UBSan on
+  Linux with clang 19.1.5 and libc++; UBSan with Guard Malloc on macOS
+  with Apple clang 15.0.0). All 48 configurations passed 240 of 240
+  tests, with no compiler warning and no sanitizer report. The runs are
+  in [evidence/mcdc/matrix/](evidence/mcdc/matrix/).
 - The tests store copies of trimmed ranges directly with `appendRange`.
   Trimming itself, and the atomicity of a tree update made of several
   `appendRange` calls, belong to the tree and are not tested here.
@@ -546,7 +552,7 @@ other outcome is taken on every execution of the line.
 ## Evidence
 
 - [Test output](evidence/keystore-tests.txt): output of `make -B test`
-  for the full suite (232 tests, PagePool, KeyStore, BNodeStore and
+  for the full suite (240 tests, PagePool, KeyStore, BNodeStore and
   TempConflictBTree). It is the same run as `pagepool-tests.txt`,
   `bnodestore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/keystore-coverage.txt): gcov output after

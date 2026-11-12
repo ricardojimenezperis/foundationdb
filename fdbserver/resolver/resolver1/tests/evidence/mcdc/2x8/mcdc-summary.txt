@@ -1,0 +1,7 @@
+file                      conds   pair nopair folded | export:  count covered
+bnodestore.h                  5      1      4      1 | export:      5      1
+keystore.cpp                 27     25      2      0 | export:     27     25
+pagepool.cpp                  7      4      3      0 | export:      7      4
+tempconflictbtree.cpp       171    123     48      0 | export:    171    123
+TOTAL                       210    153     57      1 | export:    210    153
+MC/DC 72.86%  records 192  source decisions 96  match export: True

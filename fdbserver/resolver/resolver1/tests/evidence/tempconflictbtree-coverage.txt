@@ -1,7 +1,7 @@
 File 'tempconflictbtree.cpp'
-Lines executed:90.03% of 1906
+Lines executed:90.19% of 1906
 Branches executed:91.10% of 1911
-Taken at least once:60.81% of 1911
+Taken at least once:61.85% of 1911
 No calls
 Creating 'tempconflictbtree.cpp.gcov'
 

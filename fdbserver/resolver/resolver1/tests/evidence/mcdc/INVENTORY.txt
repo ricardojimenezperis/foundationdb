@@ -1,0 +1,59 @@
+MC/DC evidence for the final Resolver v3, measured on commit
+02d354f928143a45bb51cada4f06da11da628589 ("Add MC/DC coverage tests for final
+Resolver v3", tree c23e51ad3c71a012360f483824afc107dd1de0c7, parent 1233986b).
+The report is ../../MCDCCoverage.md. Every run used a git archive of that
+commit. "Full suite" means all 240 registered tests in one process, with no
+filter.
+
+toolchain.txt          clang/llvm-cov 20.1.8 versions, LLVM archive SHA-256, SDK,
+                       platform; compilers and image of the test matrices
+SOURCES-SHA256.txt     SHA-256 of every source file of the measured commit
+INVENTORY.txt          this file
+SANITIZATION.md        substitutions made before publication
+SANITIZATION-SHA256.tsv  hashes of every file before and after sanitization
+SHA256SUMS             SHA-256 of every other file in this directory tree
+
+2x8/                   published configuration (RESOLVER1_WRITE_LG 8, 2 groups, 2 KiB blocks)
+  build-flags.txt      exact compile/link, run and collection commands
+  build.txt            compiler output of that build (empty: no warning)
+  tests.txt            output of the full suite in the MC/DC build: 240 passed
+  llvm-cov-report.txt  llvm-cov report -show-mcdc-summary, full suite
+  llvm-cov-show.txt    llvm-cov show -show-mcdc -show-branches=count, full suite
+  llvm-cov-export.json llvm-cov export, full suite
+  mcdc-summary.txt     per-file totals of mcdc_extract.py, checked against the export
+  mcdc-records.tsv     one row per condition of each MC/DC record (instantiation)
+  mcdc-conditions.tsv  one row per source condition after merging instantiations
+  vectors-by-test.tsv  vectors executed by each test run alone (240 runs,
+                       exactmain.cpp harness, exact test name), registration order
+  mcdc-catalog.tsv     condition-by-condition catalog: class, pair, first test
+                       for each vector of the pair, executed vectors, justification
+  mcdc-catalog-uncovered.md  the conditions without a pair, as in the report
+  provisional-count.txt  provisional_count.py on llvm-cov-show.txt (explains the
+                       preliminary figures 197 and 56; see the report)
+
+lg0/                   separate build with -DRESOLVER1_WRITE_LG=0, full suite;
+                       same files as 2x8/ except the per-test vectors and the catalog
+
+matrix/matrix.txt      summary of the 48 configurations
+matrix/linux/          Linux (AMD Ryzen 7 7700), foundationdb/build:rockylinux9-latest,
+                       clang 19.1.5, libc++: MANIFEST.txt, results.txt and, per
+                       configuration, flags.txt, build.txt (compiler output) and
+                       tests.txt (full suite)
+matrix/mac/            macOS (Apple M3 Pro), Apple clang 15.0.0: same files;
+                       asan-check.txt shows that ASan does not start on this system
+
+diffs/commit1-vs-1233986b.diff   git diff 1233986b 02d354f9
+diffs/code-vs-2a68fc9b.diff      git diff 2a68fc9b 02d354f9, resolver1 without
+                                 Markdown, evaluation/ and tests/evidence/
+diffs/production-vs-f866c98d.txt git diff --stat and blob ids of the production
+                                 files at f866c98d and 02d354f9
+
+scripts/mcdc.sh               build, run and collect one MC/DC measurement
+scripts/mcdc_extract.py       extract and merge MC/DC records; check totals
+scripts/attribute_vectors.sh  run each test alone and record its vectors
+scripts/exactmain.cpp         evidence harness: runs one test by exact name
+scripts/build_catalog.py      build the condition catalog
+scripts/classification.py     class and justification of each condition without a pair
+scripts/provisional_count.py  reproduce the provisional count
+scripts/linux-matrix.sh, linux-matrix-inner.sh  Linux matrix (docker)
+scripts/mac-matrix.sh         macOS matrix

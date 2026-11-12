@@ -1,0 +1,30 @@
+image foundationdb/build:rockylinux9-latest sha256:591bb3f7b9a8c83ca8ddac97f0d05239532d0dd03eef411094e9fc23766879f7
+kernel Linux 6.8.0-138-generic x86_64
+linux-matrix.sh fce25f7e98073a901ced77abd3501660c4fe7fd9285bdfd8f848d6c447b76c35
+linux-matrix-inner.sh ba14e34d067658f3993e85617f23254144992f7e784f92ceb995a8803ee35c15
+compiler clang version 19.1.5
+lg4x2-asan-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-asan-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-asan-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-asan-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-assert-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-assert-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-assert-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-assert-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-ndebug-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-ndebug-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-ndebug-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg4x2-ndebug-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-asan-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-asan-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-asan-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-asan-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-assert-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-assert-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-assert-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-assert-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-ndebug-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-ndebug-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-ndebug-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+lg8x2-ndebug-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+finished 2026-11-12T06:32:21Z

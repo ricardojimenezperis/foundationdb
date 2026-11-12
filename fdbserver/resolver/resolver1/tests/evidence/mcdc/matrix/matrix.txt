@@ -1,0 +1,60 @@
+Validation matrix of commit 02d354f9 (the tree measured for MC/DC).
+Each line: configuration, compiler exit code, compiler warnings, test exit code, test summary, FAIL lines, sanitizer reports.
+Write tasks: lg8x2 = 2 groups of 8 (published configuration), lg4x2 = 2 groups of 4. bs = RESOLVER1_BLOCK_SIZE in bytes.
+
+Linux (AMD Ryzen 7 7700), foundationdb/build:rockylinux9-latest, clang 19.1.5 with libc++:
+  assert = -g -O1; ndebug = -O2 -DNDEBUG; asan = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all
+  lg4x2-asan-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-asan-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-asan-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-asan-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-assert-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-assert-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-assert-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-assert-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ndebug-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ndebug-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ndebug-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ndebug-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-asan-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-asan-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-asan-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-asan-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-assert-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-assert-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-assert-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-assert-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ndebug-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ndebug-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ndebug-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ndebug-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+
+Mac (Apple M3 Pro), macOS 27.0.1, Apple clang 15.0.0:
+  assert = -g; ndebug = -O2 -DNDEBUG; ubsan-gmalloc = -g -O1 -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=undefined, run with DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib
+  lg4x2-assert-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-assert-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-assert-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-assert-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ndebug-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ndebug-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ndebug-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ndebug-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ubsan-gmalloc-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ubsan-gmalloc-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ubsan-gmalloc-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg4x2-ubsan-gmalloc-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-assert-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-assert-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-assert-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-assert-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ndebug-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ndebug-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ndebug-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ndebug-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ubsan-gmalloc-bs1024 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ubsan-gmalloc-bs2048 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ubsan-gmalloc-bs4096 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+  lg8x2-ubsan-gmalloc-bs8192 build=0 warnings=0 run=0 summary=[240 passed, 0 failed] fail=0 sanitizer=0
+
+All configurations also use: -std=c++20 -Wall -Wextra -Wpedantic -I. (Linux adds -stdlib=libc++ -include cstdlib). Exact flags per configuration: <config>/flags.txt.
+Totals: 48 of 48 configurations with 240 passed, 0 failed, no warning and no sanitizer report.

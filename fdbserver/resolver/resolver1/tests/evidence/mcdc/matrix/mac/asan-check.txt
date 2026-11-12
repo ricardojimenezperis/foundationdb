@@ -1,0 +1,10 @@
+Check that AddressSanitizer starts under Apple clang 15.0.0 (clang-1500.3.9.4) on macOS 27.0.1, arm64, Apple M3 Pro.
+
+$ cat a.cpp
+int main(){int*p=new int[2];p[0]=1;int r=p[0];delete[] p;return r-1;}
+$ clang++ -fsanitize=address -g a.cpp -o a && ./a; echo exit=$?
+AddressSanitizer: CHECK failed: sanitizer_malloc_mac.inc:189 "((!asan_init_is_running)) != (0)" (0x0, 0x0) (tid=1771879)
+    <empty stack>
+
+/bin/bash: line 1: 64371 Abort trap: 6           ./a 2>&1
+exit=134

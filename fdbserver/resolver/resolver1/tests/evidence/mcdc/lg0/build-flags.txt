@@ -1,0 +1,9 @@
+# compile and link, one command, from resolver1's directory
+clang++ -fuse-ld=lld -isysroot $(xcrun --show-sdk-path) -I. -std=c++20 -Wall -Wextra -Wpedantic -O0 -fprofile-instr-generate -fcoverage-mapping -fcoverage-mcdc -fcoverage-compilation-dir=. -DRESOLVER1_WRITE_LG=0 pagepool.cpp keystore.cpp bnodestore.cpp tempconflictbtree.cpp testmain.cpp tests/*.cpp -o tests.exe
+# run
+LLVM_PROFILE_FILE=all.profraw ./tests.exe
+# collect
+llvm-profdata merge -o all.profdata all.profraw
+llvm-cov report tests.exe -instr-profile=all.profdata -show-mcdc-summary '-ignore-filename-regex=(tests/|test\.h|testmain|fdbcompat|ResolverBatchTypes|/usr/|SDKs)'
+llvm-cov show tests.exe -instr-profile=all.profdata -show-mcdc -show-branches=count '-ignore-filename-regex=(tests/|test\.h|testmain|fdbcompat|ResolverBatchTypes|/usr/|SDKs)'
+llvm-cov export tests.exe -instr-profile=all.profdata '-ignore-filename-regex=(tests/|test\.h|testmain|fdbcompat|ResolverBatchTypes|/usr/|SDKs)'

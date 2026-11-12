@@ -104,6 +104,10 @@ PASS /resolver/PagePool/ReleaseIsLifo
 PASS /resolver/PagePool/ReleaseBlockFromAnotherPage
 PASS /resolver/PagePool/AvailableBlocks
 PASS /resolver/PagePool/AvailableBlocksOfEmptyPool
+PASS /resolver/PagePool/PageModeLegacyByDefaultAndByName
+PASS /resolver/PagePool/PageModeUnknownThrows
+PASS /resolver/PagePool/PageModeExplicitWithoutPages
+PASS /resolver/PagePool/PageModeBaseWithPages
 PASS /resolver/TempConflictBTree/FindKeyInEmptyTree
 PASS /resolver/TempConflictBTree/FindKeyInSingleLeaf
 PASS /resolver/TempConflictBTree/FindKeyThroughOneInternalLevel
@@ -232,4 +236,8 @@ PASS /resolver/TempConflictBTree/AddWritesKeepsTheReserveOfALongKeyAfterReclaimi
 PASS /resolver/TempConflictBTree/AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf
 PASS /resolver/TempConflictBTree/CheckReadsAndAddWritesResolveAMixedBatch
 PASS /resolver/TempConflictBTree/AddWritesMergesOverlappingWritesOfAMixedBatch
-232 passed, 0 failed
+PASS /resolver/TempConflictBTree/AddWritesUnderPressureAgainstModel
+PASS /resolver/TempConflictBTree/CheckReadsWithNoOperationOnNonemptyTree
+PASS /resolver/TempConflictBTree/AddWritesIntoExpiredRootLeaf
+PASS /resolver/TempConflictBTree/AddWritesInAPoolSmallerThanTheReserve
+240 passed, 0 failed

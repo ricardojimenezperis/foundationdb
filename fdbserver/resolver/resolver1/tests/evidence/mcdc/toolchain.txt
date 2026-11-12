@@ -1,0 +1,21 @@
+MC/DC toolchain (LLVM release build, macOS arm64)
+clang version 20.1.8 (https://github.com/llvm/llvm-project 87f0227cb60147a26a1eeb4fb06e3b505e9c7261)
+Target: arm64-apple-darwin27.0.0
+Thread model: posix
+InstalledDir: <redacted-local-path>/LLVM-20.1.8-macOS-ARM64/bin
+
+LLVM (http://llvm.org/):
+  LLVM version 20.1.8
+  Optimized build.
+
+LLVM release archive: LLVM-20.1.8-macOS-ARM64.tar.xz (github.com/llvm/llvm-project, release llvmorg-20.1.8), SHA-256 a9a22f450d35f1f73cd61ab6a17c6f27d8f6051d56197395c1eb397f0c9bbec4
+SDK: 14.4 (/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk)
+Linker: lld from the same LLVM release (-fuse-ld=lld)
+Platform: macOS 27.0.1 (26A434), arm64, Apple M3 Pro
+
+Test matrices
+Mac: Apple clang version 15.0.0 (clang-1500.3.9.4), same platform
+Linux: image foundationdb/build:rockylinux9-latest sha256:591bb3f7b9a8c83ca8ddac97f0d05239532d0dd03eef411094e9fc23766879f7
+Linux: compiler clang version 19.1.5
+Linux CPU: AMD Ryzen 7 7700
+Linux kernel: Linux 6.8.0-138-generic x86_64

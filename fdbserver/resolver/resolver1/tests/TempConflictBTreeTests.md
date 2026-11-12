@@ -145,8 +145,8 @@ key bytes are being accessed.
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `2a8173902bc33339` |
-  | `tests/tempconflictbtreetests.cpp` | `3e76fd7f2b6c0a99` |
-  | `tests/pagepooltests.cpp` | `059580ab0c6dff71` |
+  | `tests/tempconflictbtreetests.cpp` | `ca7319ebb8f5aebd` |
+  | `tests/pagepooltests.cpp` | `eecfd20aba2b7979` |
   | `tests/keystoretests.cpp` | `f3c274cf80f60567` |
   | `tests/bnodestoretests.cpp` | `a08ffdb64836e858` |
   | `tests/coverage.sh` | `6efaddf0828ff825` |
@@ -446,9 +446,21 @@ later reads.
 | `/resolver/TempConflictBTree/CheckReadsAndAddWritesResolveAMixedBatch` | Five transactions whose begins interleave in key order: reads only, writes only, a read and a write admitted, a read that conflicts with the history and a read below the cut. The statuses, conflict bits, too-old flags and too-old count are exact; only the writes of the write-only and the admitted transactions are stored, at CV 50, with the history unchanged; later reads at version 45 conflict exactly on those writes and not on the keys around them or on the discarded writes, and reads at version 6 still conflict with the history; each begin record names its own read range or write endpoint and its transaction, and the too-old transaction has none. | PASS |
 | `/resolver/TempConflictBTree/AddWritesMergesOverlappingWritesOfAMixedBatch` | An admitted transaction writes two overlapping ranges, a range adjacent to them and an empty range; a read-only transaction; a transaction whose read conflicts writes a range over and beyond them. With equal keys ordered as `ConflictSet.cpp` orders them and with begins first: the entries at CV 50 cover exactly the union, without gaps or overlaps; the history inside it is replaced and the rest, including under the discarded range, is kept; point reads on every key from before the union to past the discarded range conflict only inside it, and reads ending at its begin, starting at its end or over the empty range do not. | PASS |
 
-128 TempConflictBTree tests passed, 0 failed. The full run, including the
-15 PagePool tests, the 41 KeyStore tests and the 48 BNodeStore tests,
-reports 232 passed and 0 failed.
+Write batches under memory pressure, a batch with nothing to descend, an
+expired root leaf and a pool smaller than the write reserve. These cases
+drive `checkReads` and `addWrites` through outcomes that the cases above
+do not produce.
+
+| Test case | Property checked | Result |
+|---|---|---|
+| `/resolver/TempConflictBTree/AddWritesUnderPressureAgainstModel` | 200 batches each of up to 30 sorted, disjoint writes with keys of 3 to 302 bytes, into a pool of four pages, with G = 16 (seed 7) and G = 32 (seed 8): most batches reclaim history while their writes are applied. In one batch of four, the transaction that writes also has a read, and 11 read-only transactions are added, each read at a version from the cut up to below the CV; each status and conflict bit equals a model of the accepted writes, no transaction is too old, and the writes are applied only if the first transaction does not conflict. After every batch the entries above the cut equal the model; the cut ends above 1,100. | PASS |
+| `/resolver/TempConflictBTree/CheckReadsWithNoOperationOnNonemptyTree` | A tree holding `[k(20), k(30))` at CV 10 with `reclaimCV` 5: a batch whose only read is empty (G = 16) gives status 0 and no conflict bit, as the batch reference; a batch whose only read is at version 4, below the cut (G = 32), is marked too old and counted once; the entries are unchanged after both. | PASS |
+| `/resolver/TempConflictBTree/AddWritesIntoExpiredRootLeaf` | A root leaf holding three entries at CV 5, with `reclaimCV` 10: the batch empties the leaf, which becomes the write's destination with no entry, and the write `[k(11), k(13))` is stored there with CV 40 as the only live entry. | PASS |
+| `/resolver/TempConflictBTree/AddWritesInAPoolSmallerThanTheReserve` | Three batches of 20 point writes into a pool of one page. With 2 KiB blocks (32 per page), the pool starts with history in 20 leaves, one write going into each, and is smaller than the reserve of 35 blocks: each write reclaims all the history it can and is still stored, and the cut advances. After every batch the entries above the cut equal the model. With 1 KiB blocks the page holds the reserve; with 4 and 8 KiB blocks the history is not built and the same checks hold. | PASS |
+
+132 TempConflictBTree tests passed, 0 failed. The full run, including the
+19 PagePool tests, the 41 KeyStore tests and the 48 BNodeStore tests,
+reports 240 passed and 0 failed.
 
 The tree checks its internal invariants, the results of its block
 allocations and the results of the key records a write stores with
@@ -522,15 +534,15 @@ gcov, `tempconflictbtree.cpp`:
 
 | Metric | Result |
 |---|---|
-| Lines executed | 90.03% of 1906 |
+| Lines executed | 90.19% of 1906 |
 | Branches executed | 91.10% of 1911 |
-| Taken at least once | 60.81% of 1911 |
+| Taken at least once | 61.85% of 1911 |
 
 llvm-cov source-based coverage:
 
 | File | Regions | Functions | Lines | Branches |
 |---|---|---|---|---|
-| `tempconflictbtree.cpp` | 88.98% of 1370 | 93.20% of 103 | 92.07% of 3151 | 85.48% of 992 |
+| `tempconflictbtree.cpp` | 89.12% of 1370 | 93.20% of 103 | 92.13% of 3151 | 86.49% of 992 |
 | `tempconflictbtree.h` | 88.89% of 18 | 86.67% of 15 | 55.77% of 52 | 100.00% of 2 |
 
 The classification in this section was made on the tree identified in
@@ -540,8 +552,10 @@ evidence of the same run. Line numbers refer to `tempconflictbtree.cpp`.
 These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage would not show that the code is free of errors.
 "Taken at least once" does not mean that every decision was taken in both
-directions. Apple clang 15 provides no condition coverage equivalent to
-GCC's `-fcondition-coverage`.
+directions. Apple clang 15 provides no MC/DC instrumentation; MC/DC was
+measured separately with LLVM/clang 20 and is reported in
+[MCDCCoverage.md](MCDCCoverage.md): 210 instrumented conditions, 153 of
+them with a demonstrated independence pair, 72.86%.
 
 gcov counts branches between the basic blocks of the generated code,
 including the exception edges the compiler adds and the failure paths of
@@ -559,8 +573,10 @@ Two parts of the file are compiled but not run by the tests:
 - `checkReads` is explicitly instantiated for G = 16, 24 and 32
   (lines 2529-2554). The tests run G = 16, and G = 32 in
   `CheckReadsAgainstReference` and
-  `CheckReadsMatchesHasConflictOnWrittenTree`, on batches of reads, and
-  in the two mixed-batch cases; no test runs `checkReads<24>`.
+  `CheckReadsMatchesHasConflictOnWrittenTree`, on batches of reads, in
+  the two mixed-batch cases, in `AddWritesUnderPressureAgainstModel` and
+  in `CheckReadsWithNoOperationOnNonemptyTree`; no test runs
+  `checkReads<24>`.
 
 `checkReads` and its lambdas are separate functions in each instantiation.
 gcov shows the three instantiations on the same source line, with the
@@ -568,20 +584,20 @@ items of `checkReads<16>` first, then `<24>`, then `<32>`: on each such
 line the first third of the items belongs to G = 16, the second to G = 24
 and the last to G = 32. llvm-cov shows each instantiation separately.
 Counting an outcome as covered when any instantiation takes it gives 496
-conditions and 992 branches in the file, 144 of them not covered, as in
-its report; 129 of the conditions, with 18 uncovered branches, are in
+conditions and 992 branches in the file, 134 of them not covered, as in
+its report; 129 of the conditions, with 14 uncovered branches, are in
 `checkReads`, and 37, with all 74 of their branches uncovered, are in the
 three functions of the `RESOLVER1_WRITE_LG` 0 build.
 
-The annotated gcov file marks 502 branch items as never executed and 247
-as taken 0 times: 749 items, which is 1911 minus the 1162 taken at least
+The annotated gcov file marks 500 branch items as never executed and 229
+as taken 0 times: 729 items, which is 1911 minus the 1182 taken at least
 once. 434 of the never-executed items are in the two parts that are not
 run: 136 in the three functions of the other build and 298 in
 `checkReads<24>`.
 
 `llvm-cov show` marks with count 0 the lines 30-32, 332-334, 340, 370, 393, 416-417, 542-642 (except blank and brace-only
 lines), 655-657, 718-719, 726-734, 739-741, 804-805, 814-868, 920-932,
-1426-1430, 1828-1829, 2101-2103, 2161-2162, 2201-2208,
+1426-1430, 1828-1829, 2101-2103, 2201-2208,
 2388-2413 (the closing braces after each `break` in `runRound`, and its
 `default`) and 2501-2502; each is accounted for in
 [Uncovered generated branches](#uncovered-generated-branches). Lines
@@ -601,11 +617,11 @@ build, with 145 conditions. The table lists each condition with its
 llvm-cov counts, summed over the instantiations of `checkReads`, and, for
 each outcome, the first test in registration order whose run alone
 produces it. The tests were run one at a time, each with its own
-profile, on the same build as the evidence, 128 runs; the three test names that
+profile, on the same build as the evidence, 132 runs; the three test names that
 are a prefix of another name also ran that test. A named test shows that
 the outcome occurs; it does not show that the condition alone decided the
-outcome, which would need condition coverage that the toolchain does not
-provide.
+outcome, which would need condition coverage that this toolchain does not
+provide; see [MCDCCoverage.md](MCDCCoverage.md).
 
 The counts assume the values of the tested platform and build:
 `BlockSize` 2048, `sizeof(KeyBlockHeader)` 24, `LeafCapacity` 59,
@@ -620,158 +636,158 @@ of its gcov items.
 
 | Location | Condition | True | False | A test with true | A test with false |
 |---|---|---|---|---|---|
-| `tempconflictbtree.cpp:59` | `!info.tooOld` | 267.1k | 0 | `AddWriteKinds` | - |
-| `tempconflictbtree.cpp:59` | `!transactionConflictStatus[entry.transaction]` | 267.1k | 6 | `AddWriteKinds` | `CheckReadsAndAddWritesResolveAMixedBatch` |
-| `tempconflictbtree.cpp:66` | `pending != endWrites` | 5.28k | 261.8k | `AddWritesAgainstReference` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:66` | `entry.index() <= readWriteBegins[pending].transaction` | 6 | 5.28k | `AddWritesMergesOverlappingWritesOfAMixedBatch` | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:134` | `t.write.first.size() != 0` | 267.1k | 0 | `AddWriteKinds` | - |
+| `tempconflictbtree.cpp:59` | `!info.tooOld` | 279.0k | 0 | `AddWriteKinds` | - |
+| `tempconflictbtree.cpp:59` | `!transactionConflictStatus[entry.transaction]` | 276.9k | 2.09k | `AddWriteKinds` | `CheckReadsAndAddWritesResolveAMixedBatch` |
+| `tempconflictbtree.cpp:66` | `pending != endWrites` | 14.7k | 262.2k | `AddWritesAgainstReference` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:66` | `entry.index() <= readWriteBegins[pending].transaction` | 6 | 14.7k | `AddWritesMergesOverlappingWritesOfAMixedBatch` | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:134` | `t.write.first.size() != 0` | 276.9k | 0 | `AddWriteKinds` | - |
 | `tempconflictbtree.cpp:134` | `t.write.second.size() != 0` | 0 | 0 | - | - |
-| `tempconflictbtree.cpp:143` | `!t.hasSavedLeaf` | 0 | 1.33M | - | `AddWriteKinds` |
-| `tempconflictbtree.cpp:143` | `t.savedLeaf == nullptr` | 955 | 1.33M | `AddWriteAgainstModel` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:145` | `(generation & 1) != 0` | 1.33M | 0 | `AddWriteKinds` | - |
-| `tempconflictbtree.cpp:145` | `generation == t.savedLeafGeneration` | 1.33M | 0 | `AddWriteKinds` | - |
-| `tempconflictbtree.cpp:146` | `t.savedLeaf->mutationEpoch == t.savedLeafEpoch` | 1.33M | 20 | `AddWriteKinds` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
-| `tempconflictbtree.cpp:153` | `destination.leaf != nullptr` | 262.5k | 249 | `AddWriteKinds` | `AddWriteAgainstModel` |
-| `tempconflictbtree.cpp:153` | `destination.needsRightCheck()` | 0 | 262.5k | - | `AddWriteKinds` |
-| `tempconflictbtree.cpp:165` | `g.count < TaskCapacity` | 1.05M | 79 | `AddWriteKinds` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
-| `tempconflictbtree.cpp:165` | `nextGroup < writeLeaves.size()` | 262.6k | 785.5k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:231` | `t.scan->header.count == 1` | 2 | 670 | `AddWriteKinds` | `AddWriteAgainstModel` |
-| `tempconflictbtree.cpp:231` | `hintLeaf(t.scan->left)` | 2 | 0 | `AddWriteKinds` | - |
-| `tempconflictbtree.cpp:245` | `representative != t.representative` | 28 | 266.3k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:245` | `anchor != t.anchor` | 18 | 266.3k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:246` | `writePreparation_[representative].mutation != t.mutation` | 37 | 266.2k | `AddWritesAgainstReference` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:246` | `reclaimCV_ != t.cutoff` | 119 | 266.1k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:247` | `!savedLeafIsCurrent(t)` | 20 | 266.1k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:286` | `before != t.cursor.leaf` | 2 | 267.1k | `AddWritesThrowsWhenThePoolCannotHoldAWrite` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:286` | `cutoff != reclaimCV_` | 861 | 266.3k | `AddWritesReclaimsRoomForLongKeys` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:287` | `!savedLeafIsCurrent(t)` | 0 | 266.3k | - | `AddWriteKinds` |
-| `tempconflictbtree.cpp:304` | `!head` | 643 | 266.4k | `AddWritesAgainstReference` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:304` | `cleanLeafCV_ != reclaimCV_` | 0 | 643 | - | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:305` | `leaf->lastCleanReadBatch != readBatch_` | 38 | 605 | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:305` | `t.cursor.rightCheckRequired` | 0 | 605 | - | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:308` | `head` | 266.4k | 605 | `AddWriteKinds` | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:308` | `cleanExpired(leaf)` | 136 | 266.3k | `AddWritesKeepsTheReserveOfALongKeyAfterReclaimingIt` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:329` | `t.scanRank < t.scan->header.count` | 298 | 0 | `AddWritesAgainstReference` | - |
-| `tempconflictbtree.cpp:330` | `t.scan->cv[t.scan->order[t.scanRank]] <= reclaimCV_` | 17 | 281 | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:397` | `t.cursor.leaf == nullptr` | 191 | 266.9k | `AddWriteAgainstModel` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:397` | `t.found` | 176.4k | 90.5k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:404` | `t.scan->cv[slot] > reclaimCV_` | 90.2k | 0 | `AddWriteKinds` | - |
-| `tempconflictbtree.cpp:404` | `hintKey(t, t.scan->ranges[slot], true, Step::Insert)` | 90.2k | 0 | `AddWriteKinds` | - |
-| `tempconflictbtree.cpp:422` | `t.scan->cv[slot] > reclaimCV_` | 20 | 1 | `AddWriteInsideRangeOfPreviousLeaf` | `AddWriteAfterReclaimedPreviousKey` |
-| `tempconflictbtree.cpp:422` | `hintKey(t, t.scan->ranges[slot], true, Step::Insert)` | 20 | 0 | `AddWriteInsideRangeOfPreviousLeaf` | - |
-| `tempconflictbtree.cpp:500` | `which != 0` | 2.28M | 2.28M | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:500` | `headGroup.first < (headGroup.count + 1) / 2` | 2.01M | 277.9k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:515` | `which == 0` | 2.28M | 2.04k | `AddWriteKinds` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
-| `tempconflictbtree.cpp:515` | `i == group.first` | 2.28M | 1.55k | `AddWriteKinds` | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:533` | `!writePreparation_.empty()` | 457.2k | 2.11k | `AddWriteKinds` | `CleanExpiredRemovesOnlyExpiredEntries` |
-| `tempconflictbtree.cpp:533` | `leaf->firstWrite != UINT32_MAX` | 453.4k | 3.75k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:678` | `nextOther[group.firstWrite] == g` | 262.5k | 38 | `AddWriteKinds` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
-| `tempconflictbtree.cpp:678` | `group.leaf != nullptr` | 262.3k | 194 | `AddWriteKinds` | `AddWriteAgainstModel` |
-| `tempconflictbtree.cpp:687` | `activeWriteCursor_ != nullptr` | 862 | 105 | `AddWriteKinds` | `RefreshSeparatorKeepsFreshSeparator` |
-| `tempconflictbtree.cpp:687` | `activeWriteCursor_->leaf == leaf` | 25 | 837 | `AddWritesThrowsWhenThePoolCannotHoldAWrite` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:693` | `!writeDestinationsActive_` | 105 | 862 | `RefreshSeparatorKeepsFreshSeparator` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:693` | `leaf->firstWrite == UINT32_MAX` | 819 | 43 | `AddWriteKinds` | `AddWritesThrowsWhenThePoolCannotHoldAWrite` |
-| `tempconflictbtree.cpp:701` | `replacement != nullptr` | 40 | 3 | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWritesThrowsWhenThePoolCannotHoldAWrite` |
-| `tempconflictbtree.cpp:701` | `replacement->firstWrite != UINT32_MAX` | 38 | 2 | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
-| `tempconflictbtree.cpp:712` | `!writeDestinationsActive_` | 209 | 846 | `DetachLeaf` | `AddWritesThrowsWhenThePoolCannotHoldAWrite` |
+| `tempconflictbtree.cpp:143` | `!t.hasSavedLeaf` | 0 | 1.38M | - | `AddWriteKinds` |
+| `tempconflictbtree.cpp:143` | `t.savedLeaf == nullptr` | 1.15k | 1.38M | `AddWriteAgainstModel` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:145` | `(generation & 1) != 0` | 1.38M | 0 | `AddWriteKinds` | - |
+| `tempconflictbtree.cpp:145` | `generation == t.savedLeafGeneration` | 1.38M | 8 | `AddWriteKinds` | `AddWritesInAPoolSmallerThanTheReserve` |
+| `tempconflictbtree.cpp:146` | `t.savedLeaf->mutationEpoch == t.savedLeafEpoch` | 1.38M | 20 | `AddWriteKinds` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
+| `tempconflictbtree.cpp:153` | `destination.leaf != nullptr` | 265.5k | 276 | `AddWriteKinds` | `AddWriteAgainstModel` |
+| `tempconflictbtree.cpp:153` | `destination.needsRightCheck()` | 12 | 265.5k | `AddWritesUnderPressureAgainstModel` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:165` | `g.count < TaskCapacity` | 1.05M | 128 | `AddWriteKinds` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
+| `tempconflictbtree.cpp:165` | `nextGroup < writeLeaves.size()` | 265.1k | 786.6k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:231` | `t.scan->header.count == 1` | 4 | 685 | `AddWriteKinds` | `AddWriteAgainstModel` |
+| `tempconflictbtree.cpp:231` | `hintLeaf(t.scan->left)` | 4 | 0 | `AddWriteKinds` | - |
+| `tempconflictbtree.cpp:245` | `representative != t.representative` | 59 | 278.8k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:245` | `anchor != t.anchor` | 21 | 278.8k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:246` | `writePreparation_[representative].mutation != t.mutation` | 462 | 278.3k | `AddWritesAgainstReference` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:246` | `reclaimCV_ != t.cutoff` | 734 | 277.6k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:247` | `!savedLeafIsCurrent(t)` | 28 | 277.6k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:286` | `before != t.cursor.leaf` | 62 | 276.9k | `AddWritesThrowsWhenThePoolCannotHoldAWrite` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:286` | `cutoff != reclaimCV_` | 1.18k | 275.7k | `AddWritesReclaimsRoomForLongKeys` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:287` | `!savedLeafIsCurrent(t)` | 0 | 275.7k | - | `AddWriteKinds` |
+| `tempconflictbtree.cpp:304` | `!head` | 2.31k | 275.5k | `AddWritesAgainstReference` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:304` | `cleanLeafCV_ != reclaimCV_` | 0 | 2.31k | - | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:305` | `leaf->lastCleanReadBatch != readBatch_` | 38 | 2.28k | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:305` | `t.cursor.rightCheckRequired` | 2 | 2.27k | `AddWritesUnderPressureAgainstModel` | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:308` | `head` | 275.5k | 2.27k | `AddWriteKinds` | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:308` | `cleanExpired(leaf)` | 637 | 274.8k | `AddWritesKeepsTheReserveOfALongKeyAfterReclaimingIt` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:329` | `t.scanRank < t.scan->header.count` | 512 | 0 | `AddWritesAgainstReference` | - |
+| `tempconflictbtree.cpp:330` | `t.scan->cv[t.scan->order[t.scanRank]] <= reclaimCV_` | 38 | 474 | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:397` | `t.cursor.leaf == nullptr` | 253 | 276.7k | `AddWriteAgainstModel` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:397` | `t.found` | 177.6k | 99.1k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:404` | `t.scan->cv[slot] > reclaimCV_` | 98.7k | 0 | `AddWriteKinds` | - |
+| `tempconflictbtree.cpp:404` | `hintKey(t, t.scan->ranges[slot], true, Step::Insert)` | 98.7k | 0 | `AddWriteKinds` | - |
+| `tempconflictbtree.cpp:422` | `t.scan->cv[slot] > reclaimCV_` | 75 | 1 | `AddWriteInsideRangeOfPreviousLeaf` | `AddWriteAfterReclaimedPreviousKey` |
+| `tempconflictbtree.cpp:422` | `hintKey(t, t.scan->ranges[slot], true, Step::Insert)` | 75 | 0 | `AddWriteInsideRangeOfPreviousLeaf` | - |
+| `tempconflictbtree.cpp:500` | `which != 0` | 2.36M | 2.36M | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:500` | `headGroup.first < (headGroup.count + 1) / 2` | 2.05M | 311.0k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:515` | `which == 0` | 2.37M | 2.06k | `AddWriteKinds` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
+| `tempconflictbtree.cpp:515` | `i == group.first` | 2.36M | 11.0k | `AddWriteKinds` | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:533` | `!writePreparation_.empty()` | 493.4k | 3.89k | `AddWriteKinds` | `CleanExpiredRemovesOnlyExpiredEntries` |
+| `tempconflictbtree.cpp:533` | `leaf->firstWrite != UINT32_MAX` | 488.5k | 4.93k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:678` | `nextOther[group.firstWrite] == g` | 265.0k | 59 | `AddWriteKinds` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
+| `tempconflictbtree.cpp:678` | `group.leaf != nullptr` | 264.8k | 201 | `AddWriteKinds` | `AddWriteAgainstModel` |
+| `tempconflictbtree.cpp:687` | `activeWriteCursor_ != nullptr` | 973 | 106 | `AddWriteKinds` | `RefreshSeparatorKeepsFreshSeparator` |
+| `tempconflictbtree.cpp:687` | `activeWriteCursor_->leaf == leaf` | 104 | 869 | `AddWritesThrowsWhenThePoolCannotHoldAWrite` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:693` | `!writeDestinationsActive_` | 105 | 974 | `RefreshSeparatorKeepsFreshSeparator` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:693` | `leaf->firstWrite == UINT32_MAX` | 904 | 70 | `AddWriteKinds` | `AddWritesThrowsWhenThePoolCannotHoldAWrite` |
+| `tempconflictbtree.cpp:701` | `replacement != nullptr` | 62 | 8 | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWritesThrowsWhenThePoolCannotHoldAWrite` |
+| `tempconflictbtree.cpp:701` | `replacement->firstWrite != UINT32_MAX` | 59 | 3 | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
+| `tempconflictbtree.cpp:712` | `!writeDestinationsActive_` | 209 | 933 | `DetachLeaf` | `AddWritesThrowsWhenThePoolCannotHoldAWrite` |
 | `tempconflictbtree.cpp:712` | `activeWriteCursor_ == nullptr` | 209 | 0 | `DetachLeaf` | - |
-| `tempconflictbtree.cpp:759` | `writeLeafBufferFirst_ < writeLeafBufferNext_` | 263.1k | 261.7k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:760` | `writeLeafBuffer_[writeLeafBufferHead_].released` | 262.4k | 721 | `AddWriteKinds` | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:775` | `!reclaimUntilAvail(std::max(MinWriteBlocks, writeBlocks))` | 1 | 267.1k | `AddWritesThrowsWhenThePoolCannotHoldAWrite` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:776` | `pool_.availableBlocks() < writeBlocks` | 1 | 0 | `AddWritesThrowsWhenThePoolCannotHoldAWrite` | - |
-| `tempconflictbtree.cpp:803` | `leaf == nullptr` | 191 | 266.9k | `AddWriteAgainstModel` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:803` | `root_ != nullptr` | 0 | 191 | - | `AddWriteAgainstModel` |
-| `tempconflictbtree.cpp:883` | `!found` | 90.5k | 176.4k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:883` | `prevRank(previousLeaf, previous, slot)` | 90.2k | 307 | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:885` | `hasPrevious` | 90.2k | 176.7k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:885` | `previousLeaf->cv[slot] <= reclaimCV_` | 1 | 90.2k | `AddWriteAfterReclaimedPreviousKey` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:886` | `hasPrevious` | 90.2k | 176.7k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:886` | `!expired` | 90.2k | 1 | `AddWriteKinds` | `AddWriteAfterReclaimedPreviousKey` |
-| `tempconflictbtree.cpp:887` | `keyStore_.compareEnd(write.first, previousLeaf->ranges[slot]) < 0` | 2.63k | 87.6k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:938` | `leaf == nullptr` | 1 | 229.2k | `PreserveRightExteriorUpdatesSeparator` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:938` | `rank >= leaf->header.count` | 1 | 229.2k | `PreserveRightExteriorUpdatesSeparator` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:943` | `keyStore_.compareBegin(end, oldRef) <= 0` | 228.0k | 1.17k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:944` | `keyStore_.compareEnd(end, oldRef) >= 0` | 2 | 1.17k | `PreserveRightExteriorUpdatesSeparator` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:759` | `writeLeafBufferFirst_ < writeLeafBufferNext_` | 267.6k | 262.1k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:760` | `writeLeafBuffer_[writeLeafBufferHead_].released` | 264.9k | 2.76k | `AddWriteKinds` | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:775` | `!reclaimUntilAvail(std::max(MinWriteBlocks, writeBlocks))` | 61 | 276.9k | `AddWritesThrowsWhenThePoolCannotHoldAWrite` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:776` | `pool_.availableBlocks() < writeBlocks` | 1 | 60 | `AddWritesThrowsWhenThePoolCannotHoldAWrite` | `AddWritesInAPoolSmallerThanTheReserve` |
+| `tempconflictbtree.cpp:803` | `leaf == nullptr` | 253 | 276.7k | `AddWriteAgainstModel` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:803` | `root_ != nullptr` | 0 | 253 | - | `AddWriteAgainstModel` |
+| `tempconflictbtree.cpp:883` | `!found` | 99.1k | 177.6k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:883` | `prevRank(previousLeaf, previous, slot)` | 98.8k | 343 | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:885` | `hasPrevious` | 98.8k | 177.9k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:885` | `previousLeaf->cv[slot] <= reclaimCV_` | 1 | 98.8k | `AddWriteAfterReclaimedPreviousKey` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:886` | `hasPrevious` | 98.8k | 177.9k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:886` | `!expired` | 98.8k | 1 | `AddWriteKinds` | `AddWriteAfterReclaimedPreviousKey` |
+| `tempconflictbtree.cpp:887` | `keyStore_.compareEnd(write.first, previousLeaf->ranges[slot]) < 0` | 9.53k | 89.2k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:938` | `leaf == nullptr` | 1 | 234.1k | `PreserveRightExteriorUpdatesSeparator` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:938` | `rank >= leaf->header.count` | 1 | 234.1k | `PreserveRightExteriorUpdatesSeparator` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:943` | `keyStore_.compareBegin(end, oldRef) <= 0` | 230.5k | 3.65k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:944` | `keyStore_.compareEnd(end, oldRef) >= 0` | 2 | 3.64k | `PreserveRightExteriorUpdatesSeparator` | `AddWriteKinds` |
 | `tempconflictbtree.cpp:995` | `!found` | 1.77M | 5.32k | `FindKeyThroughOneInternalLevel` | `FindKeyThroughOneInternalLevel` |
 | `tempconflictbtree.cpp:995` | `rank > 0` | 1.76M | 10.4k | `FindKeyThroughOneInternalLevel` | `FindKeyBeforeFirstSeparator` |
-| `tempconflictbtree.cpp:1035` | `!splitBefore` | 268.8k | 20 | `InsertAtFillsRootLeaf` | `InsertAtFillsRootLeaf` |
-| `tempconflictbtree.cpp:1035` | `splitAfter` | 2.83k | 266.0k | `InsertAtFillsRootLeaf` | `InsertAtFillsRootLeaf` |
-| `tempconflictbtree.cpp:1050` | `root_->kind != BNodeKind::Internal` | 10 | 934 | `AddWriteKinds` | `DeferredRefreshMarksEmptyLeaf` |
-| `tempconflictbtree.cpp:1050` | `root_->count != 1` | 918 | 16 | `DeferredRefreshMarksEmptyLeaf` | `DeferredRefreshMarksEmptyInternalChild` |
-| `tempconflictbtree.cpp:1066` | `splitBefore` | 300 | 179.8k | `AddWriteAgainstModel` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:1066` | `!needsSplit(leaf)` | 299 | 1 | `AddWriteAgainstModel` | `EraseAtKeepsSplitOfFullLeaf` |
-| `tempconflictbtree.cpp:1067` | `rank == 0` | 861 | 179.2k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:1067` | `leaf->header.count > 0` | 836 | 25 | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:1083` | `oldParent->header.count == 0` | 6 | 23 | `AddWriteErasesWholeTree` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:1035` | `!splitBefore` | 283.2k | 40 | `InsertAtFillsRootLeaf` | `InsertAtFillsRootLeaf` |
+| `tempconflictbtree.cpp:1035` | `splitAfter` | 2.89k | 280.4k | `InsertAtFillsRootLeaf` | `InsertAtFillsRootLeaf` |
+| `tempconflictbtree.cpp:1050` | `root_->kind != BNodeKind::Internal` | 11 | 987 | `AddWriteKinds` | `DeferredRefreshMarksEmptyLeaf` |
+| `tempconflictbtree.cpp:1050` | `root_->count != 1` | 969 | 18 | `DeferredRefreshMarksEmptyLeaf` | `DeferredRefreshMarksEmptyInternalChild` |
+| `tempconflictbtree.cpp:1066` | `splitBefore` | 305 | 190.3k | `AddWriteAgainstModel` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:1066` | `!needsSplit(leaf)` | 304 | 1 | `AddWriteAgainstModel` | `EraseAtKeepsSplitOfFullLeaf` |
+| `tempconflictbtree.cpp:1067` | `rank == 0` | 3.28k | 187.3k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:1067` | `leaf->header.count > 0` | 3.23k | 49 | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:1083` | `oldParent->header.count == 0` | 6 | 47 | `AddWriteErasesWholeTree` | `AddWriteKinds` |
 | `tempconflictbtree.cpp:1083` | `oldParent->parent() != nullptr` | 5 | 1 | `AddWriteErasesWholeTree` | `EraseAtRemovesChainToRoot` |
-| `tempconflictbtree.cpp:1133` | `node->header.count == 0` | 43 | 874 | `DetachRemovesEmptyParents` | `DetachLeaf` |
-| `tempconflictbtree.cpp:1133` | `node->parent() != nullptr` | 42 | 1 | `DetachRemovesEmptyParents` | `DetachEmptiesTree` |
-| `tempconflictbtree.cpp:1199` | `!keyCV` | 7 | 1.19k | `ReclaimOldestWithNothingToReclaim` | `HasConflictSkipsReclaimedKeysToTheRight` |
-| `tempconflictbtree.cpp:1199` | `!nodeCV` | 6 | 1 | `ReclaimOldestWithNothingToReclaim` | `ReclaimOldestOnlyNodes` |
+| `tempconflictbtree.cpp:1133` | `node->header.count == 0` | 45 | 901 | `DetachRemovesEmptyParents` | `DetachLeaf` |
+| `tempconflictbtree.cpp:1133` | `node->parent() != nullptr` | 44 | 1 | `DetachRemovesEmptyParents` | `DetachEmptiesTree` |
+| `tempconflictbtree.cpp:1199` | `!keyCV` | 67 | 1.58k | `ReclaimOldestWithNothingToReclaim` | `HasConflictSkipsReclaimedKeysToTheRight` |
+| `tempconflictbtree.cpp:1199` | `!nodeCV` | 66 | 1 | `ReclaimOldestWithNothingToReclaim` | `ReclaimOldestOnlyNodes` |
 | `tempconflictbtree.cpp:1236` | `child->header.count > 0` | 49 | 5 | `RemoveEmptyChildPropagatesSplitCleared` | `RemoveEmptyChildPropagatesSplitCleared` |
 | `tempconflictbtree.cpp:1237` | `child->separatorsCV[child->order[0]] <= reclaimCV_` | 48 | 1 | `RemoveEmptyChildPropagatesSplitCleared` | `RefreshSeparatorSkipsExpiredGrandchildren` |
-| `tempconflictbtree.cpp:1387` | `splitBefore` | 3.62k | 330.6k | `RefreshSeparatorRemovesEmptyLeaf` | `CleanExpiredRemovesOnlyExpiredEntries` |
-| `tempconflictbtree.cpp:1387` | `!needsSplit(leaf)` | 8 | 3.61k | `RefreshSeparatorRemovesEmptyLeaf` | `CleanExpiredReportsLeafTransitionOnce` |
-| `tempconflictbtree.cpp:1414` | `splitBefore` | 2 | 172 | `RemoveEmptyChildPropagatesSplitCleared` | `RefreshSeparatorKeepsFreshSeparator` |
+| `tempconflictbtree.cpp:1387` | `splitBefore` | 3.63k | 334.3k | `RefreshSeparatorRemovesEmptyLeaf` | `CleanExpiredRemovesOnlyExpiredEntries` |
+| `tempconflictbtree.cpp:1387` | `!needsSplit(leaf)` | 14 | 3.62k | `RefreshSeparatorRemovesEmptyLeaf` | `CleanExpiredReportsLeafTransitionOnce` |
+| `tempconflictbtree.cpp:1414` | `splitBefore` | 2 | 199 | `RemoveEmptyChildPropagatesSplitCleared` | `RefreshSeparatorKeepsFreshSeparator` |
 | `tempconflictbtree.cpp:1414` | `!needsSplit(parent)` | 2 | 0 | `RemoveEmptyChildPropagatesSplitCleared` | - |
-| `tempconflictbtree.cpp:1434` | `parent->header.count == 0` | 4 | 32 | `DeferredRefreshMarksEmptyInternalChild` | `DeferredRefreshMarksEmptyLeaf` |
+| `tempconflictbtree.cpp:1434` | `parent->header.count == 0` | 4 | 33 | `DeferredRefreshMarksEmptyInternalChild` | `DeferredRefreshMarksEmptyLeaf` |
 | `tempconflictbtree.cpp:1434` | `parent->parent() != nullptr` | 3 | 1 | `DeferredRefreshMarksEmptyInternalChild` | `FirstLiveKey` |
-| `tempconflictbtree.cpp:1519` | `activeWriteCursor_ != nullptr` | 2.52k | 357 | `AddWriteAgainstModel` | `SplitRootLeaf` |
-| `tempconflictbtree.cpp:1519` | `activeWriteCursor_->leaf == oldNode` | 2.52k | 0 | `AddWriteAgainstModel` | - |
-| `tempconflictbtree.cpp:1522` | `writeDestinationsActive_` | 2.52k | 357 | `AddWriteAgainstModel` | `SplitRootLeaf` |
-| `tempconflictbtree.cpp:1522` | `oldNode->firstWrite != UINT32_MAX` | 2.52k | 5 | `AddWriteAgainstModel` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
-| `tempconflictbtree.cpp:1554` | `rank > cutRank` | 2.16k | 714 | `SplitRootLeaf` | `SplitRootLeaf` |
-| `tempconflictbtree.cpp:1554` | `found` | 193 | 521 | `SplitRootLeaf` | `SplitRootLeaf` |
-| `tempconflictbtree.cpp:1554` | `rank == cutRank` | 6 | 187 | `SplitRootLeaf` | `SplitRootLeaf` |
-| `tempconflictbtree.cpp:1623` | `parent != nullptr` | 540.5k | 251.1k | `RefreshSeparatorRemovesEmptyLeaf` | `RefreshSeparatorRemovesEmptyLeaf` |
-| `tempconflictbtree.cpp:1623` | `splitDelta != 0` | 3.25k | 537.2k | `RefreshSeparatorRemovesEmptyLeaf` | `RemoveEmptyChildPropagatesSplitCleared` |
-| `tempconflictbtree.cpp:1623` | `updateSeparator` | 7.44k | 529.8k | `DeferredRefreshThroughInternalChild` | `RemoveEmptyChildPropagatesSplitCleared` |
-| `tempconflictbtree.cpp:1623` | `updateCV` | 327.1k | 202.7k | `SplitRootLeaf` | `RemoveEmptyChildPropagatesSplitCleared` |
+| `tempconflictbtree.cpp:1519` | `activeWriteCursor_ != nullptr` | 2.56k | 357 | `AddWriteAgainstModel` | `SplitRootLeaf` |
+| `tempconflictbtree.cpp:1519` | `activeWriteCursor_->leaf == oldNode` | 2.56k | 0 | `AddWriteAgainstModel` | - |
+| `tempconflictbtree.cpp:1522` | `writeDestinationsActive_` | 2.56k | 357 | `AddWriteAgainstModel` | `SplitRootLeaf` |
+| `tempconflictbtree.cpp:1522` | `oldNode->firstWrite != UINT32_MAX` | 2.56k | 5 | `AddWriteAgainstModel` | `AddWritesKeepsWritesAfterReclamationFreesAPreparedLeaf` |
+| `tempconflictbtree.cpp:1554` | `rank > cutRank` | 2.19k | 732 | `SplitRootLeaf` | `SplitRootLeaf` |
+| `tempconflictbtree.cpp:1554` | `found` | 199 | 533 | `SplitRootLeaf` | `SplitRootLeaf` |
+| `tempconflictbtree.cpp:1554` | `rank == cutRank` | 7 | 192 | `SplitRootLeaf` | `SplitRootLeaf` |
+| `tempconflictbtree.cpp:1623` | `parent != nullptr` | 565.6k | 268.4k | `RefreshSeparatorRemovesEmptyLeaf` | `RefreshSeparatorRemovesEmptyLeaf` |
+| `tempconflictbtree.cpp:1623` | `splitDelta != 0` | 3.31k | 562.3k | `RefreshSeparatorRemovesEmptyLeaf` | `RemoveEmptyChildPropagatesSplitCleared` |
+| `tempconflictbtree.cpp:1623` | `updateSeparator` | 10.3k | 552.0k | `DeferredRefreshThroughInternalChild` | `RemoveEmptyChildPropagatesSplitCleared` |
+| `tempconflictbtree.cpp:1623` | `updateCV` | 341.2k | 210.8k | `SplitRootLeaf` | `RemoveEmptyChildPropagatesSplitCleared` |
 | `tempconflictbtree.cpp:1671` | `slotPresent` | 1.18M | 55.2k | `HasConflictAroundOneRange` | `HasConflictAroundOneRange` |
 | `tempconflictbtree.cpp:1671` | `leaf->cv[slot] > read.version` | 716.0k | 464.8k | `HasConflictAroundOneRange` | `HasConflictAroundOneRange` |
 | `tempconflictbtree.cpp:1672` | `keyStore_.compareEnd(read.begin, leaf->ranges[slot]) < 0` | 29.9k | 686.1k | `HasConflictAroundOneRange` | `HasConflictAroundOneRange` |
-| `tempconflictbtree.cpp:1839` | `!info.readRanges.empty()` | 143.2k | 267.1k | `CheckReadsInEmptyTree` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:1840` | `reads[offsets[t]].version < reclaimCV_` | 4 | 143.2k | `CheckReadsMarksTooOldTransactions` | `CheckReadsInEmptyTree` |
-| `tempconflictbtree.cpp:1856` | `transactionConflictStatus[t]` | 6 | 143.2k | `CheckReadsSkipsConflictingTransactions` | `CheckReadsInEmptyTree` |
+| `tempconflictbtree.cpp:1839` | `!info.readRanges.empty()` | 147.4k | 276.0k | `CheckReadsInEmptyTree` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:1840` | `reads[offsets[t]].version < reclaimCV_` | 5 | 147.4k | `CheckReadsMarksTooOldTransactions` | `CheckReadsInEmptyTree` |
+| `tempconflictbtree.cpp:1856` | `transactionConflictStatus[t]` | 6 | 144.4k | `CheckReadsSkipsConflictingTransactions` | `CheckReadsInEmptyTree` |
 | `tempconflictbtree.cpp:1857` | `read.conflictingKeyRange == nullptr` | 3 | 3 | `CheckReadsSkipsConflictingTransactions` | `CheckReadsSkipsConflictingTransactions` |
-| `tempconflictbtree.cpp:1878` | `lastRead == pointsSize` | 261.8k | 281 | `AddWriteKinds` | `CheckReadsInEmptyTree` |
-| `tempconflictbtree.cpp:1878` | `lastWrite == pointsSize` | 275 | 6 | `CheckReadsInEmptyTree` | `CheckReadsAndAddWritesResolveAMixedBatch` |
-| `tempconflictbtree.cpp:1904` | `transactionInfo[entry.transaction]->tooOld` | 0 | 677.2k | - | `CheckReadsAroundOneRange` |
-| `tempconflictbtree.cpp:1905` | `conflicts[entry.rangeIndex]` | 376 | 676.8k | `CheckReadsSkipsEmptyReads` | `CheckReadsAroundOneRange` |
-| `tempconflictbtree.cpp:1906` | `!transactionConflictStatus[entry.transaction]` | 625.4k | 51.4k | `CheckReadsAroundOneRange` | `CheckReadsSkipsConflictingTransactions` |
+| `tempconflictbtree.cpp:1878` | `lastRead == pointsSize` | 262.1k | 381 | `AddWriteKinds` | `CheckReadsInEmptyTree` |
+| `tempconflictbtree.cpp:1878` | `lastWrite == pointsSize` | 275 | 106 | `CheckReadsInEmptyTree` | `CheckReadsAndAddWritesResolveAMixedBatch` |
+| `tempconflictbtree.cpp:1904` | `transactionInfo[entry.transaction]->tooOld` | 0 | 683.6k | - | `CheckReadsAroundOneRange` |
+| `tempconflictbtree.cpp:1905` | `conflicts[entry.rangeIndex]` | 698 | 682.9k | `CheckReadsSkipsEmptyReads` | `CheckReadsAroundOneRange` |
+| `tempconflictbtree.cpp:1906` | `!transactionConflictStatus[entry.transaction]` | 631.4k | 51.4k | `CheckReadsAroundOneRange` | `CheckReadsSkipsConflictingTransactions` |
 | `tempconflictbtree.cpp:1907` | `reads[entry.rangeIndex].conflictingKeyRange != nullptr` | 30.1k | 21.3k | `CheckReadsSkipsConflictingTransactions` | `CheckReadsReportsEveryConflictingRead` |
-| `tempconflictbtree.cpp:1961` | `length == 0` | 0 | 1.78k | - | `ScatteredPointsRegression` |
-| `tempconflictbtree.cpp:1961` | `!keyStore_.isValid(range)` | 0 | 1.78k | - | `ScatteredPointsRegression` |
-| `tempconflictbtree.cpp:1979` | `length == 0` | 1.77k | 1.77k | `ScatteredPointsRegression` | `ScatteredPointsRegression` |
-| `tempconflictbtree.cpp:1979` | `line == 1` | 5 | 1.77k | `CheckReadsWithLongKeys` | `ScatteredPointsRegression` |
-| `tempconflictbtree.cpp:2051` | `node->separatorsCV[slot] <= reclaimCV_` | 121 | 1.29M | `CheckReadsAgainstReference` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2052` | `node->separatorsCV[slot] != EmptyChildCV` | 115 | 6 | `CheckReadsAgainstReference` | `CheckReadsRoutesPastEmptyChildMarks` |
-| `tempconflictbtree.cpp:2160` | `task.rightCheckRequired` | 0 | 262.4k | - | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2160` | `leaf == nullptr` | 0 | 262.4k | - | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2160` | `leaf->header.count == 0` | 0 | 262.4k | - | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2295` | `task.readIndex < task.opEnd` | 3.04k | 140 | `CheckReadsSkipsConflictingTransactions` | `CheckReadsSkipsEmptyReads` |
-| `tempconflictbtree.cpp:2296` | `!readStillNeeded(task.readIndex)` | 426 | 2.62k | `CheckReadsAgainstReference` | `CheckReadsSkipsConflictingTransactions` |
-| `tempconflictbtree.cpp:2365` | `task.readIndex < task.opEnd` | 12.0k | 27 | `CheckReadsAroundOneRange` | `CheckReadsSkipsEmptyReads` |
-| `tempconflictbtree.cpp:2366` | `!readStillNeeded(task.readIndex)` | 1.96k | 9.99k | `CheckReadsSkipsEmptyReads` | `CheckReadsAroundOneRange` |
-| `tempconflictbtree.cpp:2426` | `next == operationCount` | 261.7k | 722 | `AddWriteKinds` | `AddWritesAgainstReference` |
-| `tempconflictbtree.cpp:2426` | `readWriteBegins[next].isWrite()` | 714 | 8 | `AddWritesAgainstReference` | `CheckReadsAndAddWritesResolveAMixedBatch` |
-| `tempconflictbtree.cpp:2434` | `!completedTasks` | 1.59M | 267.4k | `AddWriteKinds` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2434` | `newTasks.empty()` | 1.59M | 3.23k | `AddWriteKinds` | `CheckReadsReportsEveryConflictingRead` |
-| `tempconflictbtree.cpp:2444` | `tasks[slot].step == Step::Empty` | 0 | 397.3k | - | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2444` | `tasks[slot].step == Step::Done` | 272.4k | 124.9k | `AddWriteKinds` | `CheckReadsReportsEveryConflictingRead` |
-| `tempconflictbtree.cpp:2450` | `created < newTasks.size()` | 69.7k | 327.7k | `CheckReadsReportsEveryConflictingRead` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2450` | `newTasks[created].parent == t` | 10.5k | 59.2k | `CheckReadsReportsEveryConflictingRead` | `CheckReadsAgainstReference` |
-| `tempconflictbtree.cpp:2486` | `active < G` | 269.9k | 5.06k | `AddWriteKinds` | `CheckReadsAgainstReference` |
-| `tempconflictbtree.cpp:2486` | `!pending.empty()` | 4.31k | 265.6k | `CheckReadsAgainstReference` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2515` | `root_ == nullptr` | 193 | 261.9k | `AddWriteAgainstModel` | `AddWriteKinds` |
-| `tempconflictbtree.cpp:2515` | `readWriteBegins.empty()` | 0 | 261.9k | - | `AddWriteKinds` |
+| `tempconflictbtree.cpp:1961` | `length == 0` | 0 | 2.18k | - | `ScatteredPointsRegression` |
+| `tempconflictbtree.cpp:1961` | `!keyStore_.isValid(range)` | 0 | 2.18k | - | `ScatteredPointsRegression` |
+| `tempconflictbtree.cpp:1979` | `length == 0` | 1.83k | 2.52k | `ScatteredPointsRegression` | `ScatteredPointsRegression` |
+| `tempconflictbtree.cpp:1979` | `line == 1` | 351 | 2.17k | `CheckReadsWithLongKeys` | `ScatteredPointsRegression` |
+| `tempconflictbtree.cpp:2051` | `node->separatorsCV[slot] <= reclaimCV_` | 342 | 1.30M | `CheckReadsAgainstReference` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2052` | `node->separatorsCV[slot] != EmptyChildCV` | 336 | 6 | `CheckReadsAgainstReference` | `CheckReadsRoutesPastEmptyChildMarks` |
+| `tempconflictbtree.cpp:2160` | `task.rightCheckRequired` | 2 | 264.9k | `AddWritesUnderPressureAgainstModel` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2160` | `leaf == nullptr` | 0 | 264.9k | - | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2160` | `leaf->header.count == 0` | 3 | 264.9k | `AddWritesIntoExpiredRootLeaf` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2295` | `task.readIndex < task.opEnd` | 3.32k | 330 | `CheckReadsSkipsConflictingTransactions` | `CheckReadsSkipsEmptyReads` |
+| `tempconflictbtree.cpp:2296` | `!readStillNeeded(task.readIndex)` | 426 | 2.90k | `CheckReadsAgainstReference` | `CheckReadsSkipsConflictingTransactions` |
+| `tempconflictbtree.cpp:2365` | `task.readIndex < task.opEnd` | 12.7k | 143 | `CheckReadsAroundOneRange` | `CheckReadsSkipsEmptyReads` |
+| `tempconflictbtree.cpp:2366` | `!readStillNeeded(task.readIndex)` | 2.27k | 10.4k | `CheckReadsSkipsEmptyReads` | `CheckReadsAroundOneRange` |
+| `tempconflictbtree.cpp:2426` | `next == operationCount` | 262.0k | 2.86k | `AddWriteKinds` | `AddWritesAgainstReference` |
+| `tempconflictbtree.cpp:2426` | `readWriteBegins[next].isWrite()` | 2.65k | 214 | `AddWritesAgainstReference` | `CheckReadsAndAddWritesResolveAMixedBatch` |
+| `tempconflictbtree.cpp:2434` | `!completedTasks` | 1.60M | 268.8k | `AddWriteKinds` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2434` | `newTasks.empty()` | 1.59M | 4.63k | `AddWriteKinds` | `CheckReadsReportsEveryConflictingRead` |
+| `tempconflictbtree.cpp:2444` | `tasks[slot].step == Step::Empty` | 0 | 405.3k | - | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2444` | `tasks[slot].step == Step::Done` | 275.0k | 130.4k | `AddWriteKinds` | `CheckReadsReportsEveryConflictingRead` |
+| `tempconflictbtree.cpp:2450` | `created < newTasks.size()` | 72.9k | 332.4k | `CheckReadsReportsEveryConflictingRead` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2450` | `newTasks[created].parent == t` | 12.6k | 60.3k | `CheckReadsReportsEveryConflictingRead` | `CheckReadsAgainstReference` |
+| `tempconflictbtree.cpp:2486` | `active < G` | 272.7k | 5.06k | `AddWriteKinds` | `CheckReadsAgainstReference` |
+| `tempconflictbtree.cpp:2486` | `!pending.empty()` | 4.31k | 268.3k | `CheckReadsAgainstReference` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2515` | `root_ == nullptr` | 195 | 262.3k | `AddWriteAgainstModel` | `AddWriteKinds` |
+| `tempconflictbtree.cpp:2515` | `readWriteBegins.empty()` | 2 | 262.3k | `CheckReadsWithNoOperationOnNonemptyTree` | `AddWriteKinds` |
 
 llvm-cov reports both outcomes covered for every other condition of the
 file outside the three functions of the `RESOLVER1_WRITE_LG` 0 build.
 
 ### Uncovered generated branches
 
-gcov reports 749 untaken branch items: 502 never executed and 247 taken 0
+gcov reports 729 untaken branch items: 500 never executed and 229 taken 0
 times. Each item was matched to its edge in the LLVM IR that Apple clang
 15 generates for `tempconflictbtree.cpp` at `-O0` with `-g`: llvm-cov
 gcov lists the out-edges of a block at the last source line of the block,
@@ -794,11 +810,11 @@ gcov file.
 | Precondition and invariant checks | 110 |
 | Exception paths of calls that can throw | 28 |
 | Exception paths of calls with no throwing operation | 54 |
-| Outcomes taken by `checkReads<16>` only | 22 |
-| Source outcomes not reachable | 47 |
-| Source outcomes reachable but not exercised | 44 |
-| Source outcomes whose reachability was not determined | 10 |
-| Total | 749 |
+| Outcomes taken by `checkReads<16>` only | 15 |
+| Source outcomes not reachable | 46 |
+| Source outcomes reachable but not exercised | 30 |
+| Source outcomes whose reachability was not determined | 12 |
+| Total | 729 |
 
 **Code of the `RESOLVER1_WRITE_LG` 0 build (136 items).** Every item on
 the 55 lines with branches of `addWritesSequential` (lines 538-642),
@@ -894,29 +910,26 @@ allocation. No fault injection was performed.
 | `tempconflictbtree.cpp:2516`, `2517` | 1 and 5 each | `initializeRootTask`, `prefetchBlock` |
 | `tempconflictbtree.cpp:2524`, `2525` | 1 and 5 each | `prepareWriteDestinations`, `cleanPending` |
 
-**Outcomes taken by `checkReads<16>` only (22 items).** These outcomes
+**Outcomes taken by `checkReads<16>` only (15 items).** These outcomes
 are taken by `checkReads<16>` and not by `checkReads<32>`. The tests that
-run G = 32 check random batches of reads on non-empty trees, and the two
-mixed batches, which have no transaction already conflicting before the
-call, no empty key and no expired entry. llvm-cov counts them as covered.
+run G = 32 are the random batches of reads on non-empty trees, the two
+mixed batches, the write batches under pressure (seed 8) and the batch
+whose only read is below the cut; none of them produces these outcomes.
+llvm-cov counts them as covered.
 
 | Location | gcov items | Outcome taken with G = 16 |
 |---|---|---|
 | `tempconflictbtree.cpp:1856` | 8; 10 and 11 never executed | A read of a transaction already conflicting |
-| `tempconflictbtree.cpp:1875`, `1878` | 4; 9 | A batch without reads |
 | `tempconflictbtree.cpp:1932` | 4 | A leaf emptied by its compaction |
-| `tempconflictbtree.cpp:1979`, `1981` | 11; 4 | The second line of a key prefetched, in the next key block |
 | `tempconflictbtree.cpp:1993`, `2026` | 5; 5 | A stored key and a read key of length 0 |
-| `tempconflictbtree.cpp:2031` | 5 | A read key longer than the rest of its line |
-| `tempconflictbtree.cpp:2051` | 8; 10 and 11 never executed | An expired or marked separator at a partition step |
+| `tempconflictbtree.cpp:2051` | 11 | A separator marked with `EmptyChildCV` at a partition step |
 | `tempconflictbtree.cpp:2057`, `2221` | 5; 5 | A separator marked with `EmptyChildCV` |
 | `tempconflictbtree.cpp:2133`, `2145` | 5; 5 | `findPrev` moves to the leaf on the left |
+| `tempconflictbtree.cpp:2160` | 13, 17 | A destination that needs a right check, from the task or from a leaf left empty by its compaction |
 | `tempconflictbtree.cpp:2189` | 4 | A leaf with no entries reached |
 | `tempconflictbtree.cpp:2384` | 20 | A round runs a task in `FindPrev` (line 2397) |
-| `tempconflictbtree.cpp:2506` | 10 | A batch whose first operation is a write |
-| `tempconflictbtree.cpp:2515` | 9 | An empty tree |
 
-**Source outcomes not reachable (47 items).** llvm-cov reports these
+**Source outcomes not reachable (46 items).** llvm-cov reports these
 outcomes as not covered, or, where marked, gcov reports them never
 executed. They cannot occur while the tree's documented invariants and the
 interface preconditions hold.
@@ -926,7 +939,6 @@ interface preconditions hold.
 | `tempconflictbtree.cpp:59` | 1 | A write of a too-old transaction reaching `addWrites` | `buildBeginIndexes` decides a transaction is too old at its first begin, read or write, and records no endpoint of it |
 | `tempconflictbtree.cpp:143` | 1 | `savedLeafIsCurrent` without a saved revision | It is called only after `resetSearch` or `finishInterval` saved one |
 | `tempconflictbtree.cpp:271` | 5, 12 | `switch` of `advance` to `case Step::Previous`, and its `default` | `Previous` is set only immediately before `goto previous` (line 392), so no visit starts in it; every value of `Step` has a case |
-| `tempconflictbtree.cpp:286` (condition of line 287) | 5 | Saved leaf no longer current after `reserveWrite` | With the same cursor leaf and the same cut no block was reclaimed, and the revision was checked or saved in the same visit |
 | `tempconflictbtree.cpp:337` | 2 | `hintKey` returns false for the first live entry of the right neighbour | It returns false only for an empty key, which can only be the first entry of the leftmost leaf |
 | `tempconflictbtree.cpp:404` | 1, 5 | Previous entry in the cursor leaf expired, or with no bytes | The head task compacts the cursor leaf with the current cut (lines 308, 348) and no block is reclaimed before the insertion; a stored range has at least one byte |
 | `tempconflictbtree.cpp:422`, `461` | 4; 2 | `hintKey` of a whole stored range returns false | A stored range has at least one byte |
@@ -948,7 +960,7 @@ interface preconditions hold.
 | `tempconflictbtree.cpp:2444` | 1, 9 | Task `Empty` in `endRound` | Set only by line 2205, which is not reachable |
 | `tempconflictbtree.cpp:2500` | 1, 5; 2501: 0, 1, 4 and 5 never executed | Too many operations (the `std::length_error`) | There is at most one operation per endpoint, and `buildBeginIndexes` throws for 2^31 endpoints or more |
 
-**Source outcomes reachable but not exercised (44 items).** They follow
+**Source outcomes reachable but not exercised (30 items).** They follow
 from inputs that no test provides. Where an item is never executed, it is
 on a line that only that outcome reaches.
 
@@ -956,17 +968,13 @@ on a line that only that outcome reaches.
 |---|---|---|---|
 | `tempconflictbtree.cpp:278` | 2 | Another interval after an empty one | An empty write range followed by another accepted range in the same destination group |
 | `tempconflictbtree.cpp:112`, `134`, `196`, `366` | 1; 0; 0; 2 | A write or a stored entry whose begin is the empty key | A write range that begins at the empty key |
-| `tempconflictbtree.cpp:33`, `2505`, `2515` | 0; 1, 5; 3, 11 | A batch with no operation | A batch with no endpoints, or whose reads are all empty, too old or skipped, and no write |
+| `tempconflictbtree.cpp:33` | 0 | `addWrites` after a batch with no operation | `addWrites` called after `checkReads` on a batch with no endpoints, or whose reads are all empty, too old or skipped, and no write |
 | `tempconflictbtree.cpp:36` | 0 | `addWrites` after a batch with reads only | `addWrites` called after `checkReads` on a batch without writes |
-| `tempconflictbtree.cpp:252`, `291` | 0; 1 | A head task's search reset, or its reservation, leaves no cursor leaf | A reservation that reclaims every node of the tree during `addWrites` |
-| `tempconflictbtree.cpp:153` (no gcov item), `2160` | -; 1, 5, 13, 17 | A destination that needs a right check | A write routed past a separator marked with `EmptyChildCV`, or to a leaf left empty by its compaction during `checkReads` |
-| `tempconflictbtree.cpp:331`, `329` | 1; 334: 0 and 1 never executed | A right neighbour without live entries during a right check | A right check whose right neighbour holds only expired entries |
+| `tempconflictbtree.cpp:252` | 0 | A head task's search reset leaves no cursor leaf | A reservation that reclaims every node of the tree during `addWrites`, before a parked task resets its search |
 | `tempconflictbtree.cpp:347` | 0, and 2, 3 never executed | The cursor leaf left empty when the write moves to the right neighbour | A right check from a leaf whose entries all expired |
 | `tempconflictbtree.cpp:717` | 0 | A redirected subtree with more than one leaf | Reclamation during `addWrites` of a subtree that holds two or more leaves |
 | `tempconflictbtree.cpp:725` | 1; 727, 728, 729: 0 and 1 never executed | The write-leaf buffer grows beyond 2 G entries | More than 2 G buffered write leaves waiting for an earlier slice |
 | `tempconflictbtree.cpp:736` | 1; 739: 0 and 1 never executed | A ring position of the write-leaf buffer reused | More buffered write leaves in one batch than the buffer's capacity |
-| `tempconflictbtree.cpp:775` (condition of line 776) | 2 | The reserve is not reached but the write fits | A pool of fewer than 35 blocks (one 64 KiB page holds 32): each write then reclaims all history it can and is stored |
-| `tempconflictbtree.cpp:1033` | 1 | An entry inserted at or below the cut | A batch whose reservations reclaim blocks written earlier in the same batch, raising the cut to its version |
 | `tempconflictbtree.cpp:1827` | 1, 5; 1828: 0, 1, 4 and 5 never executed | Too many endpoints (the `std::length_error`) | A batch of 2^31 endpoints or more |
 | `tempconflictbtree.cpp:2090` | 2, 14 | A task resumed in `FindPrev` (lines 2101-2103) | A task waiting in `FindPrev` among those suspended when more than G tasks are active |
 
@@ -975,15 +983,17 @@ the llvm-cov counts, which report `case Step::FindPrev` of
 `prefetchAgain` (line 2101) as the only case never taken; the two cases
 that share a body, `InspectNode` and `ScanLeaf`, have one edge.
 
-**Source outcomes whose reachability was not determined (10 items).**
+**Source outcomes whose reachability was not determined (12 items).**
 llvm-cov reports these outcomes as not covered, or gcov reports them never
 executed. No input producing them was identified, and they were not shown
 to be excluded by an invariant.
 
 | Location | gcov items | Outcome | What is known |
 |---|---|---|---|
-| `tempconflictbtree.cpp:145` | 1, 2 | A saved leaf whose block was released (even generation) or reused (another generation) | The tests produce saved-leaf changes only through the mutation epoch (line 146), and an earlier condition of lines 245-247 detects each reclamation of a saved leaf that they produce |
-| `tempconflictbtree.cpp:304` (conditions of lines 304 and 305) | 3, 5 | A task that is not the head parks on a leaf because the cut changed since leaves were compacted, or because its cursor requires a right check | Each reclamation in `addWrites` is followed, in the same visit, by the head task's `cleanExpired`, which records the new cut; right checks are not exercised (see line 2160 above) |
+| `tempconflictbtree.cpp:145` | 1 | A saved leaf whose block is released (even generation) when it is checked | In the tests a saved leaf whose block was reclaimed is checked on line 145 only after the block was handed out again with another generation (`AddWritesInAPoolSmallerThanTheReserve`) |
+| `tempconflictbtree.cpp:286` (condition of line 287) | 5 | Saved leaf no longer current after `reserveWrite`, with the same cursor leaf and the same cut | Not produced by any test. A reservation that changes the saved leaf without moving the cursor or raising the cut was not shown to be impossible |
+| `tempconflictbtree.cpp:304` (condition of line 304) | 3 | A task that is not the head parks on a leaf because the cut changed since leaves were compacted | Each reclamation in `addWrites` is followed, in the same visit, by the head task's `cleanExpired`, which records the new cut |
+| `tempconflictbtree.cpp:331`, `329` | 1; 334: 0 and 1 never executed | A right neighbour without live entries during a right check | Not produced by any test: it needs a right check whose right neighbour holds only expired entries when it is inspected, and the neighbour is not compacted before the loop of line 329; no input producing it was found, and it was not shown to be excluded |
 | `tempconflictbtree.cpp:415` | 1; 417: 0 and 1 never executed | An empty leaf on the left while looking for a previous entry | Leaves left empty by `checkReads` are removed by `cleanPending` before `addWrites` |
 | `tempconflictbtree.cpp:652` | 0; 656: 0 and 1 never executed | Two write leaves with the same destination | The partition of `checkReads` gives each leaf at most one slice in the tested batches |
 
@@ -994,13 +1004,13 @@ to be excluded by an invariant.
   against a reference.
 - Other paths reachable through the interface are not exercised: an empty
   write range followed by another range of the same destination, a write
-  that begins at the empty key, a batch with no operation, destinations
-  that need a right check, growth and reuse of the write-leaf buffer,
-  reclamation during `addWrites` that empties the tree, removes a subtree
-  of several leaves or raises the cut to the batch's version, a pool
-  smaller than the 35-block reserve, a batch of 2^31 endpoints or more,
-  and the resumption of a task suspended in `FindPrev`. See
-  [Uncovered generated branches](#uncovered-generated-branches). Ten
+  that begins at the empty key, `addWrites` after a batch with no
+  operation, growth and reuse of the write-leaf buffer, reclamation during
+  `addWrites` that empties the tree before a parked task resets its search
+  or removes a subtree of several leaves, a batch of 2^31 endpoints or
+  more, and the resumption of a task suspended in `FindPrev`. Destinations
+  that need a right check are exercised with G = 16 only. See
+  [Uncovered generated branches](#uncovered-generated-branches). Twelve
   generated branches have an undetermined reachability; they are listed
   with what is known.
 - `checkReads<24>` and the write path of the `RESOLVER1_WRITE_LG` 0 build
@@ -1018,17 +1028,19 @@ to be excluded by an invariant.
   build other block sizes with `BLOCK_SIZE`.
 - The prefetch hints are not validated beyond their execution: their
   effect on performance is outside the scope of this component.
-- No condition coverage was measured: the toolchain does not provide it.
-  The table of [Independent condition checks](#independent-condition-checks)
-  names, for each outcome, a test that produces it; it does not show that
-  each condition alone decides its decision.
-- Release-style `-O2 -DNDEBUG` builds were tested with LG 8×2 and LG 4×2,
-  using block sizes of 1, 2, 4 and 8 KiB. All eight configurations passed
-  232 of 232 tests. The runs are recorded in `matrix/summary.txt` (SHA-256
-  `073fa663a89a839eeebb92c7bdf587030618c3d9be76d7ed09aec3a851a7dd4f`) of the
-  external package
-  `mac-to-hetzner/2026-11-08-v3-mac-mixed-batch-tests-and-final-catalogs`
-  (by5-exchange commit `b0778c0365`).
+- This catalog measures no condition coverage: Apple clang 15 does not
+  provide it. The table of
+  [Independent condition checks](#independent-condition-checks) names, for
+  each outcome, a test that produces it; it does not show that each
+  condition alone decides its decision. MC/DC, measured with LLVM/clang 20,
+  is reported in [MCDCCoverage.md](MCDCCoverage.md).
+- The full suite was run in two matrices of 24 configurations each,
+  crossing write tasks 2 × 8 and 2 × 4 with blocks of 1, 2, 4 and 8 KiB:
+  on Linux (`foundationdb/build:rockylinux9-latest`, clang 19.1.5 with
+  libc++) with assertions, `-O2 -DNDEBUG` and ASan/UBSan, and on the Mac
+  (Apple clang 15.0.0) with assertions, `-O2 -DNDEBUG` and UBSan under
+  Guard Malloc. Every configuration passed 240 of 240 tests. The runs are
+  recorded in [`evidence/mcdc/matrix/`](evidence/mcdc/matrix/).
 - Concurrent access, and the rule that no reclamation occurs while key
   bytes are accessed, are not tested.
 - The reserve policy after a long key was measured only with the tree
@@ -1039,7 +1051,7 @@ to be excluded by an invariant.
 ## Evidence
 
 - [Test output](evidence/tempconflictbtree-tests.txt): output of
-  `make -B test` for the full suite (232 tests: PagePool, KeyStore,
+  `make -B test` for the full suite (240 tests: PagePool, KeyStore,
   BNodeStore and TempConflictBTree). It is the same run as
   `pagepool-tests.txt`, `keystore-tests.txt` and `bnodestore-tests.txt`.
 - [Coverage summary](evidence/tempconflictbtree-coverage.txt): gcov output

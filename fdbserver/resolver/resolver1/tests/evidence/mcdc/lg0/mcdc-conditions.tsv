@@ -1,0 +1,212 @@
+file	line	decision	conditions	condition	position	status	pair	instantiations	executed_vectors
+bnodestore.h	74	74:10-74:38	2	C1	74:10	pair	{F C = F} / {T C = T}	25	{F C = F} {F C = T} {T C = T}
+bnodestore.h	74	74:10-74:38	2	C2	74:27	constant folded, not counted	-	25	{F C = F} {F C = T} {T C = T}
+bnodestore.h	356	356:2-356:2	2	C1	356:2	no pair	-	1	{F T = T} {T - = T}
+bnodestore.h	356	356:2-356:2	2	C2	356:2	no pair	-	1	{F T = T} {T - = T}
+bnodestore.h	372	372:2-372:2	2	C1	372:2	no pair	-	1	{F T = T} {T - = T}
+bnodestore.h	372	372:2-372:2	2	C2	372:2	no pair	-	1	{F T = T} {T - = T}
+keystore.cpp	234	234:9-235:45	2	C1	234:9	pair	{F F = F} / {T - = T}	1	{F F = F} {F T = T} {T - = T}
+keystore.cpp	234	234:9-235:45	2	C2	235:3	pair	{F F = F} / {F T = T}	1	{F F = F} {F T = T} {T - = T}
+keystore.cpp	247	247:2-247:2	2	C1	247:2	no pair	-	1	{T T = T}
+keystore.cpp	247	247:2-247:2	2	C2	247:2	no pair	-	1	{T T = T}
+keystore.cpp	258	258:9-258:27	2	C1	258:9	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	258	258:9-258:27	2	C2	258:20	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	270	270:7-270:31	2	C1	270:7	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	270	270:7-270:31	2	C2	270:22	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	275	275:7-275:31	2	C1	275:7	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	275	275:7-275:31	2	C2	275:22	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	310	310:9-310:27	2	C1	310:9	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	310	310:9-310:27	2	C2	310:20	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	321	321:7-321:31	2	C1	321:7	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	321	321:7-321:31	2	C2	321:22	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	327	327:6-327:24	2	C1	327:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	327	327:6-327:24	2	C2	327:17	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+keystore.cpp	348	348:21-351:57	4	C1	348:21	pair	{F - - - = F} / {T T F T = T}	1	{F - - - = F} {T F - - = F} {T T F F = F} {T T F T = T} {T T T - = T}
+keystore.cpp	348	348:21-351:57	4	C2	349:3	pair	{T F - - = F} / {T T F T = T}	1	{F - - - = F} {T F - - = F} {T T F F = F} {T T F T = T} {T T T - = T}
+keystore.cpp	348	348:21-351:57	4	C3	350:4	pair	{T T F F = F} / {T T T - = T}	1	{F - - - = F} {T F - - = F} {T T F F = F} {T T F T = T} {T T T - = T}
+keystore.cpp	348	348:21-351:57	4	C4	351:4	pair	{T T F F = F} / {T T F T = T}	1	{F - - - = F} {T F - - = F} {T T F F = F} {T T F T = T} {T T T - = T}
+keystore.cpp	381	381:21-385:60	4	C1	381:21	pair	{F - - - = F} / {T T F T = T}	1	{F - - - = F} {T F - - = F} {T T F F = F} {T T F T = T} {T T T - = T}
+keystore.cpp	381	381:21-385:60	4	C2	382:3	pair	{T F - - = F} / {T T F T = T}	1	{F - - - = F} {T F - - = F} {T T F F = F} {T T F T = T} {T T T - = T}
+keystore.cpp	381	381:21-385:60	4	C3	383:4	pair	{T T F F = F} / {T T T - = T}	1	{F - - - = F} {T F - - = F} {T T F F = F} {T T F T = T} {T T T - = T}
+keystore.cpp	381	381:21-385:60	4	C4	384:4	pair	{T T F F = F} / {T T F T = T}	1	{F - - - = F} {T F - - = F} {T T F F = F} {T T F T = T} {T T T - = T}
+keystore.cpp	407	407:11-409:63	3	C1	407:11	pair	{F - - = F} / {T F T = T}	1	{F - - = F} {T F F = F} {T F T = T} {T T - = T}
+keystore.cpp	407	407:11-409:63	3	C2	408:5	pair	{T F F = F} / {T T - = T}	1	{F - - = F} {T F F = F} {T F T = T} {T T - = T}
+keystore.cpp	407	407:11-409:63	3	C3	409:5	pair	{T F F = F} / {T F T = T}	1	{F - - = F} {T F F = F} {T F T = T} {T T - = T}
+pagepool.cpp	20	20:2-20:2	3	C1	20:2	no pair	-	1	{T T T = T}
+pagepool.cpp	20	20:2-20:2	3	C2	20:2	no pair	-	1	{T T T = T}
+pagepool.cpp	20	20:2-20:2	3	C3	20:2	no pair	-	1	{T T T = T}
+pagepool.cpp	28	28:6-28:57	2	C1	28:6	pair	{F F = F} / {T - = T}	1	{F F = F} {F T = T} {T - = T}
+pagepool.cpp	28	28:6-28:57	2	C2	28:25	pair	{F F = F} / {F T = T}	1	{F F = F} {F T = T} {T - = T}
+pagepool.cpp	39	39:6-39:51	2	C1	39:6	pair	{F F = F} / {T - = T}	1	{F F = F} {F T = T} {T - = T}
+pagepool.cpp	39	39:6-39:51	2	C2	39:37	pair	{F F = F} / {F T = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	59	59:8-59:69	2	C1	59:8	no pair	-	1	(none)
+tempconflictbtree.cpp	59	59:8-59:69	2	C2	59:24	no pair	-	1	(none)
+tempconflictbtree.cpp	66	66:10-66:87	2	C1	66:10	no pair	-	1	(none)
+tempconflictbtree.cpp	66	66:10-66:87	2	C2	66:34	no pair	-	1	(none)
+tempconflictbtree.cpp	134	134:10-134:65	2	C1	134:10	no pair	-	1	(none)
+tempconflictbtree.cpp	134	134:10-134:65	2	C2	134:39	no pair	-	1	(none)
+tempconflictbtree.cpp	143	143:7-143:48	2	C1	143:7	no pair	-	1	(none)
+tempconflictbtree.cpp	143	143:7-143:48	2	C2	143:26	no pair	-	1	(none)
+tempconflictbtree.cpp	145	145:10-146:50	3	C1	145:10	no pair	-	1	(none)
+tempconflictbtree.cpp	145	145:10-146:50	3	C2	145:35	no pair	-	1	(none)
+tempconflictbtree.cpp	145	145:10-146:50	3	C3	146:4	no pair	-	1	(none)
+tempconflictbtree.cpp	153	153:4-153:64	2	C1	153:4	no pair	-	1	(none)
+tempconflictbtree.cpp	153	153:4-153:64	2	C2	153:35	no pair	-	1	(none)
+tempconflictbtree.cpp	165	165:10-165:66	2	C1	165:10	no pair	-	1	(none)
+tempconflictbtree.cpp	165	165:10-165:66	2	C2	165:36	no pair	-	1	(none)
+tempconflictbtree.cpp	231	231:10-231:61	2	C1	231:10	no pair	-	1	(none)
+tempconflictbtree.cpp	231	231:10-231:61	2	C2	231:39	no pair	-	1	(none)
+tempconflictbtree.cpp	236	236:3-236:3	2	C1	236:3	no pair	-	1	(none)
+tempconflictbtree.cpp	236	236:3-236:3	2	C2	236:3	no pair	-	1	(none)
+tempconflictbtree.cpp	245	245:8-247:27	5	C1	245:8	no pair	-	1	(none)
+tempconflictbtree.cpp	245	245:8-247:27	5	C2	245:46	no pair	-	1	(none)
+tempconflictbtree.cpp	245	245:8-247:27	5	C3	246:5	no pair	-	1	(none)
+tempconflictbtree.cpp	245	245:8-247:27	5	C4	246:65	no pair	-	1	(none)
+tempconflictbtree.cpp	245	245:8-247:27	5	C5	247:5	no pair	-	1	(none)
+tempconflictbtree.cpp	275	275:5-275:5	2	C1	275:5	no pair	-	1	(none)
+tempconflictbtree.cpp	275	275:5-275:5	2	C2	275:5	no pair	-	1	(none)
+tempconflictbtree.cpp	286	286:9-287:28	3	C1	286:9	no pair	-	1	(none)
+tempconflictbtree.cpp	286	286:9-287:28	3	C2	286:36	no pair	-	1	(none)
+tempconflictbtree.cpp	286	286:9-287:28	3	C3	287:6	no pair	-	1	(none)
+tempconflictbtree.cpp	304	304:9-305:76	4	C1	304:9	no pair	-	1	(none)
+tempconflictbtree.cpp	304	304:9-305:76	4	C2	304:19	no pair	-	1	(none)
+tempconflictbtree.cpp	304	304:9-305:76	4	C3	305:6	no pair	-	1	(none)
+tempconflictbtree.cpp	304	304:9-305:76	4	C4	305:48	no pair	-	1	(none)
+tempconflictbtree.cpp	308	308:9-308:35	2	C1	308:9	no pair	-	1	(none)
+tempconflictbtree.cpp	308	308:9-308:35	2	C2	308:17	no pair	-	1	(none)
+tempconflictbtree.cpp	329	329:12-330:57	2	C1	329:12	no pair	-	1	(none)
+tempconflictbtree.cpp	329	329:12-330:57	2	C2	330:6	no pair	-	1	(none)
+tempconflictbtree.cpp	397	397:9-397:44	2	C1	397:9	no pair	-	1	(none)
+tempconflictbtree.cpp	397	397:9-397:44	2	C2	397:37	no pair	-	1	(none)
+tempconflictbtree.cpp	404	404:10-404:95	2	C1	404:10	no pair	-	1	(none)
+tempconflictbtree.cpp	404	404:10-404:95	2	C2	404:43	no pair	-	1	(none)
+tempconflictbtree.cpp	422	422:10-422:95	2	C1	422:10	no pair	-	1	(none)
+tempconflictbtree.cpp	422	422:10-422:95	2	C2	422:43	no pair	-	1	(none)
+tempconflictbtree.cpp	500	500:9-500:66	2	C1	500:9	no pair	-	1	(none)
+tempconflictbtree.cpp	500	500:9-500:66	2	C2	500:23	no pair	-	1	(none)
+tempconflictbtree.cpp	515	515:50-515:80	2	C1	515:50	no pair	-	1	(none)
+tempconflictbtree.cpp	515	515:50-515:80	2	C2	515:64	no pair	-	1	(none)
+tempconflictbtree.cpp	518	518:7-518:7	2	C1	518:7	no pair	-	1	(none)
+tempconflictbtree.cpp	518	518:7-518:7	2	C2	518:7	no pair	-	1	(none)
+tempconflictbtree.cpp	533	533:6-533:66	2	C1	533:6	no pair	-	1	{F - = F}
+tempconflictbtree.cpp	533	533:6-533:66	2	C2	533:36	no pair	-	1	{F - = F}
+tempconflictbtree.cpp	617	617:8-617:67	2	C1	617:8	no pair	-	1	{F F = F} {F T = T}
+tempconflictbtree.cpp	617	617:8-617:67	2	C2	617:23	pair	{F F = F} / {F T = T}	1	{F F = F} {F T = T}
+tempconflictbtree.cpp	627	627:8-627:45	2	C1	627:8	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	627	627:8-627:45	2	C2	627:22	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	661	661:2-661:2	2	C1	661:2	no pair	-	1	{T T = T}
+tempconflictbtree.cpp	661	661:2-661:2	2	C2	661:2	no pair	-	1	{T T = T}
+tempconflictbtree.cpp	678	678:7-678:64	2	C1	678:7	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	678	678:7-678:64	2	C2	678:43	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	687	687:6-687:71	2	C1	687:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	687	687:6-687:71	2	C2	687:39	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	693	693:6-693:65	2	C1	693:6	pair	{F F = F} / {T - = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	693	693:6-693:65	2	C2	693:35	pair	{F F = F} / {F T = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	701	701:6-701:69	2	C1	701:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	701	701:6-701:69	2	C2	701:32	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	712	712:6-712:64	2	C1	712:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T T = T}
+tempconflictbtree.cpp	712	712:6-712:64	2	C2	712:35	no pair	-	1	{F - = F} {T T = T}
+tempconflictbtree.cpp	745	745:2-745:2	2	C1	745:2	no pair	-	1	{T T = T}
+tempconflictbtree.cpp	745	745:2-745:2	2	C2	745:2	no pair	-	1	{T T = T}
+tempconflictbtree.cpp	753	753:3-753:3	2	C1	753:3	no pair	-	1	{F T = T} {T - = T}
+tempconflictbtree.cpp	753	753:3-753:3	2	C2	753:3	no pair	-	1	{F T = T} {T - = T}
+tempconflictbtree.cpp	759	759:9-760:53	2	C1	759:9	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	759	759:9-760:53	2	C2	760:6	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	775	775:6-776:40	2	C1	775:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	775	775:6-776:40	2	C2	776:3	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	803	803:6-803:41	2	C1	803:6	no pair	-	1	{F - = F} {T F = F}
+tempconflictbtree.cpp	803	803:6-803:41	2	C2	803:25	no pair	-	1	{F - = F} {T F = F}
+tempconflictbtree.cpp	838	838:12-839:53	2	C1	838:12	no pair	-	1	{T F = F} {T T = T}
+tempconflictbtree.cpp	838	838:12-839:53	2	C2	839:9	pair	{T F = F} / {T T = T}	1	{T F = F} {T T = T}
+tempconflictbtree.cpp	883	883:27-883:75	2	C1	883:27	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	883	883:27-883:75	2	C2	883:37	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	885	885:23-885:74	2	C1	885:23	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	885	885:23-885:74	2	C2	885:38	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	886	886:6-887:69	3	C1	886:6	pair	{F - - = F} / {T T T = T}	1	{F - - = F} {T F - = F} {T T F = F} {T T T = T}
+tempconflictbtree.cpp	886	886:6-887:69	3	C2	886:21	pair	{T F - = F} / {T T T = T}	1	{F - - = F} {T F - = F} {T T F = F} {T T T = T}
+tempconflictbtree.cpp	886	886:6-887:69	3	C3	887:4	pair	{T T F = F} / {T T T = T}	1	{F - - = F} {T F - = F} {T T F = F} {T T T = T}
+tempconflictbtree.cpp	926	926:7-927:54	2	C1	926:7	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	926	926:7-927:54	2	C2	927:5	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	938	938:6-938:51	2	C1	938:6	pair	{F F = F} / {T - = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	938	938:6-938:51	2	C2	938:25	pair	{F F = F} / {F T = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	943	943:6-944:42	2	C1	943:6	pair	{F F = F} / {T - = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	943	943:6-944:42	2	C2	944:4	pair	{F F = F} / {F T = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	995	995:7-995:25	2	C1	995:7	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	995	995:7-995:25	2	C2	995:17	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1035	1035:25-1035:51	2	C1	1035:25	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1035	1035:25-1035:51	2	C2	1035:41	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1050	1050:7-1050:62	2	C1	1050:7	pair	{F F = F} / {T - = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	1050	1050:7-1050:62	2	C2	1050:45	pair	{F F = F} / {F T = T}	1	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	1066	1066:25-1066:57	2	C1	1066:25	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1066	1066:25-1066:57	2	C2	1066:40	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1067	1067:7-1067:42	2	C1	1067:7	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1067	1067:7-1067:42	2	C2	1067:20	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1083	1083:11-1083:73	2	C1	1083:11	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1083	1083:11-1083:73	2	C2	1083:43	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1133	1133:9-1133:61	2	C1	1133:9	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1133	1133:9-1133:61	2	C2	1133:36	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1199	1199:6-1199:23	2	C1	1199:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1199	1199:6-1199:23	2	C2	1199:16	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1236	1236:10-1237:57	2	C1	1236:10	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1236	1236:10-1237:57	2	C2	1237:7	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1387	1387:6-1387:38	2	C1	1387:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1387	1387:6-1387:38	2	C2	1387:21	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1414	1414:6-1414:40	2	C1	1414:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T T = T}
+tempconflictbtree.cpp	1414	1414:6-1414:40	2	C2	1414:21	no pair	-	1	{F - = F} {T T = T}
+tempconflictbtree.cpp	1434	1434:9-1434:65	2	C1	1434:9	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1434	1434:9-1434:65	2	C2	1434:38	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1519	1519:6-1519:74	2	C1	1519:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T T = T}
+tempconflictbtree.cpp	1519	1519:6-1519:74	2	C2	1519:39	no pair	-	1	{F - = F} {T T = T}
+tempconflictbtree.cpp	1522	1522:6-1522:67	2	C1	1522:6	pair	{F - = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1522	1522:6-1522:67	2	C2	1522:34	pair	{T F = F} / {T T = T}	1	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1554	1554:6-1554:50	3	C1	1554:6	pair	{F F - = F} / {T - - = T}	1	{F F - = F} {F T F = F} {F T T = T} {T - - = T}
+tempconflictbtree.cpp	1554	1554:6-1554:50	3	C2	1554:25	pair	{F F - = F} / {F T T = T}	1	{F F - = F} {F T F = F} {F T T = T} {T - - = T}
+tempconflictbtree.cpp	1554	1554:6-1554:50	3	C3	1554:34	pair	{F T F = F} / {F T T = T}	1	{F F - = F} {F T F = F} {F T T = T} {T - - = T}
+tempconflictbtree.cpp	1611	1611:2-1611:2	2	C1	1611:2	no pair	-	1	{T T = T}
+tempconflictbtree.cpp	1611	1611:2-1611:2	2	C2	1611:2	no pair	-	1	{T T = T}
+tempconflictbtree.cpp	1623	1623:4-1623:73	4	C1	1623:4	pair	{F - - - = F} / {T F F T = T}	1	{F - - - = F} {T F F F = F} {T F F T = T} {T F T - = T} {T T - - = T}
+tempconflictbtree.cpp	1623	1623:4-1623:73	4	C2	1623:26	pair	{T F F F = F} / {T T - - = T}	1	{F - - - = F} {T F F F = F} {T F F T = T} {T F T - = T} {T T - - = T}
+tempconflictbtree.cpp	1623	1623:4-1623:73	4	C3	1623:45	pair	{T F F F = F} / {T F T - = T}	1	{F - - - = F} {T F F F = F} {T F F T = T} {T F T - = T} {T T - - = T}
+tempconflictbtree.cpp	1623	1623:4-1623:73	4	C4	1623:64	pair	{T F F F = F} / {T F F T = T}	1	{F - - - = F} {T F F F = F} {T F F T = T} {T F T - = T} {T T - - = T}
+tempconflictbtree.cpp	1629	1629:4-1629:4	2	C1	1629:4	no pair	-	1	{F T = T} {T - = T}
+tempconflictbtree.cpp	1629	1629:4-1629:4	2	C2	1629:4	no pair	-	1	{F T = T} {T - = T}
+tempconflictbtree.cpp	1671	1671:13-1672:69	3	C1	1671:13	pair	{F - - = F} / {T T T = T}	1	{F - - = F} {T F - = F} {T T F = F} {T T T = T}
+tempconflictbtree.cpp	1671	1671:13-1672:69	3	C2	1671:28	pair	{T F - = F} / {T T T = T}	1	{F - - = F} {T F - = F} {T T F = F} {T T T = T}
+tempconflictbtree.cpp	1671	1671:13-1672:69	3	C3	1672:13	pair	{T T F = F} / {T T T = T}	1	{F - - = F} {T F - = F} {T T F = F} {T T T = T}
+tempconflictbtree.cpp	1839	1839:8-1840:43	2	C1	1839:8	pair	{F - = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1839	1839:8-1840:43	2	C2	1840:5	pair	{T F = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1856	1856:9-1857:41	2	C1	1856:9	pair	{F - = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1856	1856:9-1857:41	2	C2	1857:6	pair	{T F = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	1878	1878:4-1878:53	2	C1	1878:4	pair	{F F = F} / {T - = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	1878	1878:4-1878:53	2	C2	1878:30	pair	{F F = F} / {F T = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	1904	1904:7-1905:31	2	C1	1904:7	no pair	-	5	{F F = F} {F T = T}
+tempconflictbtree.cpp	1904	1904:7-1905:31	2	C2	1905:4	pair	{F F = F} / {F T = T}	5	{F F = F} {F T = T}
+tempconflictbtree.cpp	1906	1906:10-1907:58	2	C1	1906:10	pair	{F F = F} / {T - = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	1906	1906:10-1907:58	2	C2	1907:4	pair	{F F = F} / {F T = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	1961	1961:7-1961:47	2	C1	1961:7	no pair	-	5	{F F = F}
+tempconflictbtree.cpp	1961	1961:7-1961:47	2	C2	1961:22	no pair	-	5	{F F = F}
+tempconflictbtree.cpp	1979	1979:8-1979:32	2	C1	1979:8	pair	{F F = F} / {T - = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	1979	1979:8-1979:32	2	C2	1979:23	pair	{F F = F} / {F T = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	2051	2051:7-2052:44	2	C1	2051:7	pair	{F - = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2051	2051:7-2052:44	2	C2	2052:4	pair	{T F = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2160	2160:7-2160:76	3	C1	2160:7	pair	{F F F = F} / {T - - = T}	5	{F F F = F} {F F T = T} {T - - = T}
+tempconflictbtree.cpp	2160	2160:7-2160:76	3	C2	2160:34	no pair	-	5	{F F F = F} {F F T = T} {T - - = T}
+tempconflictbtree.cpp	2160	2160:7-2160:76	3	C3	2160:53	pair	{F F F = F} / {F F T = T}	5	{F F F = F} {F F T = T} {T - - = T}
+tempconflictbtree.cpp	2295	2295:10-2296:39	2	C1	2295:10	pair	{F - = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2295	2295:10-2296:39	2	C2	2296:7	pair	{T F = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2365	2365:10-2366:39	2	C1	2365:10	pair	{F - = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2365	2365:10-2366:39	2	C2	2366:7	pair	{T F = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2425	2425:4-2425:4	2	C1	2425:4	no pair	-	5	{T T = T}
+tempconflictbtree.cpp	2425	2425:4-2425:4	2	C2	2425:4	no pair	-	5	{T T = T}
+tempconflictbtree.cpp	2426	2426:20-2426:77	2	C1	2426:20	pair	{F F = F} / {T - = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	2426	2426:20-2426:77	2	C2	2426:46	pair	{F F = F} / {F T = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	2434	2434:7-2434:42	2	C1	2434:7	pair	{F - = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2434	2434:7-2434:42	2	C2	2434:26	pair	{T F = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2444	2444:8-2444:73	2	C1	2444:8	no pair	-	5	{F F = F} {F T = T}
+tempconflictbtree.cpp	2444	2444:8-2444:73	2	C2	2444:43	pair	{F F = F} / {F T = T}	5	{F F = F} {F T = T}
+tempconflictbtree.cpp	2450	2450:8-2450:66	2	C1	2450:8	pair	{F - = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2450	2450:8-2450:66	2	C2	2450:37	pair	{T F = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2486	2486:10-2486:40	2	C1	2486:10	pair	{F - = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2486	2486:10-2486:40	2	C2	2486:24	pair	{T F = F} / {T T = T}	5	{F - = F} {T F = F} {T T = T}
+tempconflictbtree.cpp	2515	2515:6-2515:49	2	C1	2515:6	pair	{F F = F} / {T - = T}	5	{F F = F} {F T = T} {T - = T}
+tempconflictbtree.cpp	2515	2515:6-2515:49	2	C2	2515:26	pair	{F F = F} / {F T = T}	5	{F F = F} {F T = T} {T - = T}

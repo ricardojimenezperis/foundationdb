@@ -10,11 +10,15 @@ handed out and returned as direct addresses.
 
 The backing is selected by the environment variable
 `RESOLVER1_PAGE_MODE`. Without it, or with `legacy`, the pool is one
-`new Page[]` array, which is what the tests use. The modes `base`, `thp`
-and `hugetlb` map the pool with `mmap` on Linux; on other platforms that
-code is not compiled and the constructor throws `std::runtime_error`, and
-an unknown mode throws `std::invalid_argument`. The mapped backings are
-outside the scope of this validation, which ran on macOS.
+`new Page[]` array; an unknown mode throws `std::invalid_argument`. The
+modes `base`, `thp` and `hugetlb` map the pool with `mmap` on Linux when
+the budget holds at least one whole page. With no whole page the pool is
+an empty `new Page[]` array on every platform. On other platforms the
+mapping code (lines 42-81) is not compiled, and a mapped mode with whole
+pages throws `std::runtime_error`. The tests select every mode. The
+coverage in this report was collected on macOS, so it does not include
+the mapping code; on Linux, `PageModeBaseWithPages` maps a `base` pool in
+the test matrix (see [Limitations](#limitations)).
 
 History reclamation and key-storage lifetime management are outside
 the scope of this component. Their use of the pool is validated in
@@ -33,7 +37,7 @@ the scope of this component. Their use of the pool is validated in
   | `test.h` | `a9a025cd287fd82e` |
   | `testmain.cpp` | `f977afc8cc420126` |
   | `makefile` | `2a8173902bc33339` |
-  | `tests/pagepooltests.cpp` | `059580ab0c6dff71` |
+  | `tests/pagepooltests.cpp` | `eecfd20aba2b7979` |
 
 - Working tree: the files listed above
 - Platform: macOS 27.0.1 (build 26A434), arm64 (Apple M3 Pro)
@@ -121,10 +125,14 @@ bash tests/coverage.sh
 | `/resolver/PagePool/ReleaseBlockFromAnotherPage` | Blocks from different pages, one page apart, can be released and are reused in last-in, first-out order. | PASS |
 | `/resolver/PagePool/AvailableBlocks` | With a budget of two pages and 100 bytes and 1000-byte blocks, `availableBlocks()` starts at the number of blocks in the two whole pages, goes down by one with each allocation, stays at 0 when allocation fails, and goes up by one with each release. | PASS |
 | `/resolver/PagePool/AvailableBlocksOfEmptyPool` | A pool with a budget of `PageSize - 1` reports 0 available blocks, before and after a failed allocation. | PASS |
+| `/resolver/PagePool/PageModeLegacyByDefaultAndByName` | With `RESOLVER1_PAGE_MODE` unset, and set to `legacy`, a pool of two pages has the `Legacy` backing, `backingBytes()` of two pages and every block available, and allocation succeeds. The variable is restored to its previous value after the test, as in the other three `PageMode` tests. | PASS |
+| `/resolver/PagePool/PageModeUnknownThrows` | With `RESOLVER1_PAGE_MODE=huge` the constructor throws `std::invalid_argument`. | PASS |
+| `/resolver/PagePool/PageModeExplicitWithoutPages` | With `base`, `thp` and `hugetlb`, and budgets of `0` and `PageSize - 1`, the pool reports the selected backing, `backingBytes()` 0 and 0 available blocks, and allocation returns `nullptr`, on every platform. | PASS |
+| `/resolver/PagePool/PageModeBaseWithPages` | With `base` and a budget of two pages: on Linux the mapping starts at a 2 MiB boundary, `backingBytes()` is the budget rounded up to whole 2 MiB, every block is available and allocation succeeds; on other platforms the constructor throws `std::runtime_error`. The coverage run on macOS executes the second form; the Linux matrix executes the first. | PASS |
 
-15 PagePool tests passed, 0 failed. The full run, including the 41
-KeyStore tests, the 48 BNodeStore tests and the 128 TempConflictBTree
-tests, reports 232 passed and 0 failed.
+19 PagePool tests passed, 0 failed. The full run, including the 41
+KeyStore tests, the 48 BNodeStore tests and the 132 TempConflictBTree
+tests, reports 240 passed and 0 failed.
 
 The constructor requires a block size of at least `sizeof(FreeBlock)`,
 at most `PageSize`, and a multiple of `alignof(FreeBlock)`. It checks
@@ -146,16 +154,16 @@ gcov, `pagepool.cpp`:
 
 | Metric | Result |
 |---|---|
-| Lines executed | 82.00% of 50 |
-| Branches executed | 76.47% of 34 |
-| Taken at least once | 38.24% of 34 |
+| Lines executed | 98.00% of 50 |
+| Branches executed | 100.00% of 34 |
+| Taken at least once | 79.41% of 34 |
 
 llvm-cov source-based coverage:
 
 | File | Regions | Functions | Lines | Branches |
 |---|---|---|---|---|
-| `pagepool.cpp` | 61.11% of 36 | 100.00% of 4 | 78.85% of 52 | 40.91% of 22 |
-| `pagepool.h` | 57.14% of 7 | 57.14% of 7 | 57.14% of 7 | no branches |
+| `pagepool.cpp` | 97.22% of 36 | 100.00% of 4 | 100.00% of 52 | 95.45% of 22 |
+| `pagepool.h` | 80.00% of 10 | 85.71% of 7 | 85.71% of 7 | 50.00% of 2 |
 
 The classification in this section was made on the tree identified in
 [Source and environment](#source-and-environment), from the Apple clang 15
@@ -165,7 +173,11 @@ These are gcov and llvm-cov metrics. They are not a measurement of
 MC/DC, and full coverage does not show that the code is free of
 errors. "Taken at least once" does not mean that every decision was
 taken in both directions. Apple clang 15 provides no condition
-coverage equivalent to GCC's `-fcondition-coverage`.
+coverage equivalent to GCC's `-fcondition-coverage`. MC/DC was measured
+separately with LLVM/clang 20 and is reported in
+[MCDCCoverage.md](MCDCCoverage.md): `pagepool.cpp` has 7 instrumented
+conditions, 4 of them with an independence pair; the 3 without one are
+the conditions of the `assert` on line 20.
 
 The two tools count different things. gcov counts branches between
 the basic blocks of the generated code, including branches the
@@ -183,9 +195,11 @@ own counters for an inline function, and the linker keeps one copy.
 Reading `pagepool.h` through one object file can therefore report a
 function as not executed although the tests call it. llvm-cov merges
 the counters of all copies. Its execution counts are `blockSize` 7,
-`budget` 5, `allocatedBytes` 10 and `availableBlocks` 264. The other
-three, `backing`, `backingAddress` and `backingBytes`, are not executed:
-no test and no other code in the tree calls them.
+`budget` 5, `allocatedBytes` 18, `availableBlocks` 272, `backing` 8 and
+`backingBytes` 8. `backingAddress` is not executed: only the Linux form
+of `PageModeBaseWithPages` calls it. The condition of `backingBytes`
+(`pagepool.h:49`, `mappedBytes_ == 0`) is true on every execution,
+because only the Linux mapping code sets `mappedBytes_`.
 
 ### Decisions
 
@@ -194,32 +208,36 @@ the selection of the backing, and seven single conditions: the modes
 compared on lines 30, 32 and 34, the two constructor loops (lines 87 and
 89), the mapped backing in the destructor (line 97) and the empty free
 list in `allocateBlock` (line 107). llvm-cov reports both outcomes
-covered for the loops and for line 107: `pagepool.cpp:87` (true 29,
-false 21), `pagepool.cpp:89` (true 9.26k, false 29) and
-`pagepool.cpp:107` (true 23, false 9.17k). Every other outcome that
-depends on `RESOLVER1_PAGE_MODE` is not covered, because no test sets
-it; line 97 is false on every execution (see below).
+covered for every condition except line 97, which is false on every
+execution (see below): `pagepool.cpp:30` (true 3, false 5),
+`pagepool.cpp:32` (true 2, false 3), `pagepool.cpp:34` (true 2, false 1),
+`pagepool.cpp:87` (true 33, false 29), `pagepool.cpp:89` (true 9.51k,
+false 33) and `pagepool.cpp:107` (true 29, false 9.17k).
 
 `mode == nullptr || std::strcmp(mode, "legacy") == 0` (line 28):
 
 | Condition | Input | Other conditions | Decision | Test |
 |---|---|---|---|---|
-| Variable not set | `RESOLVER1_PAGE_MODE` unset | Not evaluated | Legacy | Every test |
-| Mode `legacy` | `RESOLVER1_PAGE_MODE=legacy` | Variable set | Legacy | Not exercised |
-| Another mode | `RESOLVER1_PAGE_MODE=base` | Variable set | Not legacy | Not exercised |
+| Variable not set | `RESOLVER1_PAGE_MODE` unset | Not evaluated | Legacy | Every test outside the `PageMode` tests, and `PageModeLegacyByDefaultAndByName` |
+| Mode `legacy` | `RESOLVER1_PAGE_MODE=legacy` | Variable set | Legacy | `PageModeLegacyByDefaultAndByName` |
+| Another mode | `base`, `thp`, `hugetlb` or `huge` | Variable set | Not legacy | `PageModeUnknownThrows`, `PageModeExplicitWithoutPages`, `PageModeBaseWithPages` |
 
 `backing_ == Backing::Legacy || numPages_ == 0` (line 39):
 
 | Condition | Input | Other conditions | Decision | Test |
 |---|---|---|---|---|
-| Legacy backing | `RESOLVER1_PAGE_MODE` unset | Not evaluated | `new Page[]` | Every test |
-| No whole page | A mapped mode and a budget below `PageSize` | Not legacy | `new Page[]` | Not exercised |
-| Mapped backing with pages | A mapped mode and a budget of one page or more | Not legacy | Mapping, or the `std::runtime_error` on this platform | Not exercised |
+| Legacy backing | `RESOLVER1_PAGE_MODE` unset or `legacy` | Not evaluated | `new Page[]` | Every test outside the `PageMode` tests, and `PageModeLegacyByDefaultAndByName` |
+| No whole page | A mapped mode and a budget below `PageSize` | Not legacy | `new Page[]` | `PageModeExplicitWithoutPages` |
+| Mapped backing with pages | A mapped mode and a budget of one page or more | Not legacy | Mapping, or the `std::runtime_error` on this platform | `PageModeBaseWithPages` |
 
-llvm-cov counts: `pagepool.cpp:28` `mode == nullptr` true 21, false 0;
-`strcmp(mode, "legacy") == 0` true 0, false 0. `pagepool.cpp:39`
-`backing_ == Backing::Legacy` true 21, false 0; `numPages_ == 0` true 0,
-false 0.
+llvm-cov counts: `pagepool.cpp:28` `mode == nullptr` true 22, false 9;
+`strcmp(mode, "legacy") == 0` true 1, false 8. `pagepool.cpp:39`
+`backing_ == Backing::Legacy` true 23, false 7; `numPages_ == 0` true 6,
+false 1. In each table, the first and last rows differ only in the first
+condition and the second and last rows only in the second, with
+different decisions; the MC/DC measurement in
+[MCDCCoverage.md](MCDCCoverage.md) reports these pairs for both
+decisions.
 
 `releaseBlock` has the precondition that the address must be the start
 of a block allocated by this pool and not already released. The tests
@@ -228,7 +246,7 @@ not meet the precondition are outside the interface and are not tested.
 
 ### Uncovered generated branches
 
-gcov reports 21 untaken branches: 14 never executed and 7 taken 0
+gcov reports 7 untaken branches: none never executed and 7 taken 0
 times. Each was matched to its edge in the LLVM IR that Apple clang 15
 generates for `pagepool.cpp` at `-O0` with `-g`: llvm-cov gcov lists the
 out-edges of a block at the last source line of the block, and on each
@@ -246,16 +264,16 @@ false, which happens only when the block-size precondition described in
 |---|---|
 | `pagepool.cpp:20` | branches 1, 2 and 5 |
 
-**Backing selection not exercised (16 items).** Reachable through the
-environment: no test sets `RESOLVER1_PAGE_MODE`.
+**Allocation failure not injected (2 items).** Possible failures that
+no test injects. Each is the exceptional edge of an `invoke` of an
+exception constructor, taken only if constructing the exception object
+itself throws, for example `std::bad_alloc` while copying its message.
+The normal edge of both is taken.
 
-| Location | gcov items | Outcome |
+| Location | gcov item | Outcome |
 |---|---|---|
-| `pagepool.cpp:28` | branch 0; branches 2 and 3 never executed | Variable set, and its comparison with `legacy` |
-| `pagepool.cpp:30`, `32`, `34` | branches 0 and 1 of each, never executed | Comparison with `base`, `thp` and `hugetlb` |
-| `pagepool.cpp:37` | branches 0 and 1, never executed | `invoke` of the `std::invalid_argument` constructor for an unknown mode |
-| `pagepool.cpp:39` | branch 0; branches 2 and 3 never executed | A backing other than `Legacy`, and the test for no whole page |
-| `pagepool.cpp:83` | branches 0 and 1, never executed | `invoke` of the `std::runtime_error` constructor: a mapped mode on a platform other than Linux |
+| `pagepool.cpp:37` | branch 1 | The `std::invalid_argument` constructor for an unknown mode throws |
+| `pagepool.cpp:83` | branch 1 | The `std::runtime_error` constructor for a mapped mode on a platform other than Linux throws |
 
 **Unreachable on the tested platform (2 items).** They do not
 correspond to an outcome that can occur in this build.
@@ -271,28 +289,29 @@ correspond to an outcome that can occur in this build.
   system cannot satisfy is reported by `new Page[numPages_]` with
   `std::bad_alloc`; this was not tested.
 - No allocation-failure injection was performed.
-- The backings selected by `RESOLVER1_PAGE_MODE` (`base`, `thp`,
-  `hugetlb`), the exceptions for an unknown mode and for a mapped mode on
-  a platform other than Linux, and the accessors `backing`,
-  `backingAddress` and `backingBytes` are not tested. The mapped backings
-  are compiled only on Linux.
-- Release-style `-O2 -DNDEBUG` builds were tested with LG 8×2 and LG 4×2,
-  using block sizes of 1, 2, 4 and 8 KiB. All eight configurations passed
-  232 of 232 tests. The runs are recorded in `matrix/summary.txt` (SHA-256
-  `073fa663a89a839eeebb92c7bdf587030618c3d9be76d7ed09aec3a851a7dd4f`) of the
-  external package
-  `mac-to-hetzner/2026-11-08-v3-mac-mixed-batch-tests-and-final-catalogs`
-  (by5-exchange commit `b0778c0365`).
+- The mapping code of the `base`, `thp` and `hugetlb` backings (lines
+  42-81) is compiled only on Linux and is outside the coverage above. In
+  the Linux matrix, `PageModeBaseWithPages` maps a `base` pool of two
+  pages in every configuration. `thp` and `hugetlb` with whole pages, and
+  the failures of `mmap` and `madvise`, are not tested.
+- The full suite was run on the tree identified above in two matrices of
+  24 configurations each: write tasks 2×8 and 2×4, blocks of 1, 2, 4 and
+  8 KiB, and assertions, `-O2 -DNDEBUG` and sanitizers (ASan/UBSan on
+  Linux with clang 19.1.5 and libc++; UBSan with Guard Malloc on macOS
+  with Apple clang 15.0.0). All 48 configurations passed 240 of 240
+  tests, with no compiler warning and no sanitizer report. The runs are
+  in [evidence/mcdc/matrix/](evidence/mcdc/matrix/).
 - Releasing an invalid or already-free block is undefined behaviour in
   this interface and is not tested.
-- No condition coverage was measured: the toolchain does not provide
-  it.
+- Condition coverage is not available with Apple clang 15. MC/DC was
+  measured with LLVM/clang 20 and is reported in
+  [MCDCCoverage.md](MCDCCoverage.md).
 - Results apply to the source and environment identified above.
 
 ## Evidence
 
 - [Test output](evidence/pagepool-tests.txt): output of `make -B test`
-  for the full suite (232 tests, PagePool, KeyStore, BNodeStore and
+  for the full suite (240 tests, PagePool, KeyStore, BNodeStore and
   TempConflictBTree). It is the same run as `keystore-tests.txt`,
   `bnodestore-tests.txt` and `tempconflictbtree-tests.txt`.
 - [Coverage summary](evidence/pagepool-coverage.txt): gcov output after
