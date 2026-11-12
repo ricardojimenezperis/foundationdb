@@ -1,6 +1,11 @@
 #include "test.h"
 #include "pagepool.h"
 #include <cstdint>
+#include <cstdlib>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 TEST_CASE("/resolver/PagePool/AllocationOrder") {
@@ -256,4 +261,103 @@ TEST_CASE("/resolver/PagePool/AvailableBlocksOfEmptyPool") {
 	ASSERT_EQ(pool.availableBlocks(), 0);
 	ASSERT_EQ(pool.allocateBlock(), nullptr);
 	ASSERT_EQ(pool.availableBlocks(), 0);
+}
+
+namespace {
+
+// Sets RESOLVER1_PAGE_MODE for one test, or unsets it with nullptr, and
+// restores the value it had before when the test ends.
+class PageModeGuard {
+public:
+	explicit PageModeGuard(const char* mode) {
+		if (const char* old = std::getenv("RESOLVER1_PAGE_MODE")) previous_ = old;
+		if (mode == nullptr) {
+			unsetenv("RESOLVER1_PAGE_MODE");
+		} else {
+			setenv("RESOLVER1_PAGE_MODE", mode, 1);
+		}
+	}
+	~PageModeGuard() {
+		if (previous_) {
+			setenv("RESOLVER1_PAGE_MODE", previous_->c_str(), 1);
+		} else {
+			unsetenv("RESOLVER1_PAGE_MODE");
+		}
+	}
+	PageModeGuard(const PageModeGuard&) = delete;
+	PageModeGuard& operator=(const PageModeGuard&) = delete;
+
+private:
+	std::optional<std::string> previous_;
+};
+
+} // namespace
+
+// Without RESOLVER1_PAGE_MODE, and with it set to legacy, the pool is an
+// ordinary allocation of whole pages whose blocks are all available.
+TEST_CASE("/resolver/PagePool/PageModeLegacyByDefaultAndByName") {
+	for (const char* mode : {static_cast<const char*>(nullptr), "legacy"}) {
+		PageModeGuard guard(mode);
+		PagePool pool(2 * PageSize, 1024);
+		ASSERT(pool.backing() == PagePool::Backing::Legacy);
+		ASSERT_EQ(pool.backingBytes(), 2 * PageSize);
+		ASSERT_EQ(pool.availableBlocks(), 2 * (PageSize / 1024));
+		ASSERT(pool.allocateBlock() != nullptr);
+	}
+}
+
+// An unknown mode is rejected when the pool is built; there is no fallback.
+TEST_CASE("/resolver/PagePool/PageModeUnknownThrows") {
+	PageModeGuard guard("huge");
+	bool thrown = false;
+	try {
+		PagePool pool(PageSize, 1024);
+	} catch (const std::invalid_argument&) {
+		thrown = true;
+	}
+	ASSERT(thrown);
+}
+
+// An explicit mode with a budget below one page selects that backing, but
+// there is nothing to map: the pool is empty on every platform.
+TEST_CASE("/resolver/PagePool/PageModeExplicitWithoutPages") {
+	const std::pair<const char*, PagePool::Backing> modes[] = {
+		{"base", PagePool::Backing::BasePages},
+		{"thp", PagePool::Backing::TransparentHugePages},
+		{"hugetlb", PagePool::Backing::HugeTLB},
+	};
+	for (const auto& [mode, backing] : modes) {
+		PageModeGuard guard(mode);
+		for (const std::size_t budget : {std::size_t{0}, PageSize - 1}) {
+			PagePool pool(budget, 1024);
+			ASSERT(pool.backing() == backing);
+			ASSERT_EQ(pool.backingBytes(), 0);
+			ASSERT_EQ(pool.availableBlocks(), 0);
+			ASSERT_EQ(pool.allocateBlock(), nullptr);
+		}
+	}
+}
+
+// Base pages with whole pages to map: on Linux the pool is mapped aligned to
+// 2 MiB, rounded up to whole 2 MiB, and all its blocks are available;
+// elsewhere an explicit backing is rejected.
+TEST_CASE("/resolver/PagePool/PageModeBaseWithPages") {
+	PageModeGuard guard("base");
+#ifdef __linux__
+	PagePool pool(2 * PageSize, 1024);
+	constexpr std::size_t HugeBytes = 2 * 1024 * 1024;
+	ASSERT(pool.backing() == PagePool::Backing::BasePages);
+	ASSERT_EQ(reinterpret_cast<std::uintptr_t>(pool.backingAddress()) % HugeBytes, 0);
+	ASSERT_EQ(pool.backingBytes(), (2 * PageSize + HugeBytes - 1) / HugeBytes * HugeBytes);
+	ASSERT_EQ(pool.availableBlocks(), 2 * (PageSize / 1024));
+	ASSERT(pool.allocateBlock() != nullptr);
+#else
+	bool thrown = false;
+	try {
+		PagePool pool(2 * PageSize, 1024);
+	} catch (const std::runtime_error&) {
+		thrown = true;
+	}
+	ASSERT(thrown);
+#endif
 }

@@ -4854,3 +4854,159 @@ TEST_CASE("/resolver/TempConflictBTree/AddWritesMergesOverlappingWritesOfAMixedB
 		checkOverlappingAndEmptyWrites<32>(equalKeys);
 	}
 }
+
+namespace {
+
+// Batches of up to 30 sorted, disjoint writes, with keys of 3 to 302 bytes,
+// into a pool of four pages: most batches reclaim history while their writes
+// are applied, so the write tasks meet released, split and emptied leaves.
+// In one batch of four, the first transaction also reads, and its writes are
+// applied only if it does not conflict. After every batch the live entries
+// equal a model of the accepted writes, and each read at a version at or
+// above the reclaim cut conflicts exactly as the model says.
+template<uint8_t G>
+void checkWriteBatchesUnderPressure(std::uint32_t seed) {
+	TestTree t(4 * PageSize);
+	std::vector<Entry> model;
+	std::uint32_t state = seed;
+	auto next = [&state]() {
+		state = state * 1103515245u + 12345u;
+		return state >> 8;
+	};
+	auto keyOf = [](unsigned v) {
+		Bytes k = wideKey(v);
+		k.resize(3 + v % 300, static_cast<uint8_t>('a' + v % 26));
+		return k;
+	};
+	auto expectedConflict = [&model](const Bytes& b, const Bytes& e, Version version) {
+		bool expected = false;
+		for (const Entry& w : model) {
+			expected |= w.begin < e && b < w.end && w.cv > version;
+		}
+		return expected;
+	};
+	for (unsigned n = 0; n < 200; ++n) {
+		const Version cv = 1000 + 2 * n;
+		std::vector<std::pair<Bytes, Bytes>> writes;
+		unsigned position = next() % 50;
+		while (position < 1990 && writes.size() < 30) {
+			const unsigned length = 1 + next() % (next() % 6 == 0 ? 150 : 5);
+			const unsigned last = std::min(position + length, 1999u);
+			writes.emplace_back(keyOf(position), keyOf(last));
+			position = last + next() % (next() % 3 == 0 ? 200 : 20);
+		}
+		std::vector<BatchTransaction> batch(1);
+		const Version cut = t.tree.reclaimCV();
+		if (n % 4 == 3) {
+			for (unsigned r = 0; r < 12; ++r) {
+				const unsigned b = next() % 2000;
+				BatchTransaction tx;
+				tx.reads.emplace_back(keyOf(b), keyOf(std::min(b + 1 + next() % 40, 2000u)));
+				tx.version = cut + static_cast<Version>(next() % (cv - cut));
+				tx.report = true;
+				batch.push_back(tx);
+			}
+			batch[0] = batch.back();
+			batch.pop_back();
+		}
+		const BatchResult result = checkBatch<G>(t, batch, writes, cv);
+		for (std::size_t i = 0; i < batch.size(); ++i) {
+			ASSERT(!result.tooOld[i]);
+			if (batch[i].reads.empty()) {
+				ASSERT_EQ(result.status[i], 0);
+				continue;
+			}
+			const bool expected = expectedConflict(batch[i].reads[0].first, batch[i].reads[0].second,
+												   batch[i].version);
+			ASSERT_EQ(bool(result.status[i]), expected);
+			ASSERT_EQ(bool(result.conflicts[i]), expected);
+		}
+		if (result.status[0] == 0) {
+			for (const auto& [b, e] : writes) {
+				model = applyWrite(model, b, e, cv);
+			}
+		}
+		model = liveEntries(model, t.tree.reclaimCV());
+		checkSameEntries(liveEntries(checkStructure(t), t.tree.reclaimCV()), model);
+	}
+	ASSERT(t.tree.reclaimCV() > 1100);
+}
+
+} // namespace
+
+TEST_CASE("/resolver/TempConflictBTree/AddWritesUnderPressureAgainstModel") {
+	checkWriteBatchesUnderPressure<16>(7);
+	checkWriteBatchesUnderPressure<32>(8);
+}
+
+// A batch whose reads are all empty, or all too old, leaves no operation for
+// the descent, even though the tree holds history: statuses and conflicts
+// are as the reference says, and the tree is unchanged.
+TEST_CASE("/resolver/TempConflictBTree/CheckReadsWithNoOperationOnNonemptyTree") {
+	TestTree t;
+	t.addLeaf({}, {{key(20), key(30), 10}});
+	t.build(3);
+	Access::setReclaimCV(t.tree, 5);
+	const std::vector<Entry> before = checkStructure(t);
+	const std::vector<BatchTransaction> empty = {{{{key(25), key(25)}}, 5, true}};
+	const BatchResult emptyResult = checkBatch<16>(t, empty);
+	checkBatchAgainstReference(t, empty, emptyResult);
+	ASSERT_EQ(emptyResult.status, (std::vector<uint8_t>{0}));
+	ASSERT_EQ(emptyResult.conflicts, (std::vector<uint8_t>{0}));
+	const std::vector<BatchTransaction> old = {{{{key(25), key(26)}}, 4, true}};
+	const BatchResult oldResult = checkBatch<32>(t, old);
+	ASSERT_EQ(oldResult.status, (std::vector<uint8_t>{1}));
+	ASSERT_EQ(oldResult.tooOld, (std::vector<bool>{true}));
+	ASSERT_EQ(oldResult.tooOldWithinWindow, 1);
+	checkSameEntries(checkStructure(t), before);
+}
+
+// A write into a root leaf whose entries have all expired: the read phase
+// empties the leaf, which becomes the write's destination with no entry,
+// and the write is stored there with its CV.
+TEST_CASE("/resolver/TempConflictBTree/AddWritesIntoExpiredRootLeaf") {
+	TestTree t;
+	t.addLeaf({}, withCVs(entriesFrom(10, 3, 0), {5, 5, 5}));
+	t.build(3);
+	Access::setReclaimCV(t.tree, 10);
+	checkBatch<16>(t, {BatchTransaction{}}, {{key(11), key(13)}}, 40);
+	checkSameEntries(liveEntries(checkStructure(t), 10), {{key(11), key(13), 40}});
+}
+
+// Batches of writes into a pool of one page. With 2 KiB blocks or larger
+// the page is smaller than the reserve of 35 blocks: each write reclaims all
+// the history it can and is still stored, because the pool holds the five
+// blocks a write of short keys needs. Where the page has room for it, the
+// pool starts with history in 20 leaves, one write going into each. The
+// entries above the reclaim cut equal the model after every batch. With
+// 1 KiB blocks the page holds the reserve, and the same checks hold.
+TEST_CASE("/resolver/TempConflictBTree/AddWritesInAPoolSmallerThanTheReserve") {
+	TestTree t(PageSize);
+	std::vector<Entry> model;
+	const unsigned leaves = PageSize / BlockSize >= 32 ? 20 : 0;
+	Version cv = 1;
+	for (unsigned i = 0; i < leaves; ++i, ++cv) {
+		const unsigned lower = 10 + 10 * i;
+		const std::vector<Entry> entries = withCVs(entriesFrom(lower, 2, 0), {cv, cv});
+		t.addLeaf(i == 0 ? Bytes{} : key(lower), entries);
+		model.insert(model.end(), entries.begin(), entries.end());
+	}
+	if (leaves != 0) {
+		t.build(8);
+	}
+	for (unsigned batch = 0; batch < 3; ++batch, ++cv) {
+		std::vector<std::pair<Bytes, Bytes>> writes;
+		for (unsigned i = 0; i < 20; ++i) {
+			const Bytes k = key(11 + 10 * i + batch);
+			writes.emplace_back(k, keyAfter(k));
+			model = applyWrite(model, k, keyAfter(k), cv);
+		}
+		checkBatch<16>(t, {BatchTransaction{}}, writes, cv);
+		const Version cut = t.tree.reclaimCV();
+		model = liveEntries(model, cut);
+		checkSameEntries(liveEntries(checkStructure(t), cut), model);
+	}
+	if (PageSize / BlockSize < 35) {
+		ASSERT(t.tree.reclaimCV() > 0);
+	}
+}
